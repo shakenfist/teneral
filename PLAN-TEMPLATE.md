@@ -1,0 +1,643 @@
+# Title for the plan
+
+## Prompt
+
+Before responding to questions or discussion points in this
+document, explore this repository thoroughly. Read the relevant
+files and ground your answers in what they actually say. Do not
+speculate about the repository when you could read it instead.
+Flag any uncertainty explicitly rather than guessing.
+
+This repository holds `teneral`: a single daemon that answers a
+request from an identified client arriving on a known interface
+with content determined by that client's identity. DHCP, DNS,
+TFTP and eventually instance metadata are front-ends over one
+binding store. It exists to replace the one-dnsmasq-per-network
+deployment model, and to be half of a home IPAM.
+
+Consult `AGENTS.md` for the conventions and the invariants that
+are not visible in the code, and `ARCHITECTURE.md` for the shape
+of the system. `PUSH-AUDIT.md` is the pre-push review runbook
+that every plan's final phase runs.
+
+Four things make planning here different from planning in an
+ordinary service, and all four should shape any plan written
+from this template:
+
+* **A wrong answer is silent.** Nothing here returns an error to
+  a user. A duplicated lease, a stale reservation or a name
+  answered from the wrong network produces a client that cannot
+  reach anything, hours later, with no stack trace. Plans state
+  how a change would be *detected* in the field, not only how it
+  is tested.
+* **Cross-network isolation is the core security property.** The
+  daemon deliberately holds every network's bindings in one
+  process, which is the whole point and also the whole risk.
+  Two tenants may legitimately use the same address. Any change
+  that touches lookup, dispatch or the binding store says what
+  keeps one network's answers out of another's, and the eventual
+  metadata front-end serves credentials, so a cross-network leak
+  there is a credential leak.
+* **The input is hostile and unauthenticated.** Every byte of a
+  DHCP or DNS request arrives from an unauthenticated client on a
+  network segment. Rust removes the memory-safety class but not
+  the logic class: a parser that trusts a length, a lease table
+  that trusts a client identifier, or an option encoder that
+  trusts its own arithmetic are all still reachable.
+* **No GPL code may be copied in.** dnsmasq is GPL-2/3 and
+  Technitium DNS Server is GPL-3; this repository is Apache-2.0.
+  Reading either to build a work list is fine. Behaviour that no
+  RFC specifies is derived by observing a running dnsmasq, not by
+  reading its source, and `docs/provenance.md` records which RFC
+  or which observed-behaviour test each behaviour came from. A
+  plan that adds behaviour says which it is.
+
+<!-- shared-block: plan-file-conventions v2 -->
+Plan file conventions (shared block; do not edit -- the canonical
+copy lives in shakenfist/development at
+`templates/shared-blocks/plan-file-conventions.md`):
+
+- All planning documents live in `docs/plans/`.
+- Detailed planning gets one plan file per phase. Phase files are
+  named for their master plan, sit in the same directory as it,
+  and append `-phase-NN-descriptive` before the `.md` extension.
+- The master plan tracks its phases in a table under its Execution
+  section. `Merged` is last, and the push audit is the last row,
+  for the reasons given in `plan-push-audit-phase`:
+
+  | Phase | Plan | Status | Merged |
+  |-------|------|--------|--------|
+  | 1. Schema migration | PLAN-thing-phase-01-schema.md | Not started | |
+  | 2. Public API | PLAN-thing-phase-02-api.md | Not started | |
+  | 3. Push audit | - | Not started | |
+
+- One commit per logical change, and at minimum one commit per
+  phase. Unrelated changes are not batched into a single commit.
+  Each commit is self-contained: it builds, passes tests, and has
+  a message explaining what changed and why.
+<!-- shared-block-end -->
+
+**In this repository.** The fleet default applies unchanged:
+plans live in `docs/plans/`, and detailed planning gets one phase
+file per phase, named for its master plan. This project is large
+enough to want phase files, so it uses them. The plan index is
+`docs/plans/index.md`.
+
+## Situation
+
+What is true today, with the measurements that make the case. A
+plan whose Situation section is entirely adjectives is a plan
+nobody can check afterwards.
+
+## Mission and problem statement
+
+What this plan is for, in a paragraph, and what it deliberately
+does not cover.
+
+## Open questions
+
+Anything the plan cannot decide on its own, with the decision it
+would take by default if nobody answers.
+
+## Execution
+
+The phases, as a table. Where a phase is a section below rather
+than a file, the table names the section.
+
+<!-- shared-block: plan-status-vocabulary v1 -->
+Plan status vocabulary (shared block; do not edit -- the canonical
+copy lives in shakenfist/development at
+`templates/shared-blocks/plan-status-vocabulary.md`):
+
+A status cell -- in the master plan's own Execution phase table, and
+in the row `docs/plans/index.md` carries for the plan -- holds
+exactly one of these terms and nothing else:
+
+- `Proposed` -- written down as a concept, not yet scheduled.
+- `Not started` -- scheduled, but no work has begun.
+- `In progress` -- work has begun and has not finished.
+- `Blocked` -- cannot proceed until something outside the plan
+  changes. Say what, in the plan.
+- `Complete` -- the work is done.
+- `Abandoned` -- deliberately dropped without being done.
+- `Superseded` -- replaced by another plan, which the plan names.
+
+The term is the whole cell. No dates, no phase arithmetic, no
+parenthetical qualifiers, no summary of what happened: a status is
+read to decide whether a plan still wants attention, and prose in
+that column has repeatedly grown until it could no longer be read
+either by a person scanning the table or by tooling. Detail belongs
+in the plan file, and a one-line summary belongs in the index's own
+Intent column.
+
+Matching is case-insensitive, so `In Progress` is accepted, but the
+spelling above is the one to write.
+<!-- shared-block-end -->
+
+**In this repository.** The same term is written twice: once in
+the master plan's own phase table, and once in the row the plan
+carries in `docs/plans/index.md`. The index row is the whole-plan
+status, so it only reaches `Complete` once every phase has been
+completed, abandoned or superseded. `Proposed` is the right term
+for a phase that is written down but deliberately not scheduled,
+and this project has several: do not promote one to `Not started`
+to make the table look busier.
+
+<!-- shared-block: plan-push-audit-phase v4 -->
+Push audit phase (shared block; do not edit -- the canonical
+copy lives in shakenfist/development at
+`templates/shared-blocks/plan-push-audit-phase.md`):
+
+- Every master plan ends with a phase that runs the repository's
+  `PUSH-AUDIT.md` over the whole plan's work. It is the last row of
+  the Execution table and it is not optional. The rule binds every
+  plan that carries the phase, which is decidable from the plan file
+  alone: a plan that is already `Complete`, `Abandoned` or
+  `Superseded` and does not carry the phase is not reopened to
+  acquire one, and a plan that has the phase runs it even if it
+  reaches `Complete` before the phase does.
+- That phase audits the accumulated diff of every phase in the plan
+  against the default branch, not the diff of the last phase alone.
+  Auditing one phase at a time would miss what the phases did to
+  each other -- the duplicated helper that only exists once phases
+  three and six have both landed, the doc page that phase two made
+  wrong and phase five never revisited.
+- Once the plan's phases have merged, a diff against the default
+  branch is empty and would read as a clean audit. The range is not
+  reliably derivable after the fact either: unrelated work lands on
+  the default branch between phases, so anything anchored on "since
+  the plan file appeared" is far too wide. It has to be recorded. As
+  each phase lands, what put it on the default branch goes into the
+  plan: the merge commit of its pull request, whose diff against its
+  first parent is the whole of what landed, or -- where the phase
+  landed directly -- every commit of the phase, or its `first..last`
+  range. A single commit is only ever enough when it is a merge
+  commit.
+- Where the Execution phases are a table, that record is a `Merged`
+  column, added last so that a row which omits it still reaches
+  `Status`; where they are prose sections it is a `Merged:` line in
+  the phase's own section. The `Status` column keeps its single
+  vocabulary term and nothing else (see `plan-status-vocabulary`).
+  A phase that landed in another repository records `<repo> <sha>
+  (#pr)` and is audited against that repository's default branch, as
+  part of the pull request that lands it; the plan's own push-audit
+  phase cites that audit rather than re-running it.
+- Phases that landed before the plan started recording them are
+  reconstructed rather than left blank. Recover what you can from
+  `gh pr list --state merged` and `git rev-list --first-parent`, and
+  say in the plan that the range was reconstructed. Do not trust a
+  path-filtered `git log` on its own: it lists the commits that
+  touched a path without saying which arrived directly and which
+  arrived inside a pull request, and recording a commit that came in
+  under a merge audits one commit of that pull request rather than
+  the pull request. A reconstructed record may be a summary table in
+  the audit phase's own section rather than a column or a line in
+  the Execution table, which keeps retrospective archaeology out of
+  a table that tracks live status. Where a phase accreted over
+  months of unrelated commits and no range is recoverable, say that
+  instead and name the paths the audit read -- an audit that says
+  what it could not scope is a result; one that silently audits
+  nothing is not.
+- Findings land as their own pull request against the default
+  branch, and the plan is not complete until they are resolved or
+  explicitly declined in writing. A finding that is declined says
+  why, in the plan, where the next reader will find it.
+- Where the audit finds nothing, record that in the plan in one
+  sentence. It is a real result, and a run of them is the evidence
+  for making the phase conditional rather than mandatory.
+- A repository with no `PUSH-AUDIT.md` still carries the phase, and
+  the phase says that the runbook does not exist yet and what was
+  done instead. Silently omitting it is what let the audit go
+  untriggered for as long as it did. What is done instead is at
+  least the checklist below, applied to the recorded ranges: it is
+  a floor, not a substitute for a runbook, and a plan adds the
+  questions its own repository's blast radius raises. Each item
+  gets a verdict, or a sentence saying why it does not apply.
+  Do not borrow another repository's runbook instead: a runbook is
+  written for one repository's blast radius.
+  1. Every recorded landing takes one of the forms above: a merge
+     commit with two parents, whose diff is read against its first
+     parent; every commit of a direct landing, or its `first..last`
+     range; a landing in another repository, whose own audit is
+     cited; or a statement that no range is recoverable, naming the
+     paths the audit read.
+  2. Anything the diff added that runs unattended -- cron, a timer,
+     a scheduled workflow, a self-update -- reports its own failure
+     somewhere a human sees, or is named as not doing so.
+  3. No secret or token entered any repository, and no private
+     hostname or IP address entered a repository more public than
+     the one it came from.
+  4. Anything the diff removed or renamed has no consumer left,
+     checked by grep across every repository that could consume it
+     rather than by assumption, with the greps stated.
+  5. Where the repository publishes something -- an image, a
+     release, a package -- a broken change fails closed: one that
+     publishes nothing is recoverable, one that publishes something
+     wrong is not.
+<!-- shared-block-end -->
+
+**In this repository.** `PUSH-AUDIT.md` exists at the repository
+root and is referenced from `AGENTS.md`, so the final phase runs
+it rather than explaining its absence. Note that every diff
+command in it is written against `origin/develop...HEAD` via
+`AUDIT_RANGE`: a stale local `develop` silently widens the audit to
+unrelated history, so `git fetch origin` before starting.
+
+One wrinkle is specific to this project. Some phases land in
+**other** repositories -- the research spikes add a playbook to
+`homelab-deployments-lfs`, and the Shaken Fist integration
+changes `shakenfist`. The shared block above covers it: such a
+phase records `<repo> <sha> (#pr)` and is audited against that
+repository's own default branch, as part of the pull request that
+lands it, and this plan's push-audit phase cites that audit
+rather than re-running it. A phase that landed elsewhere and
+recorded nothing is the failure mode to watch for here, because
+this repository's own diff will look clean.
+
+<!-- shared-block: plan-phase-landing v1 -->
+Phase landing (shared block; do not edit -- the canonical copy
+lives in shakenfist/development at
+`templates/shared-blocks/plan-phase-landing.md`):
+
+A plan's status and a repository's review state both live in files
+that every branch would otherwise rewrite. Left alone, that turns
+each of them into a merge-conflict hot spot, and it spends a pull
+request and a full CI run on a change that is entirely prose.
+Three rules keep them out of the way.
+
+- **A phase is closed out in the first commit of the next phase,
+  not in a pull request of its own.** By the time the next phase
+  branches, the previous one has merged, so its merge commit is
+  known and its `Merged` cell can record the thing the push-audit
+  phase actually needs. This is the only ordering that works: a
+  phase cannot record its own merge commit, and a separate
+  close-out pull request buys that record at the price of a round
+  trip. The close-out sets the finished phase's `Status` and
+  `Merged` cells and the plan's row in `docs/plans/index.md`, and
+  it is committed before the next phase's own work, so that the
+  branch never claims the plan is further along than the default
+  branch is.
+
+- **The last phase closes itself out.** The push-audit phase is
+  the last row of every plan, so no next phase will carry its
+  close-out. Where the audit raises findings, the plan is not
+  complete until they are resolved or declined, and those land as
+  their own pull request after the audit phase has merged -- so
+  that pull request is the carrier, and it can record the audit
+  phase's merge commit, which by then is known. Where the audit
+  finds nothing there is no carrier, and no follow-up pull
+  request is opened for the sake of one cell: the phase sets its
+  own `Status`, and the plan's index row, to `Complete` in its
+  own pull request, and records no `Merged` cell. It is the only
+  row permitted to omit one. The column exists so that the
+  push-audit phase can reconstruct what to audit; the audit phase
+  is last, so nothing ever reads its own row.
+
+- **`REVIEWS.md` is not pruned or regenerated in a pull request
+  that changes code or documentation.** Editing a reviewed file
+  stales its mark, and adding or removing an in-scope file moves
+  the header count, but neither is the landing pull request's
+  business. `prune` regenerates the file whether or not it dropped
+  anything, so the `prune-reviews` workflow heals both on the next
+  push to the default branch. Pruning from a branch is also wrong
+  more often than it is right, though not for the reason it first
+  appears: `prune` compares each stamp against `HEAD`, which on a
+  branch is the branch tip, so it drops the marks for the files the
+  pull request itself touched while keeping marks the default
+  branch has already pruned. Committing that state merges a review
+  file computed from a stale tree, and can resurrect marks
+  `prune-reviews` has already removed. Accumulated staleness is
+  reported by the `review-coverage` audit, which recomputes
+  coverage against `HEAD` and raises an issue once the backlog is
+  worth a review session.
+
+  **A review session is the exception**, and it is not optional
+  tidiness: `stamp` regenerates `REVIEWS.md` as well as writing the
+  marks, and the rows, the sidecars and the marks are committed
+  together (see `docs/code-review-tracking.md`). Where a repository
+  requires a pull request to reach its default branch, that is how
+  a review session lands, so "not in a pull request" is about the
+  kind of change, not the mechanism.
+
+These rules assume phases land one after another. Where two phase
+branches are open at once, each closes out only the phase it
+directly follows.
+<!-- shared-block-end -->
+
+**In this repository.** The plan index is `docs/plans/index.md`.
+Review tracking is not set up yet, so the `REVIEWS.md` rule above
+is inert until it is; the phase that adopts the `review-tracking`
+template from shakenfist/development is what makes it live.
+
+## Agent guidance
+
+### Execution model
+
+<!-- shared-block: subagent-execution-model v1 -->
+Sub-agent execution model (shared block; do not edit -- the
+canonical copy lives in shakenfist/development at
+`templates/shared-blocks/subagent-execution-model.md`):
+
+All implementation work is done by sub-agents, never in the
+management session. The management session is reserved for
+planning, review, and decision-making. This keeps the management
+context lean and avoids drowning it in implementation diffs.
+
+The workflow is:
+
+1. **Plan** at high effort in the management session.
+2. **Spawn a sub-agent** for each implementation step with the
+   brief from the plan, at the recommended effort level and model.
+3. **Review** the sub-agent's output in the management session.
+   Check the actual files -- the sub-agent's summary describes
+   what it intended, not necessarily what it did.
+4. **Fix or retry** if the output is wrong. Diagnose whether the
+   brief was insufficient (improve it) or the model was too light
+   (upgrade it), then re-run.
+5. **Commit** once the management session is satisfied.
+
+This applies to all steps, including high-effort ones. If a
+sub-agent cannot succeed even with a detailed brief and the right
+model, that is a signal the brief needs improving, not that the
+management session should do the implementation itself.
+
+Use `isolation: "worktree"` for sub-agents when the change is
+risky or experimental; the worktree is discarded if the output is
+unsatisfactory. For safe, well-understood changes, sub-agents can
+work directly in the main tree.
+<!-- shared-block-end -->
+
+### Planning effort
+
+<!-- shared-block: plan-planning-effort v1 -->
+Planning effort (shared block; do not edit -- the canonical copy
+lives in shakenfist/development at
+`templates/shared-blocks/plan-planning-effort.md`):
+
+The master plan itself is always created at **high effort** -- it
+requires broad codebase understanding, cross-referencing several
+source files, and judgment calls about scope and sequencing.
+
+Each phase plan states the recommended effort level for planning
+that phase. Phases that turn on design decisions, cross-component
+coordination, protocol changes, or subtle correctness questions
+should be planned at high effort. Phases that are mechanical, or
+that follow a pattern already established elsewhere in the
+codebase, can be planned at medium effort.
+<!-- shared-block-end -->
+
+**In this repository.** High effort is anything that touches the
+binding store's schema or its lookup path, anything that parses
+or emits bytes from the network, anything that decides which
+network a request belongs to, and the API's shape. Those are the
+places where a defect is silent, cross-network or both. Medium
+effort covers adding a DHCP option that follows the shape of an
+existing one, packaging, a documentation sweep, or adopting a
+template from shakenfist/development with a worked example
+already in the fleet.
+
+### Step-level guidance
+
+<!-- shared-block: subagent-step-guidance v1 -->
+Sub-agent step guidance (shared block; do not edit -- the
+canonical copy lives in shakenfist/development at
+`templates/shared-blocks/subagent-step-guidance.md`):
+
+Each phase plan includes a table like this:
+
+| Step | Effort | Model | Isolation | Brief for sub-agent |
+|------|--------|-------|-----------|---------------------|
+| 1a | medium | sonnet | none | One-sentence summary of what to do and which files to touch |
+| 1b | high | opus | worktree | Why this needs high effort: requires understanding X to do Y |
+
+**Effort levels**, from cheapest to most thorough:
+
+- **low** -- Purely mechanical changes: rename, reformat, add a
+  log line, regenerate generated code. The brief is a complete
+  instruction.
+- **medium** -- The plan provides enough context to follow a clear
+  brief. The sub-agent may read a few files, but the approach is
+  already decided.
+- **high** -- Requires reading several files, making judgment
+  calls, or understanding non-obvious invariants. The sub-agent
+  needs to think about edge cases.
+- **xhigh** -- The setting for hard coding and agentic steps:
+  long-horizon changes, or steps where the sub-agent must both
+  research and implement.
+- **max** -- Correctness matters more than cost. Expect
+  diminishing returns and occasional overthinking; reserve it for
+  steps where a wrong answer would be expensive to detect.
+
+**Brief for sub-agent:** this is the key field. Write it as if
+briefing a colleague who has never seen the codebase. Include what
+to change, which files to touch, what patterns to follow, and any
+non-obvious constraints.
+
+A good brief front-loads the research the planner already did, so
+the implementing agent does not repeat it. Instead of "add storage
+functions for the new object", name the functions to add, the file
+they belong in, the existing equivalent to mirror (with line
+numbers), and any registration the change also needs.
+
+The better the brief, the lower the effort level needed and the
+lighter the model that can succeed.
+<!-- shared-block-end -->
+
+**In this repository.** A worked brief: instead of "add support
+for DHCP option 121", write "add a `ClasslessStaticRoute` variant
+to the option enum in `src/dhcp/options.rs`, encoding it per
+RFC 3442 section 2 (destination descriptor: one prefix-length
+byte, then only the significant octets of the destination, then
+four octets of router), mirroring the existing
+`SubnetMask` variant's `encode`/`decode` pair and its round-trip
+property test in the same file, register it in the option
+registry's match arm, and add a case to the differential rig in
+`tests/differential/` asserting a real dnsmasq emits the same
+bytes for the same configured route." A brief that names the RFC
+section and the existing variant to mirror is the difference
+between sonnet succeeding and opus being needed.
+
+Two project-specific demands on every brief:
+
+- **Name the provenance.** A brief that adds protocol behaviour
+  says which RFC and section it comes from, or which
+  observed-behaviour test in the differential rig pins it. "Match
+  what dnsmasq does" is not an acceptable brief, because the only
+  lawful way to find that out is to run it and record the result.
+- **Name the network scope.** A brief that touches lookup or the
+  binding store says whether the code it adds is per-network or
+  global, because the two are indistinguishable in a single-network
+  test and that is exactly how a cross-network bug ships.
+
+### Model choice
+
+<!-- shared-block: subagent-model-roster v1 -->
+Sub-agent model roster (shared block; do not edit -- the canonical
+copy lives in shakenfist/development at
+`templates/shared-blocks/subagent-model-roster.md`):
+
+The planner recommends which model is best suited to each step.
+This is a judgment call, not a rigid rule -- the right model
+depends on what the step requires, not on whether it is "planning"
+or "implementation". The models available to sub-agents are:
+
+- **fable** -- The most capable model available, for the hardest
+  reasoning and the longest-horizon work: multi-step changes a
+  single sub-agent must carry end to end, or steps whose
+  correctness depends on holding a whole subsystem in mind at
+  once. It costs materially more than opus, so reserve it for
+  steps that have already defeated opus or are expected to.
+- **opus** -- The default for steps needing deep reasoning,
+  architectural understanding, subtle correctness judgment
+  (locking, state machines, migrations), or intricate
+  implementation that would be costly to debug if it were wrong.
+- **sonnet** -- A good default for well-briefed implementation
+  work. Faster and cheaper than opus, and effective when the plan
+  front-loads the research and the brief leaves no broad judgment
+  calls to make.
+- **haiku** -- Suitable for purely mechanical tasks:
+  search-and-replace, regenerating generated code, adding log
+  lines, running commands. The brief must be a near-complete
+  instruction.
+
+Model choice interacts with effort level and brief quality. A
+detailed brief compensates for a lighter model -- sonnet at medium
+effort with a thorough brief often matches opus at medium effort
+with a vague brief. The planner's job is to write briefs good
+enough that the recommended model can succeed.
+
+The model also determines the context window: fable, opus and
+sonnet have 1M tokens, haiku has 200K. A step that must hold many
+files in context at once may need one of the larger-context models
+for that reason alone, even when the reasoning itself is
+straightforward.
+
+**When in doubt, skew to the more capable model.** Saving money
+only matters if the outcome is still acceptable. A failed or
+low-quality implementation wastes more time -- and therefore more
+money -- than the heavier model would have cost. Recommend a
+lighter model only when you are confident the brief is detailed
+enough for it to succeed.
+<!-- shared-block-end -->
+
+**In this repository.** The project-specific checks referred to
+above are:
+
+- [ ] `pre-commit run --all-files` passes, and `ci.yml` runs the
+      same command on every pull request.
+- [ ] `cargo fmt --check`, `cargo clippy --all-targets --
+      -D warnings` and `cargo test --all` are clean. Clippy
+      warnings are errors here; a genuine exception carries an
+      `#[allow]` with a comment saying why.
+- [ ] `cargo deny check` passes. It is the licence gate as well as
+      the advisory gate: a transitively GPL or AGPL dependency is
+      a licence defect in an Apache-2.0 project, not a style
+      preference.
+- [ ] Where the change alters bytes on the wire, the differential
+      rig was run against a real dnsmasq and the plan records the
+      result. A protocol change with no differential case is
+      incomplete.
+- [ ] Where the change touches the binding store or lookup, there
+      is a test with **two** networks holding the **same** address,
+      asserting each gets its own answer. One network proves
+      nothing about isolation.
+
+### Management session review checklist
+
+<!-- shared-block: plan-review-checklist v1 -->
+Management session review checklist (shared block; do not edit --
+the canonical copy lives in shakenfist/development at
+`templates/shared-blocks/plan-review-checklist.md`):
+
+After a sub-agent completes, the management session verifies:
+
+- [ ] The files that were supposed to change actually changed --
+      read them, do not trust the summary.
+- [ ] No unrelated files were modified.
+- [ ] The changes match the intent of the brief: not merely
+      syntactically correct, but semantically right.
+- [ ] The project's own pre-merge checks pass, including any
+      generated code that has to be regenerated and committed
+      (see the project-specific checks below).
+- [ ] The commit message follows project conventions, including
+      the `Co-Authored-By` line recording model, context window,
+      and effort level.
+<!-- shared-block-end -->
+
+## Administration and logistics
+
+### Success criteria
+
+We will know when this plan has been successfully implemented
+because the following statements will be true:
+
+* `pre-commit run --all-files` passes, and CI runs the same
+  command on every pull request.
+* `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo test --all` and `cargo deny check` are all clean.
+* No dependency, direct or transitive, carries a GPL or AGPL
+  licence, and `cargo deny` is what proves it rather than
+  inspection.
+* Every behaviour the daemon implements is traceable in
+  `docs/provenance.md` to an RFC section or to a named
+  observed-behaviour test. No entry says "as dnsmasq does" without
+  one of the two.
+* Every change to lookup or to the binding store carries a test
+  with two networks holding the same address.
+* Where the change alters bytes on the wire, the differential rig
+  has been run against a real dnsmasq and the result is recorded.
+* Documentation in `docs/` describes any user-visible change.
+  `AGENTS.md` changes only if a convention changed;
+  `ARCHITECTURE.md` only if the shape of the system changed;
+  `README.md` only if the pitch, the install story or the
+  documentation links changed.
+
+### Documentation index maintenance
+
+When creating a new master plan from this template, add one row to
+the table in `docs/plans/index.md`: the date the plan was written,
+a link to it, a one-line intent, and its status from the
+vocabulary above. Rows run oldest first. One row per master plan,
+never one per phase -- the phases are tracked in the plan's own
+Execution table, and duplicating them in the index is how the two
+drift apart.
+
+The index row carries the whole-plan status, so it only reaches
+`Complete` once every phase has been completed, abandoned or
+superseded. Update it as the plan progresses, not only at the end.
+
+Once a plan has been finished for 90 days it is retired as
+shakenfist/development's `docs/plan-retirement.md` describes: its
+reasoning is moved into docs/ and its *Future work* is filed as
+issues. Write both so they survive being read by someone who was
+not here.
+
+<!-- shared-block: plan-closeout-sections v1 -->
+Plan close-out sections (shared block; do not edit -- the
+canonical copy lives in shakenfist/development at
+`templates/shared-blocks/plan-closeout-sections.md`):
+
+### Future work
+
+We should list obvious extensions, known issues, unrelated bugs we
+encountered, and anything else we should one day do but have
+chosen to defer to here, so that we do not forget them.
+
+...
+
+### Bugs fixed during this work
+
+This section should list any bugs we encounter during development
+that we fixed. You should also scan the project's issue tracker,
+where one exists, for directly related issues that we should
+either resolve as part of this master plan or at least be aware of
+while planning it.
+
+...
+
+### Back brief
+
+Before executing any step of this plan, please back brief the
+operator as to your understanding of the plan and how the work you
+intend to do aligns with that plan.
+<!-- shared-block-end -->
