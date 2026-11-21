@@ -22,7 +22,12 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
+      # A unified diff's unchanged context lines begin with a single
+      # space, so a blank context line is one space and nothing else.
+      # Stripping it silently corrupts every patch staged under
+      # upstream/, which is why they are excluded rather than fixed.
       - id: trailing-whitespace
+        exclude: '\.patch$'
       - id: end-of-file-fixer
       - id: check-yaml
       - id: check-merge-conflict

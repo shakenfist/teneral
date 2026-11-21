@@ -396,6 +396,136 @@ and folds everything back into this repository.
 
 ## Findings
 
+The phase's four measurements, in the order they were taken. 1b
+and 1c were run in the Linux-bridge lab and written up in
+`docs/linux-bridge-lab.md` in `homelab-deployments-lfs`, which
+landed as merge request **!12**, merge commit **`658caab`**; the
+summaries here are deliberately short, because that document
+holds every command and its verbatim output. 1d and 1e ran
+against no lab, and their evidence is in this file and in
+`docs/api-design.md` respectively.
+
+The headline: the project survives phase 1, with a narrower
+justification than it started with. 1c is a clean go, 1d is a go
+on Rust, 1e recommends a transport that keeps half of the master
+plan's default, and 1b is the one that moved -- what one dnsmasq
+cannot do turned out to be smaller, and better evidenced, than
+the plan claimed.
+
+### 1b: what one dnsmasq can and cannot do
+
+Two results carry the phase. First, **two untagged
+`--dhcp-range` in one subnet are accepted and merged into a
+single pool**: a client on the `gw-n2` gateway was offered and
+ACKed an address out of `gw-n1`'s range, with both ranges logged
+as available for a request that had arrived on `gw-n2`, and with
+no warning anywhere -- not on the command line, not in the log.
+That is a silent wrong answer, which is this project's stated
+failure mode, produced by a configuration an operator would
+write without hesitating.
+
+Second, **`tag:` does disambiguate by arrival interface but does
+not give each network its own address space**. dnsmasq sets an
+implicit tag naming the interface a transaction arrived on,
+whether or not the configuration asks for it, and two tagged
+ranges served the two networks end to end from their own halves
+of the subnet. But with both tagged ranges set to the same
+single address, the second network's client was refused with `no
+address available` -- on a network whose addresses were entirely
+free. Tagging partitions one `/24` between the two networks,
+which removes the overlap rather than serving it.
+
+Together these are why the master plan's justification is now
+that *one dnsmasq cannot hold two leases of one address for two
+networks at once, because its lease table and its lease file
+have no network dimension*, rather than that one dnsmasq cannot
+serve overlapping networks. Two things the plan previously
+implied are false and are now denied in it explicitly: dnsmasq
+can tell two same-subnet networks apart when told to, and one
+process can hold both networks' sockets -- 1c proved the second
+directly. The narrower claim is exactly what a store keyed by
+`(network, identity)` fixes.
+
+1b also recorded the lease file field by field and established
+that SIGHUP re-reads the `--dhcp-hostsfile` and nothing else --
+not the configuration file, and never the lease file, which is
+written and rewritten whole but never read back while the
+process runs. Those two, with twenty-four other measurements
+from 1b and 1c, are now rows in `docs/provenance.md`.
+
+### 1c: one process, two namespaces
+
+**Go, and the gating question is settled.** One process sitting
+in the root namespace served both overlapping `10.0.0.0/24`
+networks from two sockets, each bound to `10.0.0.1:67` inside
+its own gateway namespace, in one `epoll` loop: `10.0.0.101` on
+n1 and `10.0.0.202` on n2, both from server identifier
+`10.0.0.1`. No socket in the experiment set `SO_REUSEADDR` or
+`SO_REUSEPORT`, and the root namespace held no `10.0.0.0/24`
+address at all, so neither bind can have quietly happened at
+home.
+
+**The constraint phase 8 has to be built around, stated so it
+can be acted on:** `setns(CLONE_NEWNET)` moves the calling
+*thread*, not the process, and a socket keeps serving the
+namespace it was created in for as long as it is open, whatever
+its creator thread does afterwards -- including after that
+thread has exited. So the shape that works for an async runtime
+is to create every socket on one dedicated thread that enters
+the right namespace, and to hand the file descriptors to the
+runtime, whose worker threads' own namespaces are then
+irrelevant; nothing in the runtime needs to know a namespace
+exists. Demonstrated rather than reasoned: a worker thread
+entered `ns-gw1`, bound a DHCP socket, handed over the
+descriptor and exited without ever moving back, two threads of
+the one process sat in two namespaces at the same instant, and
+the main thread -- which never left the root namespace -- then
+served a real client on the dead thread's socket.
+
+The capability set is `CAP_SYS_ADMIN` for `setns`,
+`CAP_NET_BIND_SERVICE` for port 67, `CAP_NET_RAW` only if
+`AF_PACKET` is used, and nothing else. It was measured as a
+six-row matrix at uid 1000, and the two-network exchange then
+ran unprivileged holding the first two. So phase 7's systemd
+unit wants `AmbientCapabilities`, not root. Opening
+`/var/run/netns/<ns>` needs no privilege at all.
+
+The three socket-option questions, each answered:
+
+- **`SO_BINDTODEVICE` was not needed to receive.** It is
+  sufficient to reply, but it is per-socket, so it is the wrong
+  instrument for a namespace holding more than one interface --
+  which is the case teneral will meet.
+- **`IP_PKTINFO` was not needed to receive here**, where each
+  namespace holds exactly one interface, and *was* needed to
+  reply, as a per-message `ipi_ifindex`. On receipt it reports
+  the arrival interface index and the datagram's destination
+  address, so a broadcast is distinguishable from a unicast
+  without parsing the packet, and it is the per-message
+  mechanism a multi-interface namespace needs. An interface
+  index is only meaningful inside its own namespace.
+- **The reply to a client with no address needs the egress
+  interface named**, by `IP_PKTINFO` or `SO_BINDTODEVICE`;
+  without either, `sendto` to `255.255.255.255` from a namespace
+  with one interface and no default route returns `ENETUNREACH`.
+  `AF_PACKET` was *not* required: in every one of seven
+  successful transactions the client accepted a reply broadcast
+  to `255.255.255.255` even though it had cleared the BOOTP
+  BROADCAST flag, so a clear flag is not permission to unicast.
+  What `AF_PACKET` buys is a *unicast* reply to an address-less
+  client, which is deliverable only below the IP layer, and it
+  is bound to the namespace it was created in exactly as a UDP
+  socket is -- so the same trick works on the reply path. This
+  agrees with 1d's independent answer to the same question.
+
+Two incidental findings worth carrying forward: `/sys/class/net`
+does not follow `setns` -- it shows the namespace its mount was
+made in, while an `ioctl` on a socket follows -- so interface
+enumeration must not go through sysfs; and a held file
+descriptor keeps a deleted network namespace alive, with its
+interfaces, after `ip netns del` has removed the name and the
+mount.
+
 ### 1d: Rust viability
 
 **Go on Rust.** All three things the master plan's open
@@ -1361,6 +1491,68 @@ makes the audit meaningless.
 - **`cargo clippy` with `-D warnings`.** Not run; the spike
   was built with `cargo build` only.
 
+### 1e: the control API, and the transport
+
+The note is `docs/api-design.md`. Its recommendation, made
+without hedging as the brief asked: **HTTP with JSON bodies,
+served on a Unix domain socket, with watch delivered as a
+long-lived event-stream response, and no TCP listener in the
+daemon at all.**
+
+The reasoning in one sentence: a browser does not need TCP, it
+needs HTTP -- an ordinary reverse proxy bridges a Unix socket to
+a browser for nothing *if* what is on the socket is HTTP,
+whereas a proxy bridging a browser to protobuf has to translate,
+and a translating proxy holds a second implementation of
+cross-network scoping in the one component nobody would think to
+test with two networks.
+
+So the master plan's default half survives: the socket is kept
+and only the encoding is discarded, with file permissions still
+the gate and no listen address or certificate for the daemon to
+own. The operator has not yet ruled on it.
+
+The rest of the note, in brief, since phases 3, 4 and 7 are
+written against it:
+
+- **The resource model** is networks, interfaces, client
+  identities, bindings, leases and content blobs, every resource
+  scoped by network from the first version, with a client
+  identity as the union of MAC, client-id, DUID/IAID, user-class
+  and vendor-class.
+- **The watch primitive** sends a snapshot to a new client, a
+  resume to a reconnecting client whose cursor is still held,
+  and an explicit in-band `resync` to one whose cursor is not.
+  It never silently starts from the present and never silently
+  drops events: a reader that cannot keep up is disconnected, so
+  that a cursor always means something. A browser's native
+  event-source client already implements the client half, cursor
+  and all.
+- **Authentication** is the peer credential on the socket -- the
+  connecting process's user and group, read from the kernel
+  rather than claimed -- because there is no configuration file
+  in this project and so nowhere to keep a secret. Beyond the
+  socket it is bearer tokens, each an id, a write-once secret
+  and a scope of networks plus a capability set, with blob
+  reading as its own capability because blobs hold credentials.
+  Human identity is separate again, and arrives as request
+  headers from an authenticating reverse proxy running the OIDC
+  flow. The note treats those headers as evidence only because
+  the socket's file mode means nothing else can reach the
+  listener, from which it follows that the header-trusting
+  listener and the token-trusting one cannot be the same
+  listener. That half was written after the operator resolved
+  open question 3; authorisation stays in the daemon either
+  way.
+- **What it leaves open**, deliberately: the wire details, IPv6
+  resources, multi-host deployment, control-plane rate limits,
+  and how an authenticated identity maps to a scope -- the last
+  wanting a real authentik configuration rather than paper.
+
+It also found the premise behind the master plan's open question
+1 to be wrong, and that correction has been made at source: see
+the execution notes below.
+
 ## Risks and mitigations
 
 | Risk | Mitigation |
@@ -1580,3 +1772,13 @@ incoherence is in the routing table, as two equally specific
 first. So the root configuration is a reply-path problem rather
 than a receive-path one, and 1b should expect dnsmasq's failure to
 appear there rather than in binding.
+
+**The `Merged` cell is deliberately half-filled.** The master plan
+records this phase as merged at `homelab-deployments-lfs 658caab
+(!12)` and nothing else, because the teneral half has not landed on
+`develop` yet: decision 8 lands it locally, and 1f left its work
+uncommitted for the management session to review. The teneral
+`first..last` range belongs in that cell and is the management
+session's to add once the commits exist. A reader finding only the
+GitLab merge request there is looking at a gap that is recorded,
+not at an oversight.

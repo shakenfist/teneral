@@ -234,14 +234,23 @@ answers, so that no phase blocks waiting for one.
    *Default: protobuf over UDS*, matching `ryll` and Shaken Fist,
    on the grounds that the control plane is local-only and needs a
    cheap streaming channel for watch/subscribe. The thing that
-   would overturn it is the home IPAM user interface: a browser
-   cannot speak to a UDS, so an HTTP layer appears somewhere
-   regardless, and if it has to exist it may as well be the
-   interface. The encoding matters much less than the
-   watch/subscribe primitive, which is required either way --
-   though not for the reason first written here. Shaken Fist does
-   not learn an address from DHCP: it chooses the address and
-   writes it into a hosts file, with the range in `static` mode
+   would overturn it was first written here as the home IPAM user
+   interface not being able to speak to a UDS, and that is not
+   the argument: phase 1e found that a reverse proxy bridges a
+   browser to a Unix socket for nothing, so long as what is on
+   the socket is HTTP. The real objection is that a proxy
+   bridging a browser to protobuf must *translate*, and so holds
+   a second implementation of cross-network scoping in the
+   component least likely to be tested with two networks. Phase
+   1e therefore recommends HTTP with JSON bodies on the Unix
+   socket, keeping the socket and discarding the encoding; the
+   operator has not yet ruled on it, so this question stays open
+   and the default above stands until he does. The encoding
+   matters much less than the watch/subscribe primitive, which
+   is required either way -- though not for the reason first
+   written here. Shaken Fist does not learn an address from
+   DHCP: it chooses the address and writes it into a hosts file,
+   with the range in `static` mode
    (`managed_executables/dnsmasq.py`, `_enumerate_leases` and
    `dhcphosts.tmpl`). It reads the lease file to *police* that --
    `_remove_invalid_leases` hunts an unexpired lease held by an
@@ -304,7 +313,7 @@ by the time it was executed.
 
 | Phase | Plan | Status | Merged |
 |-------|------|--------|--------|
-| 1. Research spikes | [PLAN-teneral-implementation-phase-01-research-spikes.md](PLAN-teneral-implementation-phase-01-research-spikes.md) | In progress | |
+| 1. Research spikes | [PLAN-teneral-implementation-phase-01-research-spikes.md](PLAN-teneral-implementation-phase-01-research-spikes.md) | Complete | `homelab-deployments-lfs 658caab (!12)` |
 | 2. Repository foundations | PLAN-teneral-implementation-phase-02-foundations.md | Proposed | |
 | 3. The binding store | PLAN-teneral-implementation-phase-03-binding-store.md | Proposed | |
 | 4. The control API | PLAN-teneral-implementation-phase-04-control-api.md | Proposed | |
@@ -955,7 +964,42 @@ We should list obvious extensions, known issues, unrelated bugs we
 encountered, and anything else we should one day do but have
 chosen to defer to here, so that we do not forget them.
 
-...
+* **Nobody has measured dnsmasq's DNS side.** Phase 1 measured
+  DHCP only, so `docs/provenance.md` has no DNS rows at all: the
+  hosts-file quirks, what `--local`, `domain-needed` and
+  `bogus-priv` actually do to a query, which DNS files a SIGHUP
+  re-reads, and the shape of a reply for a name the server does
+  not hold are all unmeasured. Phase 6 needs them, and the
+  cheapest time to take them is in a redeployed Linux-bridge
+  lab rather than from a crate's behaviour after the fact.
+* **A network namespace holding more than one interface was
+  never tested.** Phase 1c found `SO_BINDTODEVICE` and
+  `IP_PKTINFO` unnecessary on the receive path, but only because
+  each gateway namespace in the lab held exactly one interface.
+  The case teneral will actually meet is a namespace with
+  several, where the arrival interface has to come from
+  `IP_PKTINFO` and the reply has to name its egress per message.
+  Phase 8 should run that configuration before it trusts the
+  per-socket answer.
+* **The differential rig needs a lab, and one now exists.**
+  `playbooks/linux-bridge-lab-debian-13.yml` in
+  `homelab-deployments-lfs` deploys two overlapping networks,
+  four clients and a real dnsmasq from one command, and it
+  converges. Phase 5's differential testing should redeploy that
+  rather than invent a rig of its own, and the measurements it
+  takes should land in `docs/provenance.md` as the phase 1 ones
+  did.
+* **The `dhcproto` defect is fixed in an upstream pull request,
+  and that fix is not released.** `Message::chaddr()` panics on
+  a DISCOVER whose `hlen` exceeds 16, and the zero-copy path
+  over-reads into attacker-chosen bytes instead. The patch
+  staged under `upstream/dhcproto/` was filed as
+  bluecatengineering/dhcproto#111 on 2026-11-22, with minor
+  edits; the drafted issue was not filed, because that project
+  has not used its issue tracker since 2023. Phase 5 must still
+  reject `hlen > 16` at ingress, because #111 is unreviewed,
+  unmerged and unpublished, and 0.15.0 remains the only
+  release.
 
 ### Bugs fixed during this work
 
