@@ -66,8 +66,11 @@ files, a database watcher and an operator's user interface are all
 interchangeable clients of the same API, and the API is the only
 way into the store. It carries a watch/subscribe primitive,
 because a consumer needs to learn which address a given client was
-assigned -- the thing Shaken Fist does today by reading a lease
-file.
+assigned, and to be told when the store's view of it changes.
+Shaken Fist today assigns the address itself and parses dnsmasq's
+lease file only to police the result, repairing a disagreement by
+killing the process -- so what it lacks is not discovery but any
+way to ask what the server believes, or to correct it.
 
 ## Why this shape
 

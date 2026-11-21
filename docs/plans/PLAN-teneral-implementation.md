@@ -198,8 +198,9 @@ space on top of a design that should already work without them.
 The order is deliberate and is the main thing this plan asserts.
 Leading with Shaken Fist would mean building the hardest datapath
 first, against a consumer that disables DNS, and discovering the
-API's shape from a single programmatic client that only wants a
-lease file. Leading with home IPAM means DNS is exercised from
+API's shape from a single programmatic client that writes a
+hosts file and parses a lease file to police it. Leading with
+home IPAM means DNS is exercised from
 the start, the API is driven by a user interface that wants to
 read and write everything, and the whole thing runs daily on a
 network whose owner will notice when it is wrong.
@@ -229,9 +230,18 @@ answers, so that no phase blocks waiting for one.
    cannot speak to a UDS, so an HTTP layer appears somewhere
    regardless, and if it has to exist it may as well be the
    interface. The encoding matters much less than the
-   watch/subscribe primitive, which is required either way
-   because Shaken Fist currently learns an instance's address by
-   reading a lease file.
+   watch/subscribe primitive, which is required either way --
+   though not for the reason first written here. Shaken Fist does
+   not learn an address from DHCP: it chooses the address and
+   writes it into a hosts file, with the range in `static` mode
+   (`managed_executables/dnsmasq.py`, `_enumerate_leases` and
+   `dhcphosts.tmpl`). It reads the lease file to *police* that --
+   `_remove_invalid_leases` hunts an unexpired lease held by an
+   unauthorised MAC and repairs it by killing dnsmasq and
+   deleting the file. So what is missing is not discovery but any
+   way to ask the server what it believes, to be told when that
+   changes, or to correct it without killing it. Phase 1e
+   established this by reading the code; see `docs/api-design.md`.
 
 2. **Is it Rust?** *Default: yes*, per the operator's
    instruction, and the plan is written on that basis. Phase 1d
@@ -323,7 +333,7 @@ repository is.
 | 1b | high | opus | none | In the 1a lab, take the baseline measurement that justifies the project, and write it up in that repository's `docs/linux-bridge-lab.md`. Three things, each with the command and its actual output recorded: (i) run one dnsmasq serving one of the two `10.0.0.0/24` networks and confirm a client in that namespace gets a lease; (ii) attempt to serve **both** overlapping networks from that single dnsmasq process and record exactly how it fails -- the error, or the wrong answer, or the interface it refuses to bind; (iii) SIGHUP a running dnsmasq and record which files it re-reads and which it does not (expected: `--dhcp-hostsfile` yes, `--dhcp-range` no) and capture a copy of its lease file format. This is observation of a running program, not source reading: that distinction is the whole provenance story, so the write-up says so and cites no dnsmasq source line. |
 | 1c | high | opus | none | The gating experiment, in the 1a lab. Prove that ONE process can serve BOTH overlapping `10.0.0.0/24` networks, by creating one socket per network inside that network's namespace and keeping them all in a single process. Python is the right language here -- `os.setns()` exists in 3.12+, the lab has 3.13, and the kernel semantics under test are language-independent, so Rust would add a toolchain for no information. Specifically: hold an fd per netns, `setns()` to each in turn, create and bind a UDP socket on `10.0.0.1:67` in each, `setns()` back to the original namespace, then prove all sockets still serve their ORIGINAL namespace after the process has moved away -- that last part is the actual question, not whether bind succeeds. Then answer a DHCP DISCOVER from a client in each namespace and confirm each gets its own network's answer. Record whether `SO_BINDTODEVICE` and `IP_PKTINFO` are needed in addition, and what happens on the reply path to a client with no address yet (expect to need `AF_PACKET` and a hand-built frame -- dnsmasq's `send_via_bpf` exists for the BSD form of this problem and the Linux form is `AF_PACKET` in `dhcp.c`). Write the finding and the script into `docs/linux-bridge-lab.md`. A negative result here is a project-ending finding and should be reported as loudly as a positive one. |
 | 1d | high | opus | none | The Rust viability check, and the only place the language decision is revisited. In a throwaway Cargo project (Docker, per the operator's preference for not installing Rust toolchains on the host -- follow the `ryll`/`instar` pattern), establish four things and write them up in `docs/plans/PLAN-teneral-implementation-phase-01-research-spikes.md` in THIS repository: (i) can `hickory-server` 0.26.3 serve a small authoritative zone for local names AND forward everything else upstream, in one process, with DNSSEC off; (ii) can `dhcproto` 0.15.0 parse a real DISCOVER captured in 1b and build an OFFER that a real client accepts; (iii) can Rust send a DHCP reply to a client that cannot yet answer ARP, via `AF_PACKET` with a hand-built Ethernet/IP/UDP frame, and what privilege that needs; (iv) does `cargo deny check` over the resulting dependency tree report any GPL or AGPL crate. Any of (i)-(iii) failing is evidence to reconsider Rust and must be reported as such rather than worked around. |
-| 1e | high | opus | none | Write the API design note as `docs/api-design.md` in this repository, and resolve open question 1. Read Technitium DNS Server's `APIDOCS.md` for API shape only -- it is GPL-3.0, so this is a study of an interface, and no text or code is copied. Then specify: the resource model over the binding store (networks, interfaces, client identities, bindings, leases, content blobs), the watch/subscribe primitive and its delivery semantics on reconnect, how a client learns the address a given instance was assigned (the thing Shaken Fist does today by reading a lease file), the authentication model, and the transport decision with its reasoning. State explicitly what a browser-based UI needs, because that is the argument against UDS. Recommend one transport and say what would change the recommendation. |
+| 1e | high | opus | none | Write the API design note as `docs/api-design.md` in this repository, and resolve open question 1. Read Technitium DNS Server's `APIDOCS.md` for API shape only -- it is GPL-3.0, so this is a study of an interface, and no text or code is copied. Then specify: the resource model over the binding store (networks, interfaces, client identities, bindings, leases, content blobs), the watch/subscribe primitive and its delivery semantics on reconnect, how a client learns the address a given instance was assigned (Shaken Fist assigns it rather than learning it, and parses the lease file only to police the result), the authentication model, and the transport decision with its reasoning. State explicitly what a browser-based UI needs, because that is the argument against UDS. Recommend one transport and say what would change the recommendation. |
 
 Exit condition: 1b and 1c have been run and written up with their
 actual output; 1d has a go or no-go on Rust with evidence; 1e

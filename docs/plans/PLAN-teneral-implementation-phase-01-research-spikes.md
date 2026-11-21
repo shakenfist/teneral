@@ -325,9 +325,13 @@ the master plan as part of this phase's planning commit.
 6. **1e must specify the watch/subscribe primitive whichever
    transport it recommends.** The transport is 1e's to decide
    and this plan does not pre-empt it. But the primitive is
-   required either way -- it is what replaces Shaken Fist
-   reading a lease file -- so 1e is not finished without its
-   delivery semantics on reconnect: whether a reconnecting
+   required either way -- though not because Shaken Fist reads
+   a lease file to learn an address, which 1e established it
+   does not do: it assigns the address and parses the lease
+   file only to police the result. What is missing is any way
+   to ask the daemon what it believes, or to be told when that
+   changes. So 1e is not finished without its delivery
+   semantics on reconnect: whether a reconnecting
    client is sent a snapshot, a resume point, or nothing, and
    what happens to events that occurred while it was away. A
    note that recommends a transport and leaves that open has
@@ -387,7 +391,7 @@ and folds everything back into this repository.
 | 1b | high | opus | none | The dnsmasq baseline, in the lab 1a deployed. Work on 1a's branch in the same `homelab-deployments-lfs` worktree, and commit each result into `docs/linux-bridge-lab.md` as you take it, not at the end -- decision 9 explains why, and the lab will not outlive this phase. This is observation of a running program: cite no dnsmasq source line anywhere in the write-up, and say in the document that the method was observation. Record for every command both the exact argv and its verbatim output. (i) BASELINE: with the gateways in the root namespace (`lbr-lab-gateway root`), run one dnsmasq serving `br-n1` only -- roughly `dnsmasq --no-daemon --conf-file=/dev/null --interface=gw-n1 --bind-dynamic --no-hosts --dhcp-range=10.0.0.100,10.0.0.150,12h --log-dhcp` -- and confirm a client gets a lease, with `lbr-lab-endpoint sh c1a ip addr flush dev eth0` first and then both `dhclient -1 -d eth0` and `busybox udhcpc -i eth0 -q -f -n`. Capture the DISCOVER to a pcap with `tcpdump -i br-n1 -w /tmp/discover.pcap port 67 or port 68` and keep the file: 1d needs a real DISCOVER and this is the only place it comes from. Report its path and copy it back to the worktree (NOT committed to the repo -- report the local path to the management session). (ii) THE OVERLAP, which is the measurement that justifies the project. Run the four configurations of decision 2 in order, stopping at the first that works end to end: default binding; `--bind-interfaces` and then `--bind-dynamic`; ranges constrained by interface tag (`--dhcp-range=tag:gw-n1,10.0.0.100,10.0.0.150,12h` and `tag:gw-n2,10.0.0.200,10.0.0.250,12h`, dnsmasq setting an implicit tag naming the arrival interface); and finally one dnsmasq inside one gateway namespace (`lbr-lab-gateway netns`) recording that it cannot see the other network. For each, say WHERE it broke -- configuration parsing, socket binding, the lease table (both networks wanting `10.0.0.100` in one `--dhcp-leasefile`), or the reply path -- and whether it refused or started and answered wrongly. A configuration that starts and serves one network's pool to the other is the more important result, because a silent wrong answer is this project's stated failure mode. **If the interface-tag configuration works end to end, STOP and report to the management session before doing anything else**: it does not kill the project but it does change what the project is for, and that is the operator's call, not yours. (iii) SIGHUP: with one dnsmasq running and a `--dhcp-hostsfile` and a `--dhcp-leasefile`, edit the hostsfile, `kill -HUP`, and record which files were re-read and which were not (expected: hostsfile yes, `--dhcp-range` no); verify with `strace -f -e trace=openat -p <pid>` or by watching the behaviour change, and say which method you used. Then capture the lease file verbatim -- its exact format, field by field -- because phase 9 has to read what Shaken Fist's consumers read. Do not touch teneral's `docs/provenance.md`: 1f writes it. Instead, end the write-up with a short "What a provenance row would cite" list naming each observed behaviour and the heading in `docs/linux-bridge-lab.md` that records it, so 1f can transcribe without re-deriving. |
 | 1c | high | opus | none | The gating experiment, in the lab 1a deployed, after 1b. Same branch and worktree; same write-as-you-go rule. Prove that ONE process can serve BOTH overlapping `10.0.0.0/24` networks. Start from `lbr-lab-gateway netns`, so `gw-n1` is in `ns-gw1` and `gw-n2` is in `ns-gw2`, each with `10.0.0.1/24` -- which is Shaken Fist's topology (`bridged_vxlan_network.py:501-519` moves the inner veth into the per-network netns and that is where its dnsmasq runs). Python, not Rust: `os.setns` is in 3.12+, the guest has 3.13, and the semantics under test are the kernel's, so a Rust toolchain would add cost for no information. Write the script to `/opt/lbr-lab/examples/` on the host and into the write-up. THE EXPERIMENT: open an fd on `/var/run/netns/ns-gw1` and `/var/run/netns/ns-gw2` (`os.open(..., os.O_RDONLY)`), `os.setns(fd, os.CLONE_NEWNET)` into each in turn, create and bind a UDP socket on `10.0.0.1:67` in each, `setns()` back to the original namespace (keep an fd on `/proc/self/ns/net` BEFORE moving -- you cannot get back without it), and then prove all sockets still serve their ORIGINAL namespace with the process sitting in the root namespace. That last clause is the actual question; bind succeeding is not the result. Then answer a DHCP DISCOVER from a client in each network -- `lbr-lab-endpoint sh c1a busybox udhcpc -i eth0 -q -f -n` and the same for `c2a` -- from the one process, with both sockets in one `select`/`epoll` loop, and confirm each client gets its own network's answer and not the other's. Hand-build the reply with `scapy` or `struct`; you are not writing a DHCP server, you are proving the socket plumbing, so a canned OFFER with the right `xid` and `yiaddr` is enough. RECORD, each as its own finding: whether `SO_BINDTODEVICE` or `IP_PKTINFO` were needed in addition to the namespace (each namespace holds one interface here, so they may not be -- but teneral will meet namespaces holding several, so say what `IP_PKTINFO` gives you); what happens on the reply path to a client with no address yet, which is expected to need `AF_PACKET` with a hand-built Ethernet/IP/UDP frame (note whether the client's BROADCAST flag lets a 255.255.255.255 reply work instead, and whether an `AF_PACKET` socket is also namespace-bound at creation -- it should be, which is what makes the same trick work for the reply path); and the capability set needed (`CAP_SYS_ADMIN` for `setns`, `CAP_NET_RAW` for `AF_PACKET`), because phase 7 ships a systemd unit and this decides `AmbientCapabilities` versus root. CRITICALLY, and this is the most valuable thing the step produces: establish and state that `setns(CLONE_NEWNET)` moves the **calling thread**, not the process, and that a socket created in a namespace keeps serving it regardless of what its creator thread does afterwards -- then say in one explicit sentence what that means for an async Rust daemon, namely that sockets are created on one dedicated thread and the file descriptors handed to a multi-threaded runtime whose threads' own namespaces are then irrelevant. Demonstrate it: create a socket in `ns-gw1` on a `threading.Thread`, let that thread exit, and show the socket still answers. A NEGATIVE RESULT ENDS THE PROJECT and must be reported as loudly as a positive one -- if sockets do not survive the move, say so immediately and stop. |
 | 1d | high | opus | none | The Rust viability check, and the only place the language decision is revisited. Work in the teneral worktree at `/srv/kasm_profiles/mikal/vscode/src/shakenfist/teneral-wt-p01-spikes`, but build the throwaway Cargo project under the session scratchpad, NOT in the repository -- decision 5 explains why nothing Rust is committed. Rust toolchains are deliberately not installed on this host; build in Docker, following the `ryll` and `instar` pattern (read one of their Dockerfiles or Makefiles first). Establish four things and write each up in `docs/plans/PLAN-teneral-implementation-phase-01-research-spikes.md` under a "Findings" heading, quoting the `Cargo.toml` dependency lines and the `main.rs` verbatim in fenced blocks. (i) Can `hickory-server` 0.26.3 serve a small authoritative zone for local names AND forward everything else upstream, in one process, with DNSSEC off? NOTE: 0.26 has no `Authority` trait -- survey finding 9 -- the trait is `zone_handler::ZoneHandler` and the pieces are `store::in_memory::InMemoryZoneHandler`, `store::forwarder::ForwardZoneHandler` with `ForwardConfig` and `ForwardZoneHandlerBuilder`, composed in `zone_handler::Catalog` and served by `server::Server`; `zone_handler::LookupControlFlow` is how a chain decides to answer or fall through, which is the mechanism under test. Prove it with `dig` against the running process: one local name answered authoritatively, one public name forwarded. Record which Cargo features you had to enable, and confirm the name of the optional `metrics` feature that gates the crate's `metrics` module (survey finding 11) -- the master plan demands that changes say how they would be detected in the field, and free DNS counters are worth knowing about. (ii) Can `dhcproto` 0.15.0 parse the real DISCOVER 1b captured and build an OFFER a real client accepts? Use `v4::Message` (and note `v4::borrowed::Message`, a zero-copy path, exists). "A real client accepts" means feeding the OFFER to `busybox udhcpc` or `dhclient`; if the lab is gone by then, say so and settle for a byte-level comparison against the OFFER dnsmasq emitted in 1b, stating the weaker evidence honestly. (iii) Can Rust send a DHCP reply to a client that cannot yet answer ARP, via `AF_PACKET` with a hand-built Ethernet/IP/UDP frame, and what privilege does it need? Compare notes with 1c's answer to the same question; if they disagree, that disagreement is the finding. (iv) Does `cargo deny check` over the resulting dependency tree report any GPL or AGPL crate? You will have to write a `deny.toml` to run it -- write the one phase 2 should adopt, with the GPL/AGPL denial explicit, and quote it in the write-up. ANY OF (i) TO (iii) FAILING IS EVIDENCE TO RECONSIDER RUST and must be reported as such rather than worked around; the master plan's open question 2 names these three as the only things that would overturn the language choice. |
-| 1e | xhigh | opus | none | Write the API design note as `docs/api-design.md` in the teneral worktree at `/srv/kasm_profiles/mikal/vscode/src/shakenfist/teneral-wt-p01-spikes`, and resolve the master plan's open question 1. Read `docs/plans/PLAN-teneral-implementation.md` (the Mission, the Open questions and the phase 3/4/9 sketches), `ARCHITECTURE.md` and `AGENTS.md` first. Study Technitium DNS Server's `APIDOCS.md` (<https://github.com/TechnitiumSoftware/DnsServer/blob/master/APIDOCS.md>) for API SHAPE ONLY -- it is GPL-3.0, so copy no text and no code, and say in the note that it was studied as an interface rather than a source; it is a flat HTTP API with bearer-token auth and `status: ok|error|invalid-token` responses, and the interesting part is how it models zones, records and DHCP scopes as one surface. Also read Shaken Fist's `shakenfist/managed_executables/dnsmasq.py` and `shakenfist/network/bridged_vxlan_network.py` in `~/src/shakenfist/shakenfist` to see what the existing consumer actually needs: `DnsMasq.new()` keys on `owner_network._vx_veth_inner`, `provide_dns` defaults to `False`, and the thing to replace is a lease file being read to learn an instance's address. SPECIFY: the resource model over the binding store -- networks, interfaces, client identities, bindings, leases, content blobs -- where a client identity is the union of MAC, client-id, DUID/IAID, user-class and vendor-class, and every resource is scoped by network from the first version because that is the property the whole project exists for; the watch/subscribe primitive, in full, including its delivery semantics on reconnect (snapshot, resume point, or nothing, and what happens to events missed while away -- decision 6 makes this non-optional, because it is what replaces the lease file); how a client learns the address a given instance was assigned; the authentication model; and the transport decision with its reasoning. State explicitly what a browser-based UI needs, because that is the argument against a Unix domain socket: the master plan's default is protobuf over UDS matching `ryll` and Shaken Fist, and the thing that would overturn it is that a browser cannot speak to a UDS, so an HTTP layer appears somewhere regardless. Recommend ONE transport, say what would change the recommendation, and do not hedge -- the operator decides, but an unmade recommendation gives him nothing to decide against. Note also where the API's shape constrains phase 3's storage trait, since open question 5 accepts that a trait designed against one backend usually fits only that backend. |
+| 1e | xhigh | opus | none | Write the API design note as `docs/api-design.md` in the teneral worktree at `/srv/kasm_profiles/mikal/vscode/src/shakenfist/teneral-wt-p01-spikes`, and resolve the master plan's open question 1. Read `docs/plans/PLAN-teneral-implementation.md` (the Mission, the Open questions and the phase 3/4/9 sketches), `ARCHITECTURE.md` and `AGENTS.md` first. Study Technitium DNS Server's `APIDOCS.md` (<https://github.com/TechnitiumSoftware/DnsServer/blob/master/APIDOCS.md>) for API SHAPE ONLY -- it is GPL-3.0, so copy no text and no code, and say in the note that it was studied as an interface rather than a source; it is a flat HTTP API with bearer-token auth and `status: ok|error|invalid-token` responses, and the interesting part is how it models zones, records and DHCP scopes as one surface. Also read Shaken Fist's `shakenfist/managed_executables/dnsmasq.py` and `shakenfist/network/bridged_vxlan_network.py` in `~/src/shakenfist/shakenfist` to see what the existing consumer actually needs: `DnsMasq.new()` keys on `owner_network._vx_veth_inner`, `provide_dns` defaults to `False`, and note that Shaken Fist assigns the address itself and parses the lease file only to police the result -- what it lacks is a way to ask the daemon what it believes, not a way to discover an address. SPECIFY: the resource model over the binding store -- networks, interfaces, client identities, bindings, leases, content blobs -- where a client identity is the union of MAC, client-id, DUID/IAID, user-class and vendor-class, and every resource is scoped by network from the first version because that is the property the whole project exists for; the watch/subscribe primitive, in full, including its delivery semantics on reconnect (snapshot, resume point, or nothing, and what happens to events missed while away -- decision 6 makes this non-optional, because it is what replaces the lease file); how a client learns the address a given instance was assigned; the authentication model; and the transport decision with its reasoning. State explicitly what a browser-based UI needs, because that is the argument against a Unix domain socket: the master plan's default is protobuf over UDS matching `ryll` and Shaken Fist, and the thing that would overturn it is that a browser cannot speak to a UDS, so an HTTP layer appears somewhere regardless. Recommend ONE transport, say what would change the recommendation, and do not hedge -- the operator decides, but an unmade recommendation gives him nothing to decide against. Note also where the API's shape constrains phase 3's storage trait, since open question 5 accepts that a trait designed against one backend usually fits only that backend. |
 | 1f | medium | opus | none | Fold the findings back into teneral. Work in `/srv/kasm_profiles/mikal/vscode/src/shakenfist/teneral-wt-p01-spikes`, after 1b through 1e have all reported. Four things, and nothing else -- this step writes no new findings, it only transcribes and corrects. (1) Add a "Findings" section to `docs/plans/PLAN-teneral-implementation-phase-01-research-spikes.md` holding: 1b's result in a few sentences with the GitLab commit or merge request that carries the full write-up, 1c's go/no-go with the per-thread `setns` constraint stated explicitly, 1d's four answers and its go/no-go on Rust, and the transport 1e recommends with one sentence of its reasoning. 1d and 1e will have written their own parts already; your job is the 1b and 1c summaries and making the whole section read as one piece. (2) Add the first rows to `docs/provenance.md`, transcribed from the "What a provenance row would cite" list at the end of 1b's write-up. Every row cites either an RFC section or a named observed-behaviour measurement in `docs/linux-bridge-lab.md`; a row saying "as dnsmasq does" is not acceptable, which is the file's own rule. Expect at least two: the lease file format, and what SIGHUP re-reads. (3) Correct the master plan, `docs/plans/PLAN-teneral-implementation.md`, where phase 1 proved it wrong: update its Situation section if 1b or 1c contradicted a measurement there (the shared blocks are off limits -- they re-sync from shakenfist/development), and set phase 1's `Status` to `Complete` with its `Merged` cell per decision 8, which is the GitLab merge request as `homelab-deployments-lfs <sha> (!NN)` plus the teneral `first..last` range or pull-request merge commit. Also set the plan's row in `docs/plans/index.md` -- it stays `In progress`, because ten phases remain. (4) If 1b or 1c produced work worth doing that this phase declined, add it to the master plan's *Future work* section; silent disappearance is the failure mode the master plan names. Run `pre-commit run --all-files` and fix what it reports. |
 
 ## Findings
@@ -1312,14 +1316,48 @@ makes the audit meaningless.
   `Arc`. Teneral's zones change while it is running, and the
   async `upsert` on `&self` is what phase 6 will use; that it
   exists is recorded, that it behaves is not tested.
-- **Panic discipline.** The spike returns
-  `Result<(), Box<dyn Error>>` from `main` and avoids
-  `unwrap`, but `dhcproto`'s own `Message::new_with_id`
-  asserts on a `chaddr` longer than 16 bytes. A `chaddr` is
-  packet-derived, so phase 5 has to check that length itself
-  before calling it. This is exactly the class of bug
-  `AGENTS.md` names, and it sits in the first constructor
-  anyone would reach for.
+- **Panic discipline, and a reachable remote panic in
+  `dhcproto`.** The spike returns `Result<(), Box<dyn Error>>`
+  from `main` and avoids `unwrap`. `dhcproto` does not. 1d
+  found that `Message::new_with_id` asserts on a `chaddr`
+  longer than 16 bytes; the management session checked that
+  and found the reachable defect is worse and sits elsewhere,
+  so the sharpened version is recorded here.
+
+  `hlen` is read from the packet unvalidated
+  (`v4/mod.rs:477`), `chaddr` is the fixed 16-byte field
+  (`:486`), and the accessor is
+  `&self.chaddr[..(self.hlen as usize)]` (`:288`). So
+  `Message::chaddr()` -- not a constructor, but the accessor
+  any DHCP server calls on every packet it parses -- panics on
+  any otherwise well-formed DISCOVER whose `hlen` byte exceeds
+  16. Measured: a 244-byte DISCOVER with `hlen = 255` decodes
+  without error, and then `chaddr()` panics with `range end
+  index 255 out of range for slice of length 16`. One
+  unauthenticated UDP packet, every network down at once.
+
+  The zero-copy path is worse rather than better.
+  `v4::borrowed::Message::chaddr()` is `&self.buffer[28..28 +
+  self.hlen() as usize]` (`borrowed.rs:92`) over a buffer
+  checked only for a 240-byte minimum, so the outcome depends
+  on the packet's length rather than on anything about the
+  client: a 240-byte packet panics, and an ordinary 300-byte
+  one returns 255 bytes reaching through `sname`, `file` and
+  into the options -- bytes the client also chose. Measured:
+  bytes 16..24 of the returned "hardware address" were filler
+  written into the options region. A store keyed by client
+  identity would be reading an identity the client can extend
+  at will, which is an identity-forgery primitive rather than
+  a crash.
+
+  What phase 5 must do: reject `hlen > 16` at ingress, before
+  any accessor runs, and never size a slice from a packet
+  byte. The setter is already safe -- `set_chaddr` truncates
+  at 16 -- so it is the read path alone. This is the class of
+  bug `AGENTS.md` names as a cluster-wide outage, in the crate
+  the project had already chosen, found before a line of
+  teneral was written. It is the strongest argument this phase
+  produced for the panic lints phase 2 installs.
 - **`cargo clippy` with `-D warnings`.** Not run; the spike
   was built with `cargo build` only.
 
@@ -1416,3 +1454,104 @@ Two gates, both cheap to ask about and expensive to get wrong:
 neither needs a gate: a no-go on Rust and a transport
 recommendation are both read at the end of the phase, together,
 which is what the master plan's exit condition asks for.
+
+## Execution notes
+
+Kept as the phase runs, for departures from the plan and for the
+things a later reader would otherwise have to reconstruct.
+
+**2026-11-21, AEDT.** Back brief answered: the operator approved
+creating the namespace, network and instance on `sfcbr`, and
+approved pushing the homelab branch and opening its merge request
+at the end of the phase. Steps 1a, 1d and 1e ran concurrently per
+decision 7; 1b and 1c had not started when these notes were
+written, because they share 1a's lab and are sequential behind it.
+
+**A plan premise was wrong, and it was stated in four places.**
+1e read the Shaken Fist source and found that it does not learn an
+instance's address by reading a lease file: `_enumerate_leases`
+builds `allowed_leases[ni.macaddr] = ni.ipv4` from its own
+`networkinterfaces` and writes the address into `dhcphosts.tmpl`
+with the range in `static` mode, so it *chooses* the address.
+`_remove_invalid_leases` reads the lease file to find an unexpired
+lease held by an unauthorised MAC and repairs it by killing dnsmasq
+and deleting the file, which is reconciliation rather than
+discovery. The management session verified each claim against
+`shakenfist/managed_executables/dnsmasq.py:288-344,403-409`,
+`dhcphosts.tmpl`, `util/concurrency.py:134-149` and the `.proto`
+files before accepting it. Corrected at source in the master plan's
+open question 1, its Mission paragraph and its 1e brief row, in
+`ARCHITECTURE.md`, and in this file's decision 6 and 1e brief row.
+The consequence is that a watch primitive alone would not have
+replaced what Shaken Fist does; `docs/api-design.md` adds
+conflict-reporting writes and a per-network digest for that reason.
+
+**1e's transport recommendation half-overturns the master plan's
+default** and is accepted: the Unix socket survives, protobuf on it
+does not. The reasoning is not that a browser cannot reach a Unix
+socket, which a proxy solves, but that a proxy bridging a browser
+to protobuf must translate, and so holds a second implementation of
+cross-network scoping in the component least likely to be tested
+with two networks. The operator has not yet ruled on it.
+
+**1d's `deny.toml` corrects the brief it was given.** Under
+`[licenses] version = 2`, cargo-deny has removed the `deny` key and
+rejects a configuration containing it. Verified in the management
+session: a config with `deny = ["GPL-3.0"]` fails with "this key
+has been removed, see PR 611" and the file does not validate. The
+GPL and AGPL denial is therefore an allow-list, which is strictly
+stronger. The licence verdict itself was reproduced in the
+container rather than taken from the report: `advisories ok, bans
+ok, licenses ok, sources ok`.
+
+**The `dhcproto` panic was sharpened rather than accepted as
+reported**, and the probes that establish it are
+`chaddr_panic.rs` and `chaddr_borrowed.rs`, written by the
+management session in the step 1d scratchpad and run in the same
+offline container shape as the spike. They are not committed, for
+the reason decision 5 gives.
+
+**Not reported upstream.** The `dhcproto` defect is a
+security-relevant bug in a third-party crate, and nothing about it
+has been sent anywhere. It is recorded here for the operator to
+decide, because sending anything to an upstream project is his call
+and not this session's.
+
+**1a's convergence was re-run by the management session.** 1a
+reported that its second run changed one task, carrying an edit it
+had made after the first, and that a third run was clean. Rather
+than take the third run's word for it, the playbook was run again
+here against `lbrlab-1795244131`: `ok=24 changed=0` on `lbr1` and
+`ok=9 changed=0` on `localhost`, zero changed tasks. The gateway
+toggle was also exercised in both directions from this session, and
+reports `moved` then `unchanged` on a repeat, with the address
+re-asserted after each move.
+
+**`shellcheck` was run by the management session.** 1a could not
+run it -- the tool is not installed on the development host -- and
+reported that honestly, having fallen back to `bash -n` and live
+exercise. Both helpers were then checked from this session in a
+container (`koalaman/shellcheck:stable`, `--shell=bash`) and are
+clean.
+
+**1a's unrequested choices are kept**, all five: fixed gateway MACs
+rather than kernel-random ones, the helper's third `configured`
+state so that the first run after the veths are created is not
+reported as converged, `changed_when: false` on `add_host` so that
+a converged run is literally zero changed, the split of veth
+creation (role) from the inner end's location, MAC and address
+(helper), and `lbr-lab-endpoint list` omitting namespaces with no
+`l-<name>` port so the gateway namespaces do not appear in it. Each
+makes the lab's own idempotence claim checkable, which is what
+decision 9 relies on.
+
+**A measurement 1a took that was not asked for, and that refines
+decision 1.** With both gateways in the root namespace, the
+overlap costs nothing on the receive path: each network's client
+still resolves `10.0.0.1` to its own gateway's MAC, because the
+kernel answers ARP on the interface the request arrived on. The
+incoherence is in the routing table, as two equally specific
+`10.0.0.0/24` routes of which locally-originated traffic takes the
+first. So the root configuration is a reply-path problem rather
+than a receive-path one, and 1b should expect dnsmasq's failure to
+appear there rather than in binding.
