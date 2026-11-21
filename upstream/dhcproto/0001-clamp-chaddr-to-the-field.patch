@@ -1,0 +1,105 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 2a8bec0..1838b44 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [unreleased]
+ 
++### Fixed
++
++- `v4::Message::chaddr()` and `v4::borrowed::Message::chaddr()` no longer use the packet's `hlen` byte to index the fixed 16-octet `chaddr` field. A message whose `hlen` exceeded 16 decoded successfully and then panicked in the accessor; in the borrowed case, on a buffer long enough to absorb the over-long slice, it instead returned bytes from `sname`, `file` and the options as the client's hardware address. The length is now clamped to the field in both.
++
+ ### Added
+ 
+ - v6 clientfqdn from [RFC 4704](https://datatracker.ietf.org/doc/html/rfc4704>)
+diff --git a/src/v4/borrowed.rs b/src/v4/borrowed.rs
+index 911f861..0f36436 100644
+--- a/src/v4/borrowed.rs
++++ b/src/v4/borrowed.rs
+@@ -88,8 +88,13 @@ impl<'a> Message<'a> {
+     }
+ 
+     /// chaddr
++    ///
++    /// As in the owned `Message`: `hlen` is a wire byte and `chaddr` is a
++    /// fixed 16 octets, so a larger `hlen` must not reach past the field
++    /// into `sname`, `file` or the options.
+     pub fn chaddr(&self) -> &'a [u8] {
+-        &self.buffer[28..28 + self.hlen() as usize]
++        let len = (self.hlen() as usize).min(16);
++        &self.buffer[28..28 + len]
+     }
+ 
+     // For variable-length fields, we can return slices
+@@ -272,6 +277,30 @@ mod tests {
+         ]
+     }
+ 
++    #[test]
++    fn chaddr_is_clamped_to_the_field() {
++        // An hlen larger than the 16 octets chaddr holds must not reach
++        // past the field into sname, file or the options, and must not
++        // panic on a buffer too short to reach that far either.
++        let mut buf = bootreq();
++        buf[2] = 0xff;
++        let msg = Message::new(&buf).unwrap();
++        assert_eq!(msg.hlen(), 0xff);
++        assert_eq!(msg.chaddr().len(), 16);
++        assert_eq!(msg.chaddr(), &buf[28..44]);
++
++        // The same message with options appended, where an out-of-field
++        // read would have stayed in bounds and quietly returned the
++        // wrong bytes rather than panicking.
++        let mut padded = bootreq();
++        padded[2] = 0xff;
++        padded.extend_from_slice(&[53, 1, 1, 255]);
++        padded.resize(300, 0);
++        let msg = Message::new(&padded).unwrap();
++        assert_eq!(msg.chaddr().len(), 16);
++        assert_eq!(msg.chaddr(), &padded[28..44]);
++    }
++
+     #[test]
+     fn test_bootreq() {
+         let buf = bootreq();
+diff --git a/src/v4/mod.rs b/src/v4/mod.rs
+index f275e66..697f28c 100644
+--- a/src/v4/mod.rs
++++ b/src/v4/mod.rs
+@@ -285,8 +285,13 @@ impl Message {
+     }
+ 
+     /// Get the message's chaddr.
++    ///
++    /// `hlen` arrives from the wire and can name a length larger than
++    /// `chaddr` can hold: it is a `u8`, while RFC 2131 fixes `chaddr` at
++    /// 16 octets. The length is therefore clamped to the field rather
++    /// than used to index it.
+     pub fn chaddr(&self) -> &[u8] {
+-        &self.chaddr[..(self.hlen as usize)]
++        &self.chaddr[..(self.hlen as usize).min(self.chaddr.len())]
+     }
+ 
+     /// Set the message's chaddr. `chaddr` can only up to 16 bytes in length
+@@ -584,6 +589,20 @@ mod tests {
+         Ok(())
+     }
+ 
++    #[test]
++    fn chaddr_is_clamped_to_the_field() -> Result<()> {
++        // hlen is a wire byte and can claim more than the 16 octets
++        // chaddr holds. Such a message still decodes, so the accessor
++        // is where the length has to be handled.
++        let mut input = discover();
++        input[2] = 0xff;
++        let msg = Message::decode(&mut Decoder::new(&input))?;
++        assert_eq!(msg.hlen(), 0xff);
++        assert_eq!(msg.chaddr().len(), 16);
++        assert_eq!(&msg.chaddr()[..6], &[0xde, 0xad, 0xc0, 0xde, 0xca, 0xfe]);
++        Ok(())
++    }
++
+     #[test]
+     fn test_hex() {
+         let data: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];
