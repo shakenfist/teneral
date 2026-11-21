@@ -74,13 +74,27 @@ way to ask what the server believes, or to correct it.
 
 ## Why this shape
 
-dnsmasq is one process per network because its configuration is
-global state parsed at startup, and because two networks using
-`10.0.0.0/24` cannot share a namespace. Both are properties of its
-architecture rather than of the protocols. Keying the store by
-network removes the first; creating each network's socket in its
-own namespace removes the second. Memory safety is a bonus of the
-implementation language, not the reason for the project.
+dnsmasq is one process per network for two reasons, both
+properties of its architecture rather than of the protocols, and
+both measured rather than assumed -- see
+[docs/provenance.md](docs/provenance.md). Its configuration is
+global state parsed at startup: a `dhcp-range` change needs a
+restart, where a hosts file is re-read on SIGHUP. And its lease
+table has no network dimension, so it cannot hold a lease of one
+address for two networks at once -- the lease file's five fields
+name an expiry, a MAC, an address, a hostname and a client id, and
+nothing names a network.
+
+Keying the store by `(network, identity)` removes the second,
+which is the one that cannot be worked around from outside; an API
+instead of a file removes the first. Note what is not a reason:
+two networks using `10.0.0.0/24` can share a namespace perfectly
+well, one socket can serve both, and the kernel answers ARP on the
+interface a request arrived on, so each client still reaches its
+own gateway. Per-network namespaces are how the consumers already
+build their networks, not something teneral needs in order to tell
+two networks apart. Memory safety is a bonus of the implementation
+language, not the reason for the project.
 
 ## Related documents
 

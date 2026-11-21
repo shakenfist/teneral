@@ -1545,6 +1545,31 @@ creation (role) from the inner end's location, MAC and address
 makes the lab's own idempotence claim checkable, which is what
 decision 9 relies on.
 
+**The decision-2 gate was reached, and the operator restated the
+justification.** 1b found that the interface-tag configuration does
+work -- but only by partitioning one `/24` between the two networks,
+which removes the overlap rather than serving it. Asked to serve the
+same address to both, dnsmasq refuses the second network with `no
+address available` on a network whose addresses are entirely free.
+The management session reproduced both halves directly before
+bringing it up: a client on `gw-n2` was offered and ACKed
+`10.0.0.101` out of n1's range under default binding, with both
+ranges logged as available for a request that arrived on `gw-n2`;
+and with tagged single-address ranges, n1 got `10.0.0.50` and n2 was
+refused three times. Put to the operator on 2026-11-21, he chose to
+restate rather than to pause the phase or leave the wording alone.
+
+The restated claim, now written into the master plan's Situation and
+Mission, `ARCHITECTURE.md` and `README.md`: what one dnsmasq cannot
+do is hold two leases of one address for two networks at the same
+time, because its lease table and its lease file have no network
+dimension. Two things the documents previously implied are false and
+are now denied explicitly -- dnsmasq can tell two same-subnet
+networks apart when told to, and two networks using `10.0.0.0/24`
+can share a namespace with one socket serving both. The claim is
+narrower than it was and better evidenced, and it is exactly what a
+store keyed by `(network, identity)` fixes.
+
 **A measurement 1a took that was not asked for, and that refines
 decision 1.** With both gateways in the root namespace, the
 overlap costs nothing on the receive path: each network's client

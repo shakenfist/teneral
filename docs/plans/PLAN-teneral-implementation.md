@@ -170,8 +170,11 @@ But it is built on OVS, and no consumer of teneral uses OVS, so
 its endpoint tooling is reusable and its bridge is not.
 Experiment 6's unrun second half -- serving two overlapping
 `10.0.0.0/24` networks from one dnsmasq and watching it fail --
-is the measurement that justifies this entire plan, and it has
-not been taken.
+is the measurement that justifies this entire plan. Phase 1b has
+now taken it, in the Linux-bridge lab rather than this one, and
+it came out narrower than this section assumed: dnsmasq
+distinguishes the two networks perfectly well when told to, and
+fails on the lease table instead. See phase 1's Findings.
 
 **The closest prior art is GPL.** Technitium DNS Server is
 authoritative and recursive DNS plus a multi-network DHCP server
@@ -188,7 +191,13 @@ that client's identity, and that serves many networks from one
 process. DHCP, DNS and later TFTP and HTTP metadata are
 front-ends over one binding store; the store is keyed by network
 from the first commit, which is the thing dnsmasq cannot do and
-the reason this is worth building. Configuration arrives through
+the reason this is worth building. Measured in phase 1b: one
+dnsmasq cannot hold a lease of `10.0.0.50` for one network and a
+lease of `10.0.0.50` for another at the same time, because its
+lease table and its lease file have no network dimension. It is
+not that it cannot tell the two networks apart, and not that one
+process cannot hold both sockets; both of those turned out to be
+possible. Configuration arrives through
 an API rather than a file. The first consumer is a home IPAM
 deployment, because it is the smallest path to something useful
 and the most demanding test of the API; Shaken Fist and Neutron
@@ -310,7 +319,10 @@ The gating phase. Its job is to take three measurements and
 answer one question, and to do so before any Rust is written. If
 1b and 1c come out the wrong way, there is no project: 1b is the
 evidence that one dnsmasq cannot do what we want, and 1c is the
-evidence that one process can.
+evidence that one process can. 1b has been run, and the evidence
+is the lease table rather than the socket layer -- which narrows
+the claim without weakening it, since a lease table with no
+network dimension is precisely what this project replaces.
 
 Most of this phase lands in `homelab-deployments-lfs`, not here.
 Under the `plan-push-audit-phase` block above, each such landing

@@ -20,8 +20,11 @@ the plan and the research spikes that gate it. See the
 
 The conventional way to serve DHCP and DNS to many isolated
 networks is one dnsmasq process per network, because dnsmasq's
-configuration is global state parsed at startup and because two
-networks that both use `10.0.0.0/24` cannot share a namespace.
+configuration is global state parsed at startup and because its
+lease table has no network dimension: it cannot hold a lease of
+`10.0.0.50` for one network and another for a second at the same
+time. Asked to, it either serves the wrong network's pool without
+complaint or refuses a network whose addresses are entirely free.
 That model costs a process per network -- thousands of them in a
 cloud -- and it means the service holds no queryable record of
 what it has handed out.
