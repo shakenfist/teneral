@@ -390,6 +390,939 @@ and folds everything back into this repository.
 | 1e | xhigh | opus | none | Write the API design note as `docs/api-design.md` in the teneral worktree at `/srv/kasm_profiles/mikal/vscode/src/shakenfist/teneral-wt-p01-spikes`, and resolve the master plan's open question 1. Read `docs/plans/PLAN-teneral-implementation.md` (the Mission, the Open questions and the phase 3/4/9 sketches), `ARCHITECTURE.md` and `AGENTS.md` first. Study Technitium DNS Server's `APIDOCS.md` (<https://github.com/TechnitiumSoftware/DnsServer/blob/master/APIDOCS.md>) for API SHAPE ONLY -- it is GPL-3.0, so copy no text and no code, and say in the note that it was studied as an interface rather than a source; it is a flat HTTP API with bearer-token auth and `status: ok|error|invalid-token` responses, and the interesting part is how it models zones, records and DHCP scopes as one surface. Also read Shaken Fist's `shakenfist/managed_executables/dnsmasq.py` and `shakenfist/network/bridged_vxlan_network.py` in `~/src/shakenfist/shakenfist` to see what the existing consumer actually needs: `DnsMasq.new()` keys on `owner_network._vx_veth_inner`, `provide_dns` defaults to `False`, and the thing to replace is a lease file being read to learn an instance's address. SPECIFY: the resource model over the binding store -- networks, interfaces, client identities, bindings, leases, content blobs -- where a client identity is the union of MAC, client-id, DUID/IAID, user-class and vendor-class, and every resource is scoped by network from the first version because that is the property the whole project exists for; the watch/subscribe primitive, in full, including its delivery semantics on reconnect (snapshot, resume point, or nothing, and what happens to events missed while away -- decision 6 makes this non-optional, because it is what replaces the lease file); how a client learns the address a given instance was assigned; the authentication model; and the transport decision with its reasoning. State explicitly what a browser-based UI needs, because that is the argument against a Unix domain socket: the master plan's default is protobuf over UDS matching `ryll` and Shaken Fist, and the thing that would overturn it is that a browser cannot speak to a UDS, so an HTTP layer appears somewhere regardless. Recommend ONE transport, say what would change the recommendation, and do not hedge -- the operator decides, but an unmade recommendation gives him nothing to decide against. Note also where the API's shape constrains phase 3's storage trait, since open question 5 accepts that a trait designed against one backend usually fits only that backend. |
 | 1f | medium | opus | none | Fold the findings back into teneral. Work in `/srv/kasm_profiles/mikal/vscode/src/shakenfist/teneral-wt-p01-spikes`, after 1b through 1e have all reported. Four things, and nothing else -- this step writes no new findings, it only transcribes and corrects. (1) Add a "Findings" section to `docs/plans/PLAN-teneral-implementation-phase-01-research-spikes.md` holding: 1b's result in a few sentences with the GitLab commit or merge request that carries the full write-up, 1c's go/no-go with the per-thread `setns` constraint stated explicitly, 1d's four answers and its go/no-go on Rust, and the transport 1e recommends with one sentence of its reasoning. 1d and 1e will have written their own parts already; your job is the 1b and 1c summaries and making the whole section read as one piece. (2) Add the first rows to `docs/provenance.md`, transcribed from the "What a provenance row would cite" list at the end of 1b's write-up. Every row cites either an RFC section or a named observed-behaviour measurement in `docs/linux-bridge-lab.md`; a row saying "as dnsmasq does" is not acceptable, which is the file's own rule. Expect at least two: the lease file format, and what SIGHUP re-reads. (3) Correct the master plan, `docs/plans/PLAN-teneral-implementation.md`, where phase 1 proved it wrong: update its Situation section if 1b or 1c contradicted a measurement there (the shared blocks are off limits -- they re-sync from shakenfist/development), and set phase 1's `Status` to `Complete` with its `Merged` cell per decision 8, which is the GitLab merge request as `homelab-deployments-lfs <sha> (!NN)` plus the teneral `first..last` range or pull-request merge commit. Also set the plan's row in `docs/plans/index.md` -- it stays `In progress`, because ten phases remain. (4) If 1b or 1c produced work worth doing that this phase declined, add it to the master plan's *Future work* section; silent disappearance is the failure mode the master plan names. Run `pre-commit run --all-files` and fix what it reports. |
 
+## Findings
+
+### 1d: Rust viability
+
+**Go on Rust.** All three things the master plan's open
+question 2 names as able to overturn the language choice were
+demonstrated working against real clients and a real upstream
+resolver -- `hickory-server` 0.26.3 answered a local name
+authoritatively and forwarded a public one from one process,
+`dhcproto` 0.15.0 built an OFFER and an ACK that a real
+`busybox udhcpc` accepted, and a hand-built Ethernet/IP/UDP
+frame reached a client with no address over `AF_PACKET` needing
+only `CAP_NET_RAW` -- so nothing here argues against Rust.
+
+| Part | Result | The evidence that settles it |
+|------|--------|------------------------------|
+| (i) `hickory-server` authoritative and forwarding in one process | **Pass** | `dig host1.teneral.lab` returned `flags: qr aa rd` with the local A record; `dig www.debian.org` through the same socket returned `flags: qr rd ra` (no `aa`) with an upstream answer. |
+| (ii) `dhcproto` parses a DISCOVER and builds an accepted OFFER | **Pass**, on a real client's DISCOVER but *not* 1b's lab capture | `udhcpc: lease of 10.0.0.100 obtained from 10.0.0.1, lease time 43200`, then `event=bound ip=10.0.0.100 subnet=255.255.255.0 router=10.0.0.1 dns=10.0.0.1 serverid=10.0.0.1`. |
+| (iii) `AF_PACKET` reply to a client that cannot answer ARP | **Pass**; needs `CAP_NET_RAW` and nothing else | As uid 1000 with no capabilities: `socket(AF_PACKET, SOCK_RAW): Operation not permitted (os error 1)`. With `cap_net_raw=ep` as a file capability on the same binary, same uid: `AF_PACKET socket opened, euid=1000`, and the exchange above completed. |
+| (iv) `cargo deny check` over the tree | **Pass**, no GPL or AGPL | `advisories ok, bans ok, licenses ok, sources ok`. The whole built tree is `Apache-2.0` (70 crates), `MIT` (82), `Unicode-3.0` (19) and `Zlib` (1). |
+
+The optional feature gating the crate's `metrics` module is
+named exactly **`metrics`**, confirming survey finding 11: in
+`hickory-server` 0.26.3's `Cargo.toml` it reads
+`metrics = ["hickory-resolver?/metrics", "dep:metrics"]`, and
+enabling it put `metrics 0.24.6` in the built tree. The
+counters are `metrics` crate macros, so they are published
+through whichever recorder the daemon installs rather than by
+hickory itself -- phase 7 chooses the exporter, not the
+counters.
+
+#### How it was built and run
+
+Nothing Rust is installed on the development host. The exact
+image was **`rust:1.100.0-trixie`**
+(`rust@sha256:223cc32ddca8f3ee90c436dbc94b6b5f052ea7f9653c5201e9612f08ad7d21b8`,
+`rustc 1.100.0 (0ef1bc386 2026-11-09)`), the plain official
+image and not a derived devcontainer. Four invocations, and
+which one did what matters:
+
+1. **Fetch, network up, cache writable.** Resolves and
+   downloads only; compiles nothing, so no dependency's
+   `build.rs` runs.
+
+   ```
+   docker run --rm \
+     -v "$D/spike":/workspace -w /workspace \
+     -u 1000:1000 -e HOME=/build -e CARGO_HOME=/build/.cargo \
+     -v "$D/home":/build \
+     -v "$D/cargo-cache/registry":/build/.cargo/registry \
+     -v "$D/cargo-cache/git":/build/.cargo/git \
+     rust:1.100.0-trixie cargo fetch
+   ```
+
+2. **Compile, `--network none`, cache read-only.** Every
+   dependency's `build.rs` runs arbitrary code at compile
+   time, which is the supply-chain surface; severing the
+   network namespace means a compromised build script cannot
+   reach out, and the read-only cache means it cannot poison
+   the download for later runs.
+
+   ```
+   docker run --rm --network none \
+     -v "$D/spike":/workspace -w /workspace \
+     -u 1000:1000 -e HOME=/build -e CARGO_HOME=/build/.cargo \
+     -v "$D/home":/build \
+     -v "$D/cargo-cache/registry":/build/.cargo/registry:ro \
+     -v "$D/cargo-cache/git":/build/.cargo/git:ro \
+     rust:1.100.0-trixie cargo build --offline
+   ```
+
+3. **Run the DNS spike, network up.** Compile-time isolation is
+   not run-time isolation, and part (i) has to resolve a public
+   name through a real upstream resolver, so the container that
+   *ran* the server had the network even though the one that
+   *built* it did not. The port is published to loopback and
+   `dig` runs on the host.
+
+   ```
+   docker run --rm -d --name teneral-dns-spike \
+     -p 127.0.0.1:15353:15353/udp \
+     -v "$D/spike":/workspace -w /workspace -u 1000:1000 \
+     -e HOME=/build -v "$D/home":/build \
+     rust:1.100.0-trixie ./target/debug/dns_spike 0.0.0.0:15353 1.1.1.1
+   ```
+
+4. **Run the DHCP and `AF_PACKET` spike, `--network none`, with
+   `NET_ADMIN` and `NET_RAW`.** This one needs no outside
+   network at all: it builds its own veth pair inside the
+   container's empty network namespace and the client is in
+   there with it. The image is the `rust` image above plus
+   `busybox iproute2 libcap2-bin tcpdump util-linux` from
+   `apt`, built as `teneral-spike-runtime:1d`; nothing Rust is
+   compiled in it.
+
+   ```
+   docker run --rm --network none \
+     --cap-add NET_ADMIN --cap-add NET_RAW \
+     -v "$D/spike":/workspace:ro -v "$D/tools":/opt/tools:ro \
+     -v "$D/out":/out -w /workspace \
+     teneral-spike-runtime:1d /opt/tools/afpacket-experiment.sh
+   ```
+
+A gotcha for phase 2's `Makefile`, found the hard way: the
+official `rust` image sets `CARGO_HOME=/usr/local/cargo`, so
+mounting a cache at `$HOME/.cargo/registry` and setting
+`HOME=/build` -- which is what `ryll`'s invocation does,
+because its own devcontainer image puts `CARGO_HOME` under
+`/build` -- silently downloads into the container layer and
+throws it away. `-e CARGO_HOME=/build/.cargo` is what makes the
+mount take effect.
+
+The spike is three binaries in one Cargo project rather than
+three projects, so that part (iv) audits one dependency tree
+containing both the DNS and the DHCP halves.
+
+#### The spike's `Cargo.toml`
+
+```toml
+[package]
+name = "teneral-spike"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+hickory-server = { version = "0.26.3", default-features = false, features = ["resolver", "metrics"] }
+hickory-proto = { version = "0.26.3", default-features = false }
+hickory-resolver = { version = "0.26.3", default-features = false }
+dhcproto = "0.15.0"
+libc = "0.2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+```
+
+`default-features = false` throughout, and neither
+`dnssec-ring` nor `dnssec-aws-lc-rs` enabled, so `__dnssec` is
+off at compile time: DNSSEC is absent rather than merely
+switched off, which is what part (i) asked for. The only
+features that had to be turned on were **`resolver`** (which is
+what `store::forwarder` is gated behind -- without it there is
+no `ForwardZoneHandler`) and **`metrics`**. `hickory-proto` and
+`hickory-resolver` are direct dependencies only because the
+spike names `NameServerConfig` and the record types itself;
+`hickory-server` re-exports both as `hickory_server::proto` and
+`hickory_server::resolver`, so phase 6 can drop them if it
+prefers.
+
+Survey finding 10 held: `dhcproto` 0.15.0's own dependency on
+`hickory-proto ^0.26.1` resolved to the same `0.26.3` the DNS
+side uses, and `cargo deny`'s `multiple-versions` check
+reported no duplicate of it.
+
+#### (i) `hickory-server` 0.26.3: authoritative and forwarding together
+
+`src/bin/dns_spike.rs`:
+
+```rust
+//! Spike (i): one process, authoritative for a local zone and
+//! forwarding everything else, DNSSEC off.
+//!
+//! argv: <listen addr:port> <upstream resolver ip>
+
+use std::error::Error;
+use std::net::IpAddr;
+use std::sync::Arc;
+
+use hickory_proto::rr::rdata::{A, SOA};
+use hickory_proto::rr::{LowerName, Name, RData, Record};
+use hickory_resolver::config::NameServerConfig;
+use hickory_server::Server;
+use hickory_server::store::forwarder::{ForwardConfig, ForwardZoneHandler};
+use hickory_server::store::in_memory::InMemoryZoneHandler;
+use hickory_server::zone_handler::{AxfrPolicy, Catalog, ZoneHandler, ZoneType};
+use tokio::net::UdpSocket;
+
+const SERIAL: u32 = 1;
+
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+async fn main() -> Result<(), Box<dyn Error>> {
+    let mut args = std::env::args().skip(1);
+    let listen = args.next().ok_or("usage: dns_spike <addr:port> <upstream>")?;
+    let upstream: IpAddr = args.next().ok_or("missing upstream")?.parse()?;
+
+    let origin: Name = "teneral.lab.".parse()?;
+
+    // Authoritative half: an in-memory zone with an SOA and one A.
+    let mut local: InMemoryZoneHandler =
+        InMemoryZoneHandler::empty(origin.clone(), ZoneType::Primary, AxfrPolicy::Deny);
+    local.upsert_mut(
+        Record::from_rdata(
+            origin.clone(),
+            300,
+            RData::SOA(SOA::new(
+                "ns.teneral.lab.".parse()?,
+                "hostmaster.teneral.lab.".parse()?,
+                SERIAL,
+                3600,
+                600,
+                86400,
+                300,
+            )),
+        ),
+        SERIAL,
+    );
+    local.upsert_mut(
+        Record::from_rdata(
+            "host1.teneral.lab.".parse()?,
+            300,
+            RData::A(A::from("10.0.0.100".parse::<std::net::Ipv4Addr>()?)),
+        ),
+        SERIAL,
+    );
+
+    // Forwarding half: everything that is not in the zone above.
+    let forward = ForwardZoneHandler::builder_tokio(ForwardConfig {
+        name_servers: vec![NameServerConfig::udp(upstream)],
+        options: None,
+    })
+    .with_origin(Name::root())
+    .build()
+    .map_err(|e| format!("forwarder: {e}"))?;
+
+    // The chain. Catalog::find walks labels off the query name, so
+    // the root entry is what a name outside the zone falls through
+    // to; LookupControlFlow is what each handler returns to answer
+    // or continue.
+    let mut catalog = Catalog::new();
+    catalog.upsert(
+        LowerName::new(&origin),
+        vec![Arc::new(local) as Arc<dyn ZoneHandler>],
+    );
+    catalog.upsert(
+        LowerName::new(&Name::root()),
+        vec![Arc::new(forward) as Arc<dyn ZoneHandler>],
+    );
+
+    let mut server = Server::new(catalog);
+    server.register_socket(UdpSocket::bind(&listen).await?);
+    println!("dns_spike listening on {listen}, forwarding to {upstream}");
+    server.block_until_done().await?;
+    Ok(())
+}
+```
+
+Run as invocation 3 above, with `1.1.1.1` upstream. The process
+logged `dns_spike listening on 0.0.0.0:15353, forwarding to
+1.1.1.1` and then, from the host:
+
+```
+$ dig @127.0.0.1 -p 15353 host1.teneral.lab A +noall +comments +answer
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 17927
+;; flags: qr aa rd; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+;; WARNING: recursion requested but not available
+;; ANSWER SECTION:
+host1.teneral.lab.	300	IN	A	10.0.0.100
+
+$ dig @127.0.0.1 -p 15353 www.debian.org A +noall +comments +answer
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 14845
+;; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+;; ANSWER SECTION:
+www.debian.org.		300	IN	A	103.84.224.41
+
+$ dig @127.0.0.1 -p 15353 teneral.lab SOA +noall +comments +answer
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 21168
+;; flags: qr aa rd; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+;; ANSWER SECTION:
+teneral.lab.		300	IN	SOA	ns.teneral.lab. hostmaster.teneral.lab. 1 3600 600 86400 300
+
+$ dig @127.0.0.1 -p 15353 nope.teneral.lab A +noall +comments
+;; ->>HEADER<<- opcode: QUERY, status: NXDOMAIN, id: 2479
+;; flags: qr aa rd; QUERY: 1, ANSWER: 0, AUTHORITY: 1, ADDITIONAL: 1
+```
+
+Three things in that output are worth more than the pass
+itself. The `aa` flag appears on the local name and not on the
+forwarded one, so the two halves really are answering as
+different kinds of handler rather than one proxying for the
+other. `ra` appears only on the forwarded answer, which is
+hickory reporting honestly that it does not offer recursion
+itself. And the fourth query is the one that matters most for
+teneral: a name *inside* the local zone that does not exist
+comes back as an authoritative `NXDOMAIN` rather than being
+leaked to the forwarder. That is the behaviour a per-network
+local zone needs, and it is `LookupControlFlow` doing it -- the
+in-memory handler returns a definitive answer and the chain
+stops, where on a name outside the zone `Catalog::find` strips
+labels until it reaches the root entry and the forwarder gets
+it.
+
+Three notes for phase 6. The 0.26 API is as survey finding 9
+described and there is no `Authority`; the pieces used here are
+`zone_handler::{Catalog, ZoneHandler, ZoneType, AxfrPolicy}`,
+`store::in_memory::InMemoryZoneHandler`,
+`store::forwarder::{ForwardConfig, ForwardZoneHandler}` and
+`server::Server`. Fall-through is positional rather than
+negotiated: the forwarder is registered at the root and reached
+by `Catalog::find` walking labels off the query name, which
+makes one `Catalog` per network the natural shape for
+per-network local zones. And `Server::register_socket` takes an
+already-bound `tokio::net::UdpSocket`, which is exactly the
+hand-off 1c's `setns` constraint needs -- a socket created on a
+dedicated thread inside a network namespace can be handed to
+the runtime rather than created by it.
+
+#### (ii) `dhcproto` 0.15.0: parse a DISCOVER, build an accepted OFFER
+
+**The input was not 1b's capture.** 1b had not reported a pcap
+path when this step ran, and per decision 7 this part was not
+to wait or to invent a packet. What it used instead is a
+*real* DISCOVER from a *real* client -- `busybox udhcpc`
+1.37.0, which identifies itself in the capture as
+`ClassIdentifier([117, 100, 104, 99, 112, 32, 49, 46, 51, 55,
+46, 48])`, that is the ASCII of `udhcpc 1.37.0` -- captured
+with `tcpdump` on the veth pair inside the container. So the
+input is neither synthetic nor the lab capture: it is a
+different real client on a different link. The stronger test,
+against the dnsmasq exchange 1b captures on the lab's bridges,
+is still outstanding, and what it would add is a second
+client's option set and dnsmasq's own OFFER to compare bytes
+against.
+
+`src/bin/dhcp_spike.rs`, the offline half:
+
+```rust
+//! Spike (ii), offline half: parse a DISCOVER from a file of raw
+//! BOOTP/DHCP bytes and build the OFFER that answers it.
+//!
+//! argv: <discover.bin> [offer.bin]
+
+use std::error::Error;
+
+use dhcproto::v4::{DhcpOption, Flags, Message, MessageType, Opcode, OptionCode};
+use dhcproto::{Decodable, Decoder, Encodable};
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let mut args = std::env::args().skip(1);
+    let in_path = args.next().ok_or("usage: dhcp_spike <discover.bin> [offer.bin]")?;
+    let buf = std::fs::read(&in_path)?;
+
+    // The owned parse path.
+    let discover = Message::decode(&mut Decoder::new(&buf))?;
+    println!("-- parsed DISCOVER ({} bytes) --", buf.len());
+    println!("opcode      {:?}", discover.opcode());
+    println!("htype       {:?}", discover.htype());
+    println!("xid         0x{:08x}", discover.xid());
+    println!("flags       broadcast={}", discover.flags().broadcast());
+    println!("chaddr      {}", hex(discover.chaddr()));
+    println!("msg type    {:?}", discover.opts().msg_type());
+    for (code, opt) in discover.opts().iter() {
+        println!("option      {code:?} = {opt:?}");
+    }
+
+    // The zero-copy parse path, over the same bytes.
+    let borrowed = dhcproto::v4::borrowed::Message::new(&buf)?;
+    println!(
+        "borrowed    xid=0x{:08x} chaddr={} (zero-copy parse agrees: {})",
+        borrowed.xid(),
+        hex(borrowed.chaddr()),
+        borrowed.xid() == discover.xid() && borrowed.chaddr() == discover.chaddr()
+    );
+
+    // Build the OFFER.
+    let mut offer = Message::new_with_id(
+        discover.xid(),
+        [0, 0, 0, 0].into(),
+        [10, 0, 0, 100].into(),
+        [0, 0, 0, 0].into(),
+        discover.giaddr(),
+        discover.chaddr(),
+    );
+    offer.set_opcode(Opcode::BootReply);
+    offer.set_htype(discover.htype());
+    offer.set_flags(if discover.flags().broadcast() {
+        Flags::default().set_broadcast()
+    } else {
+        Flags::default()
+    });
+    let opts = offer.opts_mut();
+    opts.insert(DhcpOption::MessageType(MessageType::Offer));
+    opts.insert(DhcpOption::ServerIdentifier([10, 0, 0, 1].into()));
+    opts.insert(DhcpOption::SubnetMask([255, 255, 255, 0].into()));
+    opts.insert(DhcpOption::AddressLeaseTime(43200));
+    opts.insert(DhcpOption::Router(vec![[10, 0, 0, 1].into()]));
+    opts.insert(DhcpOption::DomainNameServer(vec![[10, 0, 0, 1].into()]));
+    if let Some(DhcpOption::ClientIdentifier(id)) = discover.opts().get(OptionCode::ClientIdentifier)
+    {
+        println!("client-id   {} (echoed back is optional, not done)", hex(id));
+    }
+
+    let bytes = offer.to_vec()?;
+    println!("-- built OFFER ({} bytes) --", bytes.len());
+    println!("{}", hex(&bytes));
+    if let Some(out) = args.next() {
+        std::fs::write(&out, &bytes)?;
+        println!("wrote {out}");
+    }
+    Ok(())
+}
+```
+
+Fed the 300-byte DISCOVER extracted from the capture:
+
+```
+-- parsed DISCOVER (300 bytes) --
+opcode      BootRequest
+htype       Eth
+xid         0x17e85f20
+flags       broadcast=false
+chaddr      c6de6b0f6950
+msg type    Some(Discover)
+option      MessageType = MessageType(Discover)
+option      ParameterRequestList = ParameterRequestList([SubnetMask, Router, DomainNameServer, Hostname, DomainName, BroadcastAddr, NtpServers])
+option      MaxMessageSize = MaxMessageSize(576)
+option      ClassIdentifier = ClassIdentifier([117, 100, 104, 99, 112, 32, 49, 46, 51, 55, 46, 48])
+option      ClientIdentifier = ClientIdentifier([1, 198, 222, 107, 15, 105, 80])
+borrowed    xid=0x17e85f20 chaddr=c6de6b0f6950 (zero-copy parse agrees: true)
+client-id   01c6de6b0f6950 (echoed back is optional, not done)
+-- built OFFER (274 bytes) --
+0201060017e85f2000000000000000000a0000640000000000000000c6de6b0f695000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000638253630104ffffff0003040a00000106040a00000133040000a8c035010236040a000001ff
+```
+
+Two things in there matter beyond the pass.
+`v4::borrowed::Message`, the zero-copy path survey finding 10
+noticed, parsed the same bytes and agreed on `xid` and
+`chaddr`, so it is real and usable in phase 5 rather than
+merely present. And `ClientIdentifier` came through as
+`[1, 198, ...]` -- a type byte of 1 followed by the hardware
+address -- which is the shape 1e's client-identity union has to
+carry. The spike does not echo it back, because RFC 2131 does
+not require it; that is a decision teneral has to make
+deliberately rather than inherit.
+
+The acceptance test, which is the part that counts, is in (iii)
+below: the same `dhcproto` code path built the OFFER and the
+ACK that `udhcpc` accepted. As a cross-check, the OFFER this
+offline binary built from the captured DISCOVER was compared
+byte for byte with the OFFER the live spike actually put on the
+wire, and `cmp -l` reported them identical, both 274 bytes.
+That is a consistency check on two call sites, not independent
+evidence; the independent evidence is the client's
+`event=bound`.
+
+#### (iii) `AF_PACKET` to a client with no address, and the privilege it needs
+
+`src/bin/afpacket_spike.rs`:
+
+```rust
+//! Spike (iii), and the live half of (ii): answer a DHCP client that
+//! has no address yet, over AF_PACKET, with a hand-built
+//! Ethernet/IP/UDP frame carrying a dhcproto-built OFFER and ACK.
+//!
+//! argv: <ifname> <server ip> <offered ip>
+
+use std::error::Error;
+use std::ffi::CString;
+use std::io;
+use std::mem;
+use std::net::Ipv4Addr;
+
+use dhcproto::v4::{DhcpOption, Flags, Message, MessageType, Opcode};
+use dhcproto::{Decodable, Decoder, Encodable};
+
+const ETH_P_IP: u16 = 0x0800;
+const ETH_HLEN: usize = 14;
+
+fn last_err<T>(what: &str) -> Result<T, Box<dyn Error>> {
+    Err(format!("{what}: {}", io::Error::last_os_error()).into())
+}
+
+/// The interface's index and MAC, by ioctl on an AF_PACKET socket.
+fn if_info(fd: i32, name: &str) -> Result<(i32, [u8; 6]), Box<dyn Error>> {
+    let cname = CString::new(name)?;
+    let idx = unsafe { libc::if_nametoindex(cname.as_ptr()) };
+    if idx == 0 {
+        return last_err("if_nametoindex");
+    }
+    let mut req: libc::ifreq = unsafe { mem::zeroed() };
+    let bytes = name.as_bytes();
+    for (slot, b) in req.ifr_name.iter_mut().zip(bytes) {
+        *slot = *b as libc::c_char;
+    }
+    if unsafe { libc::ioctl(fd, libc::SIOCGIFHWADDR, &mut req) } < 0 {
+        return last_err("SIOCGIFHWADDR");
+    }
+    let sa = unsafe { req.ifr_ifru.ifru_hwaddr };
+    let mut mac = [0u8; 6];
+    for (slot, b) in mac.iter_mut().zip(sa.sa_data.iter()) {
+        *slot = *b as u8;
+    }
+    Ok((idx as i32, mac))
+}
+
+fn checksum(words: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+    let mut chunks = words.chunks_exact(2);
+    for c in chunks.by_ref() {
+        sum += u32::from(u16::from_be_bytes([c[0], c[1]]));
+    }
+    if let [odd] = chunks.remainder() {
+        sum += u32::from(u16::from_be_bytes([*odd, 0]));
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+/// Ethernet + IPv4 + UDP around a DHCP payload, broadcast to a client
+/// that cannot answer ARP yet.
+fn frame(src_mac: [u8; 6], src_ip: Ipv4Addr, payload: &[u8]) -> Vec<u8> {
+    let mut f = Vec::with_capacity(ETH_HLEN + 28 + payload.len());
+    f.extend_from_slice(&[0xff; 6]);
+    f.extend_from_slice(&src_mac);
+    f.extend_from_slice(&ETH_P_IP.to_be_bytes());
+
+    let udp_len = (8 + payload.len()) as u16;
+    let total_len = 20 + udp_len;
+    let mut ip = Vec::with_capacity(20);
+    ip.extend_from_slice(&[0x45, 0x00]);
+    ip.extend_from_slice(&total_len.to_be_bytes());
+    ip.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 64, 17, 0x00, 0x00]);
+    ip.extend_from_slice(&src_ip.octets());
+    ip.extend_from_slice(&Ipv4Addr::BROADCAST.octets());
+    let ip_csum = checksum(&ip);
+    ip[10..12].copy_from_slice(&ip_csum.to_be_bytes());
+    f.extend_from_slice(&ip);
+
+    let mut udp = Vec::with_capacity(8 + payload.len());
+    udp.extend_from_slice(&67u16.to_be_bytes());
+    udp.extend_from_slice(&68u16.to_be_bytes());
+    udp.extend_from_slice(&udp_len.to_be_bytes());
+    udp.extend_from_slice(&[0x00, 0x00]);
+    udp.extend_from_slice(payload);
+    let mut pseudo = Vec::with_capacity(12 + udp.len());
+    pseudo.extend_from_slice(&src_ip.octets());
+    pseudo.extend_from_slice(&Ipv4Addr::BROADCAST.octets());
+    pseudo.extend_from_slice(&[0x00, 17]);
+    pseudo.extend_from_slice(&udp_len.to_be_bytes());
+    pseudo.extend_from_slice(&udp);
+    let udp_csum = match checksum(&pseudo) {
+        0 => 0xffff,
+        c => c,
+    };
+    udp[6..8].copy_from_slice(&udp_csum.to_be_bytes());
+    f.extend_from_slice(&udp);
+    f
+}
+
+fn reply(req: &Message, kind: MessageType, server: Ipv4Addr, offered: Ipv4Addr) -> Message {
+    let mut m = Message::new_with_id(
+        req.xid(),
+        Ipv4Addr::UNSPECIFIED,
+        offered,
+        Ipv4Addr::UNSPECIFIED,
+        req.giaddr(),
+        req.chaddr(),
+    );
+    m.set_opcode(Opcode::BootReply);
+    m.set_htype(req.htype());
+    m.set_flags(if req.flags().broadcast() {
+        Flags::default().set_broadcast()
+    } else {
+        Flags::default()
+    });
+    let opts = m.opts_mut();
+    opts.insert(DhcpOption::MessageType(kind));
+    opts.insert(DhcpOption::ServerIdentifier(server));
+    opts.insert(DhcpOption::SubnetMask([255, 255, 255, 0].into()));
+    opts.insert(DhcpOption::AddressLeaseTime(43200));
+    opts.insert(DhcpOption::Router(vec![server]));
+    opts.insert(DhcpOption::DomainNameServer(vec![server]));
+    m
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let mut args = std::env::args().skip(1);
+    let ifname = args.next().ok_or("usage: afpacket_spike <if> <server ip> <offered ip>")?;
+    let server: Ipv4Addr = args.next().ok_or("missing server ip")?.parse()?;
+    let offered: Ipv4Addr = args.next().ok_or("missing offered ip")?.parse()?;
+
+    let fd = unsafe {
+        libc::socket(
+            libc::AF_PACKET,
+            libc::SOCK_RAW,
+            i32::from(ETH_P_IP.to_be()),
+        )
+    };
+    if fd < 0 {
+        return last_err("socket(AF_PACKET, SOCK_RAW)");
+    }
+    println!("AF_PACKET socket opened, euid={}", unsafe { libc::geteuid() });
+
+    let (ifindex, mac) = if_info(fd, &ifname)?;
+    println!("{ifname}: ifindex={ifindex} mac={mac:02x?}");
+
+    let mut addr: libc::sockaddr_ll = unsafe { mem::zeroed() };
+    addr.sll_family = libc::AF_PACKET as u16;
+    addr.sll_protocol = ETH_P_IP.to_be();
+    addr.sll_ifindex = ifindex;
+    let alen = mem::size_of::<libc::sockaddr_ll>() as u32;
+    if unsafe { libc::bind(fd, (&addr as *const libc::sockaddr_ll).cast(), alen) } < 0 {
+        return last_err("bind");
+    }
+
+    let mut buf = [0u8; 2048];
+    let mut served = 0;
+    while served < 2 {
+        let n = unsafe { libc::recv(fd, buf.as_mut_ptr().cast(), buf.len(), 0) };
+        if n < 0 {
+            return last_err("recv");
+        }
+        let f = &buf[..n as usize];
+        if f.len() < ETH_HLEN + 28 {
+            continue;
+        }
+        let ihl = usize::from(f[ETH_HLEN] & 0x0f) * 4;
+        if f[ETH_HLEN + 9] != 17 {
+            continue;
+        }
+        let udp = ETH_HLEN + ihl;
+        if u16::from_be_bytes([f[udp + 2], f[udp + 3]]) != 67 {
+            continue;
+        }
+        let dhcp = &f[udp + 8..];
+        let req = match Message::decode(&mut Decoder::new(dhcp)) {
+            Ok(m) => m,
+            Err(e) => {
+                println!("undecodable payload: {e}");
+                continue;
+            }
+        };
+        let kind = match req.opts().msg_type() {
+            Some(MessageType::Discover) => MessageType::Offer,
+            Some(MessageType::Request) => MessageType::Ack,
+            other => {
+                println!("ignoring {other:?}");
+                continue;
+            }
+        };
+        println!(
+            "in:  {:?} xid=0x{:08x} chaddr={:02x?}",
+            req.opts().msg_type(),
+            req.xid(),
+            &req.chaddr()[..6]
+        );
+        let payload = reply(&req, kind, server, offered).to_vec()?;
+        let out = frame(mac, server, &payload);
+        let sent = unsafe {
+            let mut dst: libc::sockaddr_ll = mem::zeroed();
+            dst.sll_family = libc::AF_PACKET as u16;
+            dst.sll_protocol = ETH_P_IP.to_be();
+            dst.sll_ifindex = ifindex;
+            dst.sll_halen = 6;
+            dst.sll_addr[..6].copy_from_slice(&[0xff; 6]);
+            libc::sendto(
+                fd,
+                out.as_ptr().cast(),
+                out.len(),
+                0,
+                (&dst as *const libc::sockaddr_ll).cast(),
+                alen,
+            )
+        };
+        if sent < 0 {
+            return last_err("sendto");
+        }
+        println!("out: {kind:?} {sent} bytes of frame, {} of DHCP", payload.len());
+        served += 1;
+    }
+    unsafe { libc::close(fd) };
+    Ok(())
+}
+```
+
+The experiment runs as invocation 4: one network namespace, a
+veth pair, **no IP address on either end**, `busybox udhcpc` on
+`veth-cli` and this binary on `veth-srv`. The client therefore
+has no address and cannot answer ARP, which is the case under
+test, and the reply goes out as a broadcast frame built by
+hand.
+
+```
+== topology ==
+veth-srv@veth-cli UP             fe80::c042:baff:fe8c:ba93/64
+veth-cli@veth-srv UP             fe80::c4de:6bff:fe0f:6950/64
+
+== privilege: uid 1000, no capabilities ==
+Error: "socket(AF_PACKET, SOCK_RAW): Operation not permitted (os error 1)"
+exit=1 (expected: socket(AF_PACKET, SOCK_RAW) refused)
+
+== privilege: uid 1000, file capability cap_net_raw=ep ==
+/usr/local/bin/afpacket_spike cap_net_raw=ep
+AF_PACKET socket opened, euid=1000
+veth-srv: ifindex=3 mac=[c2, 42, ba, 8c, ba, 93]
+
+== real client ==
+udhcpc: started, v1.37.0
+udhcpc event=deconfig interface=veth-cli ip= subnet= router= dns= lease= serverid=
+udhcpc: broadcasting discover
+in:  Some(Discover) xid=0x17e85f20 chaddr=[c6, de, 6b, 0f, 69, 50]
+out: Offer 316 bytes of frame, 274 of DHCP
+udhcpc: broadcasting select for 10.0.0.100, server 10.0.0.1
+in:  Some(Request) xid=0x17e85f20 chaddr=[c6, de, 6b, 0f, 69, 50]
+out: Ack 316 bytes of frame, 274 of DHCP
+udhcpc: lease of 10.0.0.100 obtained from 10.0.0.1, lease time 43200
+udhcpc event=bound interface=veth-cli ip=10.0.0.100 subnet=255.255.255.0 router=10.0.0.1 dns=10.0.0.1 serverid=10.0.0.1
+udhcpc exit=0
+tcpdump: listening on veth-srv, link-type EN10MB (Ethernet), snapshot length 262144 bytes
+4 packets captured
+```
+
+So Rust can do it, and the privilege answer is clean:
+**`CAP_NET_RAW`, and it does not need root.** The same binary,
+at the same uid 1000, refused with `EPERM` without the
+capability and worked with `cap_net_raw=ep` set on the file --
+which is the evidence phase 7 needs to write
+`AmbientCapabilities=CAP_NET_RAW` in a systemd unit running as
+an unprivileged user rather than `User=root`. `CAP_NET_ADMIN`
+was needed in this experiment only to create the veth pair,
+which is the lab's job and not teneral's. Note that the
+capability has to be in the process's bounding set for a file
+capability to take effect, which is the same thing systemd's
+`CapabilityBoundingSet=` controls.
+
+**On comparing notes with 1c: I could not.** 1c had not
+reported when this ran, so the same-question comparison the
+brief asks for is still owed, and the management session should
+make it. What this step claims, for 1c to agree or disagree
+with: that `AF_PACKET`/`SOCK_RAW` needs `CAP_NET_RAW` and not
+root; that a client with the BROADCAST flag *clear* still
+accepted a 255.255.255.255 broadcast reply (this `udhcpc` sent
+`flags broadcast=false` and took the broadcast answer anyway,
+so a correct server should not read that flag as permission to
+unicast); and that `SO_BINDTODEVICE` was not needed, because
+`bind()`ing the `AF_PACKET` socket to an `sll_ifindex` is
+already per-interface and `sendto` with `sll_ifindex` chooses
+the egress interface directly. I did not test whether an
+`AF_PACKET` socket stays bound to the network namespace it was
+created in after the creating thread moves away -- that is
+1c's measurement, and it is the one that makes this trick work
+for teneral at all.
+
+Two smaller observations for phase 5. The frame is 316 bytes
+for 274 of DHCP, so the padding `dhcproto` emits to reach its
+`MIN_PACKET_SIZE` already clears the Ethernet minimum and
+nothing has to pad further. And the UDP checksum was computed
+rather than zeroed; `udhcpc` accepted it, but a zero checksum
+is legal for IPv4 UDP and would be one fewer thing to get
+wrong, so phase 5 should choose deliberately.
+
+#### (iv) `cargo deny`, and the `deny.toml` phase 2 should adopt
+
+`cargo-deny` 0.22.0, the published release binary
+(`cargo-deny-0.22.0-x86_64-unknown-linux-musl.tar.gz`, sha256
+verified against the release's own `.sha256` file), mounted
+into the container from outside the workspace and run there. It
+reads `Cargo.lock` and clones the advisory database; it
+compiles nothing, so it ran in the networked invocation.
+
+```
+$ cargo-deny check
+advisories ok, bans ok, licenses ok, sources ok
+```
+
+No GPL and no AGPL crate, and nothing weakly copyleft either.
+The built tree is `Apache-2.0` (70 crates), `MIT` (82),
+`Unicode-3.0` (19 -- the ICU crates, reached through `idna`)
+and `Zlib` (1 -- `tinyvec`); most crates are dual
+`MIT OR Apache-2.0`, which is why the first two counts overlap.
+`ring` appears in `Cargo.lock` as an optional dependency of the
+DNSSEC features but is not in the built graph; its licence is
+`Apache-2.0 AND ISC`, both allowed, so turning DNSSEC on later
+would not trip this gate.
+
+One correction to the brief, and it is why the file below does
+not look as expected: **`cargo-deny` no longer accepts a
+`licenses.deny` list.** Under `[licenses] version = 2` the key
+was removed as redundant (cargo-deny PR 611), and it is a hard
+configuration error rather than a warning:
+
+```
+error[deprecated]: this key has been removed, see https://github.com/EmbarkStudios/cargo-deny/pull/611 for migration information
+   ┌─ /workspace/deny.toml:50:1
+   │
+50 │ deny = [
+   │ ━━━━
+[ERROR] failed to validate configuration file /workspace/deny.toml
+```
+
+So the GPL/AGPL denial cannot be written as a `deny` list at
+all. It is expressed instead by an allow-list that contains no
+copyleft licence, which under `version = 2` makes every
+unlisted licence an error -- strictly stronger, since it also
+denies the copyleft licences nobody thought to name. What the
+file carries explicitly is the *statement* of the rule, as a
+comment naming the denied licences and the two places a
+copyleft crate could still get in (`allow` and `exceptions`),
+both of which are present and empty so that a change to either
+appears as a diff on this file rather than as a silent pass.
+
+```toml
+# cargo-deny configuration for teneral.
+#
+# Teneral is Apache-2.0 and may not acquire a GPL, LGPL or AGPL
+# dependency. That denial is expressed by the `allow` list below
+# and nothing else: under `[licenses] version = 2` cargo-deny
+# evaluates an allow-list and treats every unlisted licence as an
+# error, and it removed the separate `deny` key as redundant (see
+# cargo-deny PR 611, which rejects the key outright rather than
+# warning). So the GPL family is denied here by not appearing in
+# `allow`, and the two places a copyleft crate could still get in
+# are `allow` and `exceptions`. Both are listed explicitly, both
+# carry the rule in a comment, and a change to either is a licence
+# decision for a human rather than a lint fix.
+
+[graph]
+# The daemon is Linux-only. Evaluating other targets drags in
+# Windows and macOS crates that are never built, so their licences
+# are not ours to carry.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+# False, so the audit describes the tree that is actually shipped.
+# An optional feature that would pull in a copyleft crate is
+# caught when someone enables it, which is when it becomes true.
+all-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+unmaintained = "workspace"
+# Every entry is a known, accepted advisory and carries a comment
+# saying why it is accepted and what would remove it.
+ignore = []
+
+[licenses]
+version = 2
+# Permissive licences only. No copyleft licence appears here,
+# including the weak ones: adding one is a deliberate decision,
+# not a way to make the check pass.
+#
+# DENIED BY OMISSION, and this is the point of the file:
+#   GPL-1.0, GPL-2.0, GPL-3.0 (dnsmasq is GPL-2/3),
+#   LGPL-2.0, LGPL-2.1, LGPL-3.0,
+#   AGPL-1.0, AGPL-3.0 (Technitium DNS Server is GPL-3.0),
+#   SSPL-1.0, and everything else not written below.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "Unlicense",
+]
+confidence-threshold = 0.93
+# A per-crate exception is a licence decision. Each one needs a
+# comment naming who accepted it and on what grounds. A GPL,
+# LGPL, AGPL or SSPL crate is never an acceptable exception.
+exceptions = []
+unused-allowed-license = "allow"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+# One process serves every network, so a crate that panics on
+# packet-derived input is a cluster-wide outage. A crate banned
+# for that reason is listed here with the reason recorded.
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+```
+
+Three choices in it are arguable and are therefore stated
+rather than left to be discovered. `[graph] all-features =
+false` audits the tree that actually ships, which is the
+accurate licence question; the cost is that an optional feature
+pulling in a copyleft crate is caught when someone enables it
+rather than before. `targets` is Linux-only, because
+evaluating Windows and macOS targets drags in crates that are
+never built and whose licences teneral does not carry.
+`multiple-versions = "warn"` rather than `"deny"`, because a
+duplicate minor version in a transitive tree is routine and a
+hard failure on it would be a standing nuisance -- but
+`wildcards = "deny"`, because a wildcard version requirement
+makes the audit meaningless.
+
+#### What this step did not establish
+
+- **1b's captured DISCOVER.** Part (ii) used a real
+  `busybox udhcpc` 1.37.0 DISCOVER captured in the container,
+  not the lab capture, and the dnsmasq-OFFER byte comparison
+  the brief offers as the weaker fallback was not possible
+  either, because there is no dnsmasq OFFER yet. Both are
+  still worth doing once 1b's pcap exists.
+- **The 1c comparison on `AF_PACKET`.** Owed, as set out
+  above.
+- **Namespaces.** Nothing here touched `setns`. The spike ran
+  inside a container's own network namespace, which is not the
+  same question as one process holding sockets in several.
+- **`InMemoryZoneHandler` under mutation.** The spike builds
+  the zone once with `upsert_mut` before wrapping it in an
+  `Arc`. Teneral's zones change while it is running, and the
+  async `upsert` on `&self` is what phase 6 will use; that it
+  exists is recorded, that it behaves is not tested.
+- **Panic discipline.** The spike returns
+  `Result<(), Box<dyn Error>>` from `main` and avoids
+  `unwrap`, but `dhcproto`'s own `Message::new_with_id`
+  asserts on a `chaddr` longer than 16 bytes. A `chaddr` is
+  packet-derived, so phase 5 has to check that length itself
+  before calling it. This is exactly the class of bug
+  `AGENTS.md` names, and it sits in the first constructor
+  anyone would reach for.
+- **`cargo clippy` with `-D warnings`.** Not run; the spike
+  was built with `cargo build` only.
+
 ## Risks and mitigations
 
 | Risk | Mitigation |
