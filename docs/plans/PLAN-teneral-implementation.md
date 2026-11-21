@@ -155,16 +155,20 @@ leave DNSSEC switched off rather than a reason to avoid hickory,
 but it is also the clearest available evidence for why this
 project should never write its own validator.
 
-**A lab exists, and it is the wrong lab.**
+**A lab exists as code, and it is the wrong lab.**
 `playbooks/ovs-lab-debian-13.yml` in
 `~/src/private/homelab-deployments-lfs` was built for the
 adjacent question and deployed on 2026-11-08 (identifier
 `ovslab-1794115958`). It settled that flows alone cannot answer
 DHCP, that an access port's VLAN tag is invisible in table 0, and
-that a pure-flow ARP responder works. Its experiments 3, 5 and 6
-are unrun. But it is built on OVS, and no consumer of teneral
-uses OVS, so its endpoint tooling is reusable and its bridge is
-not. Experiment 6's unrun second half -- serving two overlapping
+that a pure-flow ARP responder works. The deployment is gone --
+that namespace is no longer in `sf-client namespace list`
+(checked 2026-11-21) -- and its experiments 3, 5 and 6 are
+unrun, which is the same fact twice: a lab that does not outlive
+the session that deployed it takes its unrun experiments with it.
+But it is built on OVS, and no consumer of teneral uses OVS, so
+its endpoint tooling is reusable and its bridge is not.
+Experiment 6's unrun second half -- serving two overlapping
 `10.0.0.0/24` networks from one dnsmasq and watching it fail --
 is the measurement that justifies this entire plan, and it has
 not been taken.
@@ -271,7 +275,7 @@ by the time it was executed.
 
 | Phase | Plan | Status | Merged |
 |-------|------|--------|--------|
-| 1. Research spikes | PLAN-teneral-implementation-phase-01-research-spikes.md | Not started | |
+| 1. Research spikes | [PLAN-teneral-implementation-phase-01-research-spikes.md](PLAN-teneral-implementation-phase-01-research-spikes.md) | In progress | |
 | 2. Repository foundations | PLAN-teneral-implementation-phase-02-foundations.md | Proposed | |
 | 3. The binding store | PLAN-teneral-implementation-phase-03-binding-store.md | Proposed | |
 | 4. The control API | PLAN-teneral-implementation-phase-04-control-api.md | Proposed | |
@@ -315,10 +319,10 @@ repository is.
 
 | Step | Effort | Model | Isolation | Brief for sub-agent |
 |------|--------|-------|-----------|---------------------|
-| 1a | high | opus | worktree | Write `playbooks/linux-bridge-lab-debian-13.yml` and `roles/linux_bridge_lab` in `~/src/private/homelab-deployments-lfs`, as a sibling of the existing `ovs-lab-debian-13.yml` and `roles/ovs_lab`. Read that playbook and `docs/ovs-lab.md` first, and read `AGENTS.md` -- its "reuse, not duplicate" rule applies, so the endpoint helper that creates `ns-<name>` namespaces with veth pairs is adapted, not rewritten. Differences from the OVS lab: two **Linux** bridges rather than one portless OVS bridge, no VLAN tags and no OpenFlow, four endpoints in two groups of two, and the two groups deliberately sharing `10.0.0.0/24` with each group's gateway at `10.0.0.1/24` in its own namespace -- which is Shaken Fist's topology from `bridged_vxlan_network.py`, veth-into-netns and all. The bridges stay portless for the reason the OVS lab's header gives: enslaving the instance NIC cuts the address Ansible is connected over. Install `dnsmasq-base` (not `dnsmasq`), `python3`, `tcpdump`, `dhcpcd` or `udhcpc`, and a venv with `scapy`. Write `docs/linux-bridge-lab.md` in that repository stating the topology, the tools and the experiments, following the shape of `docs/ovs-lab.md`. Add the teardown path to `playbooks/teardown.yml` if it is not identifier-generic already. |
+| 1a | high | opus | none | Write `playbooks/linux-bridge-lab-debian-13.yml` and `roles/linux_bridge_lab` in `~/src/private/homelab-deployments-lfs`, as a sibling of the existing `ovs-lab-debian-13.yml` and `roles/ovs_lab`. Read that playbook and `docs/ovs-lab.md` first, and read `AGENTS.md`. (That file's "reuse, not duplicate" rule is about copying logic out of the three public shakenfist repositories into the private overlay, not about two of this repository's own roles resembling each other -- but adapting the endpoint helper that creates `ns-<name>` namespaces with veth pairs, rather than rewriting it, is right on its own merits.) Differences from the OVS lab: two **Linux** bridges rather than one portless OVS bridge, no VLAN tags and no OpenFlow, four endpoints in two groups of two, and the two groups deliberately sharing `10.0.0.0/24` with each group's gateway at `10.0.0.1/24` -- which is Shaken Fist's topology from `bridged_vxlan_network.py`, veth-into-netns and all. Note that a gateway confined to its own namespace cannot produce 1b's measurement, because a dnsmasq in one namespace cannot see the other network at all; the phase file's decision 1 resolves this by moving the gateway between the root namespace and a per-network one with a helper. The bridges stay portless for the reason the OVS lab's header gives: enslaving the instance NIC cuts the address Ansible is connected over. Install `dnsmasq-base` (not `dnsmasq`), `python3`, `tcpdump`, `dhcpcd` or `udhcpc`, and a venv with `scapy`. Write `docs/linux-bridge-lab.md` in that repository stating the topology, the tools and the experiments, following the shape of `docs/ovs-lab.md`. `playbooks/teardown.yml` is already identifier-generic, so it needs no change. |
 | 1b | high | opus | none | In the 1a lab, take the baseline measurement that justifies the project, and write it up in that repository's `docs/linux-bridge-lab.md`. Three things, each with the command and its actual output recorded: (i) run one dnsmasq serving one of the two `10.0.0.0/24` networks and confirm a client in that namespace gets a lease; (ii) attempt to serve **both** overlapping networks from that single dnsmasq process and record exactly how it fails -- the error, or the wrong answer, or the interface it refuses to bind; (iii) SIGHUP a running dnsmasq and record which files it re-reads and which it does not (expected: `--dhcp-hostsfile` yes, `--dhcp-range` no) and capture a copy of its lease file format. This is observation of a running program, not source reading: that distinction is the whole provenance story, so the write-up says so and cites no dnsmasq source line. |
 | 1c | high | opus | none | The gating experiment, in the 1a lab. Prove that ONE process can serve BOTH overlapping `10.0.0.0/24` networks, by creating one socket per network inside that network's namespace and keeping them all in a single process. Python is the right language here -- `os.setns()` exists in 3.12+, the lab has 3.13, and the kernel semantics under test are language-independent, so Rust would add a toolchain for no information. Specifically: hold an fd per netns, `setns()` to each in turn, create and bind a UDP socket on `10.0.0.1:67` in each, `setns()` back to the original namespace, then prove all sockets still serve their ORIGINAL namespace after the process has moved away -- that last part is the actual question, not whether bind succeeds. Then answer a DHCP DISCOVER from a client in each namespace and confirm each gets its own network's answer. Record whether `SO_BINDTODEVICE` and `IP_PKTINFO` are needed in addition, and what happens on the reply path to a client with no address yet (expect to need `AF_PACKET` and a hand-built frame -- dnsmasq's `send_via_bpf` exists for the BSD form of this problem and the Linux form is `AF_PACKET` in `dhcp.c`). Write the finding and the script into `docs/linux-bridge-lab.md`. A negative result here is a project-ending finding and should be reported as loudly as a positive one. |
-| 1d | high | opus | worktree | The Rust viability check, and the only place the language decision is revisited. In a throwaway Cargo project (Docker, per the operator's preference for not installing Rust toolchains on the host -- follow the `ryll`/`instar` pattern), establish four things and write them up in `docs/plans/PLAN-teneral-implementation-phase-01-research-spikes.md` in THIS repository: (i) can `hickory-server` 0.26.3 serve a small authoritative zone for local names AND forward everything else upstream, in one process, with DNSSEC off; (ii) can `dhcproto` 0.15.0 parse a real DISCOVER captured in 1b and build an OFFER that a real client accepts; (iii) can Rust send a DHCP reply to a client that cannot yet answer ARP, via `AF_PACKET` with a hand-built Ethernet/IP/UDP frame, and what privilege that needs; (iv) does `cargo deny check` over the resulting dependency tree report any GPL or AGPL crate. Any of (i)-(iii) failing is evidence to reconsider Rust and must be reported as such rather than worked around. |
+| 1d | high | opus | none | The Rust viability check, and the only place the language decision is revisited. In a throwaway Cargo project (Docker, per the operator's preference for not installing Rust toolchains on the host -- follow the `ryll`/`instar` pattern), establish four things and write them up in `docs/plans/PLAN-teneral-implementation-phase-01-research-spikes.md` in THIS repository: (i) can `hickory-server` 0.26.3 serve a small authoritative zone for local names AND forward everything else upstream, in one process, with DNSSEC off; (ii) can `dhcproto` 0.15.0 parse a real DISCOVER captured in 1b and build an OFFER that a real client accepts; (iii) can Rust send a DHCP reply to a client that cannot yet answer ARP, via `AF_PACKET` with a hand-built Ethernet/IP/UDP frame, and what privilege that needs; (iv) does `cargo deny check` over the resulting dependency tree report any GPL or AGPL crate. Any of (i)-(iii) failing is evidence to reconsider Rust and must be reported as such rather than worked around. |
 | 1e | high | opus | none | Write the API design note as `docs/api-design.md` in this repository, and resolve open question 1. Read Technitium DNS Server's `APIDOCS.md` for API shape only -- it is GPL-3.0, so this is a study of an interface, and no text or code is copied. Then specify: the resource model over the binding store (networks, interfaces, client identities, bindings, leases, content blobs), the watch/subscribe primitive and its delivery semantics on reconnect, how a client learns the address a given instance was assigned (the thing Shaken Fist does today by reading a lease file), the authentication model, and the transport decision with its reasoning. State explicitly what a browser-based UI needs, because that is the argument against UDS. Recommend one transport and say what would change the recommendation. |
 
 Exit condition: 1b and 1c have been run and written up with their
@@ -525,6 +529,14 @@ command in it is written against `origin/develop...HEAD` via
 `AUDIT_RANGE`: a stale local `develop` silently widens the audit to
 unrelated history, so `git fetch origin` before starting.
 
+As of 2026-11-21 there is no `origin`. `shakenfist/teneral` does
+not exist on GitHub and this clone has no remote, although
+`docs/development.md` documents the GitHub settings as though it
+did. Until the repository is created, a phase here cannot land as
+a pull request, its `Merged` cell records a `first..last` range
+on `develop`, and `AUDIT_RANGE` has to be set explicitly because
+its default will not resolve.
+
 One wrinkle is specific to this project. Some phases land in
 **other** repositories -- the research spikes add a playbook to
 `homelab-deployments-lfs`, and the Shaken Fist integration
@@ -532,9 +544,12 @@ changes `shakenfist`. The shared block above covers it: such a
 phase records `<repo> <sha> (#pr)` and is audited against that
 repository's own default branch, as part of the pull request that
 lands it, and this plan's push-audit phase cites that audit
-rather than re-running it. A phase that landed elsewhere and
-recorded nothing is the failure mode to watch for here, because
-this repository's own diff will look clean.
+rather than re-running it. `homelab-deployments-lfs` is on the
+private GitLab rather than GitHub, with `main` as its default
+branch, so for it that record reads `homelab-deployments-lfs
+<sha> (!NN)` and names a merge request. A phase that landed
+elsewhere and recorded nothing is the failure mode to watch for
+here, because this repository's own diff will look clean.
 
 <!-- shared-block: plan-phase-landing v1 -->
 Phase landing (shared block; do not edit -- the canonical copy

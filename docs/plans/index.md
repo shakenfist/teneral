@@ -11,4 +11,4 @@ has been completed, abandoned or superseded.
 
 | Date | Plan | Intent | Status |
 |------|------|--------|--------|
-| 2026-11-21 | [Teneral: implementation](PLAN-teneral-implementation.md) | Build the daemon, research spikes first, with home IPAM as the first consumer and Shaken Fist after it | Not started |
+| 2026-11-21 | [Teneral: implementation](PLAN-teneral-implementation.md) | Build the daemon, research spikes first, with home IPAM as the first consumer and Shaken Fist after it | In progress |
