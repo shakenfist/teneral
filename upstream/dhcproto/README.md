@@ -1,23 +1,33 @@
 # Staged upstream work: dhcproto
 
-Work prepared for <https://github.com/bluecatengineering/dhcproto>
-and **not sent**. Nothing in this directory has been submitted,
-and nothing here should be submitted without Michael deciding to
-do it.
+Work prepared for <https://github.com/bluecatengineering/dhcproto>.
+The patch has since been sent, as [pull request
+#111](https://github.com/bluecatengineering/dhcproto/pull/111).
+The drafted issue was not sent. Nothing else in this directory
+has been submitted, and nothing here should be submitted without
+Michael deciding to do it.
 
 ## Disposition
 
 | Item | Disposition | State |
 |------|-------------|-------|
-| [ISSUE-hlen-chaddr.md](ISSUE-hlen-chaddr.md) | submit | drafted |
-| [PR-hlen-chaddr.md](PR-hlen-chaddr.md) + [the patch](0001-clamp-chaddr-to-the-field.patch) | submit | drafted, builds and passes the project's own CI gates |
+| [ISSUE-hlen-chaddr.md](ISSUE-hlen-chaddr.md) | not sent | drafted, then declined |
+| [PR-hlen-chaddr.md](PR-hlen-chaddr.md) + [the patch](0001-clamp-chaddr-to-the-field.patch) | **sent** | filed, with minor edits, as [#111](https://github.com/bluecatengineering/dhcproto/pull/111) on 2026-11-22 |
 
-Both are drafted on the assumption they go together: the issue
-describes the defect, the pull request fixes it, and the issue
-links the pull request. Filing an issue that already has a fix
-attached is a smaller ask of a maintainer than either alone, and
-it is what this project's own history suggests works -- see the
-policy notes below.
+**The pull request went; the issue did not.** Both were drafted
+on the assumption they went together, the issue describing the
+defect and the pull request fixing it. In the event the issue
+was judged unnecessary: this project has not used its issue
+tracker since 2023, so an issue would have been a second place
+for the report to sit unread rather than a route to a
+maintainer. That is the middle path the policy notes below set
+out, and it answers the disclosure question the same way -- the
+pull request describes the defect accurately without being
+worded as an advisory.
+
+The drafted issue text is kept rather than deleted, because it
+holds the two reproducers and their verbatim output, which the
+pull request summarises rather than repeats.
 
 ## What was found
 
