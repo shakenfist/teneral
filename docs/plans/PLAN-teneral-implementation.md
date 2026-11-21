@@ -333,15 +333,21 @@ These are sketched rather than planned, because phase 1 is
 expected to change them. Each gets its own phase file, written
 when it is reached, by `/next-phase`.
 
-- **Phase 2: Repository foundations.** The Cargo workspace, CI,
-  `pre-commit`, `deny.toml` with the GPL/AGPL denial that open
-  question 2 and the licence constraint both rest on, the
-  `release-automation-rust` and `review-tracking` templates from
-  shakenfist/development, `docs/provenance.md` with its first
-  rows from 1b, and the differential rig skeleton that runs a real
-  dnsmasq and compares bytes. The rig is foundations, not a
-  testing afterthought: it is the only lawful source of truth for
-  behaviour no RFC specifies.
+- **Phase 2: Repository foundations.** The half of this that needs
+  no Rust code was landed ahead of phase 1 and is described in
+  `docs/development.md`: `pre-commit`, the lint and reviewer CI
+  lanes, the secret scanner, Renovate, the configuration export and
+  the review and retest bots. What is left here is everything that
+  needs code to act on: the Cargo workspace, the `Makefile` and the
+  Docker build image, `clippy.toml`, the build and test lanes and
+  the two-tier CI and merge queue that gate them, `deny.toml` with
+  the GPL/AGPL denial that open question 2 and the licence
+  constraint both rest on, the `release-automation-rust` and
+  `review-tracking` templates from shakenfist/development,
+  `docs/provenance.md` with its first rows from 1b, and the
+  differential rig skeleton that runs a real dnsmasq and compares
+  bytes. The rig is foundations, not a testing afterthought: it is
+  the only lawful source of truth for behaviour no RFC specifies.
 - **Phase 3: The binding store.** The layer everything else is a
   projection of: `(network, interface) x client identity -> facts`,
   where identity is the union of MAC, client-id, DUID/IAID,

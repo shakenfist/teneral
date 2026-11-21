@@ -13,8 +13,8 @@ rather than three services that each hold their own copy of who is
 who.
 
 **Status: nothing is built yet.** This repository currently holds
-the plan and the research spikes that gate it. See
-[docs/plans/PLAN-teneral-implementation.md](docs/plans/PLAN-teneral-implementation.md).
+the plan and the research spikes that gate it. See the
+[implementation plan](https://github.com/shakenfist/teneral/blob/develop/docs/plans/PLAN-teneral-implementation.md).
 
 ## Why
 
@@ -44,20 +44,22 @@ as addresses, the same mechanism serves instance metadata.
 
 ## Documentation
 
-- [Implementation plan](docs/plans/PLAN-teneral-implementation.md)
+- [Implementation plan](https://github.com/shakenfist/teneral/blob/develop/docs/plans/PLAN-teneral-implementation.md)
   -- the phases, the research spikes, and what is deliberately out
   of scope.
-- [Provenance](docs/provenance.md) -- where each behaviour came
-  from, and why that question matters in an Apache-2.0 project
-  that reimplements GPL software.
-- [Architecture](ARCHITECTURE.md) -- the intended shape of the
-  system.
-- [Agent guidance](AGENTS.md) -- conventions for working in this
-  repository.
+- [Provenance](https://github.com/shakenfist/teneral/blob/develop/docs/provenance.md)
+  -- where each behaviour came from, and why that question matters
+  in an Apache-2.0 project that reimplements GPL software.
+- [Architecture](https://github.com/shakenfist/teneral/blob/develop/ARCHITECTURE.md)
+  -- the intended shape of the system.
+- [Development](https://github.com/shakenfist/teneral/blob/develop/docs/development.md)
+  -- how to build, lint and test, and what CI runs.
+- [Agent guidance](https://github.com/shakenfist/teneral/blob/develop/AGENTS.md)
+  -- conventions for working in this repository.
 
 ## Licence
 
 Apache-2.0. No code is copied from dnsmasq or from Technitium DNS
 Server, both of which are GPL; see
-[docs/provenance.md](docs/provenance.md) for how that is kept
-true.
+[the provenance record](https://github.com/shakenfist/teneral/blob/develop/docs/provenance.md)
+for how that is kept true.

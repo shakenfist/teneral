@@ -1,0 +1,89 @@
+name: CI
+
+# Teneral has no Cargo workspace yet, so the only gate here is the
+# pre-commit suite: actionlint over these workflow files, shellcheck
+# over anything in scripts/, gitleaks, and skillsaw over the agent
+# context. That is deliberately the same command a developer runs
+# before a commit, so CI and the commit hook cannot drift apart --
+# running the hooks rather than naming the linters is what keeps the
+# two in step as hooks are added.
+#
+# The Rust lanes -- rustfmt, clippy, cargo test, cargo deny -- arrive
+# with the workspace, and so do the two-tier smoke/merge split and the
+# "Can enqueue"/"Can merge" gates the rest of the fleet runs. See
+# docs/development.md for what is still to come and
+# docs/plans/PLAN-teneral-implementation.md for when.
+#
+# There is no path filter. Everything this repository currently holds
+# is prose, and every linter here reads prose, so a filter that
+# skipped documentation would skip the whole job. A filter belongs
+# here once there is code for it to distinguish documentation from.
+#
+# The secret scanner is not here. It lives in secret-scan.yml, which
+# also runs on pushes to develop, and which deliberately reads
+# everything: a credential lands in a plan as easily as in a script.
+#
+# workflow_dispatch is what pr-retest.yml dispatches. It needs the
+# RETEST_WORKFLOW repository variable set to ci.yml, since the
+# template's default names a functional-tests.yml this repository does
+# not have; docs/development.md records that.
+on:
+  pull_request:
+    branches: [develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: [self-hosted, static]
+    timeout-minutes: 15
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-lint
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # A venv because the runners enforce PEP 668 and refuse a bare
+      # install. Under runner.temp with --clear, because a fixed /tmp
+      # path is shared with every other job on the host.
+      - name: Install pre-commit
+        run: |
+          python3 -m venv --clear "${RUNNER_TEMP}/venv-lint"
+          "${RUNNER_TEMP}/venv-lint/bin/pip" install --quiet --disable-pip-version-check \
+              pre-commit
+
+      - name: Run pre-commit hooks
+        run: |
+          "${RUNNER_TEMP}/venv-lint/bin/pre-commit" run --all-files \
+              --show-diff-on-failure
+
+      - name: Clean up
+        if: always()
+        run: rm -rf "${RUNNER_TEMP}/venv-lint"
+
+  # The body lives once, in shakenfist/actions. The permissions block
+  # has to be here rather than there -- a cross-repository reusable
+  # workflow cannot grant itself more token scope than its caller has
+  # -- and for the same reason this job sets no runs-on or
+  # timeout-minutes, which the reusable workflow defines.
+  #
+  # The needs: list is the "review only once CI has passed" gate: a job
+  # skipped because a dependency failed never starts the reusable
+  # workflow. Every job added to the smoke tier belongs in it.
+  #
+  # Deliberately no secrets: inherit. Nothing in the reviewer chain
+  # reads a secret -- it authenticates with github.token under the
+  # permissions below -- so inheriting would hand every secret this
+  # repository holds to a workflow in another one, for nothing.
+  automated_reviewer:
+    name: "Automated reviewer"
+    needs: [lint]
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: shakenfist/actions/.github/workflows/pr-auto-review.yml@main

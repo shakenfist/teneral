@@ -5,10 +5,11 @@ client on a known interface with the content configured for that
 client. See `ARCHITECTURE.md` for the shape of the system and
 `docs/plans/` for what is being built and in what order.
 
-Nothing is built yet. Until phase 2 of
-`docs/plans/PLAN-teneral-implementation.md` lands, there is no
-Cargo workspace and the build conventions below describe the
-intended state rather than the current one.
+Nothing is built yet: there is no Cargo workspace, so the Rust
+half of the build conventions below describes the intended state
+rather than the current one. The repository's own automation --
+`pre-commit`, CI, Renovate, the review and retest bots -- is in
+place and does apply. See `docs/development.md`.
 
 ## The invariants
 
@@ -56,6 +57,9 @@ and each of them has already been decided:
   development host by preference; build in Docker, following the
   `ryll` and `instar` pattern in this organisation.
 - Before proposing a commit, run `pre-commit run --all-files`.
+  `ci.yml` runs exactly that command, so a hook added to
+  `.pre-commit-config.yaml` is enforced without touching CI, and
+  CI and a developer's commit cannot check different things.
   Once the workspace exists, also `cargo fmt --check`,
   `cargo clippy --all-targets -- -D warnings`, `cargo test --all`
   and `cargo deny check`. Clippy warnings are errors; a genuine
@@ -70,6 +74,10 @@ and each of them has already been decided:
   re-sync. Do not edit them locally; raise the change upstream.
 
 ## Documentation
+
+`docs/development.md` is the reference for the build, the lint
+suite and the CI lanes, and for the repository settings that are
+configured on GitHub rather than in the tree.
 
 Document user-visible changes in `docs/`. Update this file only
 when a *convention* changes, and `ARCHITECTURE.md` only when the

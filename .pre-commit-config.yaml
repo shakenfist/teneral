@@ -1,0 +1,55 @@
+# The checks a commit has to pass here. `pre-commit run --all-files` is
+# what a developer runs before proposing a commit, and ci.yml runs the
+# same command on every pull request, so the two cannot drift apart.
+#
+# There are no Rust hooks yet: there is no Cargo workspace to run them
+# over. rustfmt, clippy and cargo-deny arrive with it, running in a
+# Docker image rather than on the host, because Rust toolchains are
+# deliberately not installed on the development machine. See
+# docs/development.md.
+
+repos:
+  # GitHub Actions workflow linter. The config declares the self-hosted
+  # runner labels these workflows use, so a label that does not exist
+  # on the fleet fails here rather than leaving a job queued for a
+  # runner that never comes.
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+        args: ['-config-file', '.github/actionlint.yaml']
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-merge-conflict
+
+  # Shell scripts, wherever they land. -x so a script that sources a
+  # sibling is followed rather than guessed at.
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1
+    hooks:
+      - id: shellcheck
+        files: ^(scripts|tools)/
+        types_or: [sh, bash, shell]
+        args: ['-x']
+
+  # The pre-commit half of the secret scanning the secret-handling
+  # audit asks for. secret-scan.yml is the CI half, and it scans the
+  # history rather than the working tree.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  # Lints the agent context -- AGENTS.md and anything else an agent is
+  # handed -- for malformed structure, smuggled instructions, unicode
+  # tricks and pasted credentials. A weekly fleet audit reports the
+  # same thing; this is what catches it in the commit that writes it.
+  - repo: https://github.com/stbenjam/skillsaw
+    rev: v0.23.0
+    hooks:
+      - id: skillsaw

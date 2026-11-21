@@ -9,6 +9,6 @@ The `Status` column holds exactly one term from the vocabulary in
 whole-plan status, so it only reaches `Complete` once every phase
 has been completed, abandoned or superseded.
 
-| Written | Plan | Intent | Status |
-|---------|------|--------|--------|
+| Date | Plan | Intent | Status |
+|------|------|--------|--------|
 | 2026-11-21 | [Teneral: implementation](PLAN-teneral-implementation.md) | Build the daemon, research spikes first, with home IPAM as the first consumer and Shaken Fist after it | Not started |
