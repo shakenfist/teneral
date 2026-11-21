@@ -64,9 +64,24 @@ occupies that design space.
 **The control plane** is an API, not a configuration file. Config
 files, a database watcher and an operator's user interface are all
 interchangeable clients of the same API, and the API is the only
-way into the store. It carries a watch/subscribe primitive,
-because a consumer needs to learn which address a given client was
-assigned, and to be told when the store's view of it changes.
+way into the store. The daemon also serves a simple web interface
+over that same API, from the shared `sfui` design system vendored
+into its static assets; it is a client of the API like any other
+and has no privileged path of its own.
+
+Human identity comes from an authenticating reverse proxy, which
+terminates TLS, runs the OIDC flow and forwards the authenticated
+user as request headers -- the arrangement the `private-ci`
+conductor dashboard runs. Those headers are evidence only because
+the proxy is the only thing that can reach the listener, so the
+listener that trusts them is separate from the one programmatic
+clients use with a bearer token. Authorisation -- which networks
+an identity may touch -- stays in the daemon, because it is the
+only component that knows what a network is.
+
+The API carries a watch/subscribe primitive, because a consumer
+needs to learn which address a given client was assigned, and to
+be told when the store's view of it changes.
 Shaken Fist today assigns the address itself and parses dnsmasq's
 lease file only to police the result, repairing a disagreement by
 killing the process -- so what it lacks is not discovery but any

@@ -75,9 +75,20 @@ This is the first consumer and the demanding one. It wants to
 read and write everything: networks, ranges, reservations,
 leases, names, upstream forwarders. It wants to show a live
 list, so it wants a push channel rather than a poll loop. Its
-user interface lives in its own repository and consumes this API
-like any other client, which is what stops it acquiring a
-privileged path into the store.
+user interface is served by the daemon itself, from the shared
+`sfui` design system vendored into its static assets, and it
+consumes this API like any other client -- which is what stops it
+acquiring a privileged path into the store.
+
+That last clause is the whole of why serving the pages here is
+safe, so it is worth stating as a rule rather than an intention:
+**the web interface gets no API surface of its own.** Every byte
+it displays arrives over the endpoints described below, with the
+same network scoping and the same authorisation as any other
+client's. A handler that exists only for the UI, or that skips a
+scope check because "it is our own page", is the failure this
+whole design is arranged to prevent, and it would be invisible in
+a single-network test.
 
 Concretely, a browser needs:
 
@@ -564,14 +575,49 @@ with no blob access; the normal token for a consumer like a
 hypervisor fleet is full access to the networks it owns and none
 to anything else.
 
-**There are no user accounts, no passwords and no sessions.**
-The daemon is not an identity provider. Its user interface has
-its own users, in its own repository, and holds one teneral
-token on their behalf. Putting accounts here would make the user
-interface's privilege model teneral's problem, which is the
-mechanism by which a user interface ends up with a privileged
-path into the store -- the failure that keeping it in a separate
-repository exists to prevent.
+**There are no user accounts, no passwords and no sessions**, and
+the daemon is not an identity provider. Human identity arrives
+from an authenticating reverse proxy, which terminates TLS, runs
+the OIDC flow, and forwards the authenticated user, their groups
+and their email as request headers. This is the arrangement the
+`private-ci` conductor dashboard already runs: nginx with an
+`auth_request` against an authentik outpost, capturing the
+outpost's response headers with `auth_request_set` and
+re-injecting them on the proxied request.
+
+**Those headers are trustworthy only because nothing else can
+reach the daemon, and that is the invariant to defend.** A header
+is a claim; what makes it evidence is that the only writer who
+can set it is the proxy. The conductor achieves that by listening
+on `127.0.0.1`, which is good but not airtight -- any local user
+can reach a loopback port. A Unix socket is strictly stronger,
+since its file mode names exactly who may connect, and that is a
+further argument for the transport recommended below.
+
+**A header-trusting listener and a token-trusting listener are
+not the same listener.** If a machine client could connect to the
+socket that accepts identity headers, it could simply supply its
+own and become any user. So the two trust models get two
+endpoints with two file modes: one the proxy owns, where identity
+comes from headers and a bearer token is ignored; one for
+programmatic clients, where identity comes from a token and
+identity headers are rejected outright rather than ignored. The
+daemon should refuse to start if it cannot tell them apart.
+
+**Beyond those, bearer tokens as above**, which is what a
+consumer like a hypervisor fleet uses: it cannot complete a
+browser flow, and it should not have to. The conductor meets the
+same problem for its webhook and its archive manifest, and solves
+it with exact-match locations that bypass the proxy and
+substitute an HMAC signature or an address allow-list -- a useful
+precedent for which paths may skip the proxy, and a warning that
+such an exemption must be an exact match rather than a prefix.
+
+**Authorisation stays here, in the daemon.** The proxy says who
+someone is; it does not say which networks they may touch. The
+mapping from an authenticated identity or group to a scope is
+teneral's, kept with the store, for the same reason the tokens'
+scopes are: it is the only place that knows what a network is.
 
 **Bootstrap has no secret on disk.** The first token is minted
 over the Unix socket by a peer the socket's permissions already
@@ -696,15 +742,16 @@ reconnect, so it is the same work with less of it done for you.
 Four things, each stated so that it can be checked rather than
 argued:
 
-1. **The user interface turns out to have no server-side half.**
-   If the IPAM front end is to be a static bundle talking to the
-   API directly, there is no reverse proxy to bridge the socket,
-   and the daemon needs its own port, its own TLS and its own
-   cross-origin policy. That is a decision in the interface's
-   repository, it reverses the cheapest part of this
-   recommendation, and it should be settled before the first
-   real deployment rather than discovered during it. It is the
-   one question in this note that someone else answers.
+1. ~~**The user interface turns out to have no server-side
+   half.**~~ **Answered, and it upholds the recommendation.** The
+   interface is served by the daemon itself from vendored `sfui`
+   assets, behind the same authenticating proxy that the rest of
+   the API sits behind. So a reverse proxy is present by
+   construction rather than by assumption -- it is where the OIDC
+   flow lives -- and the socket has something to be bridged by.
+   There is no static bundle talking to the daemon directly, no
+   cross-origin policy to own, and no TLS for the daemon to
+   terminate.
 2. **The stream's cost is measured and JSON is the reason.** Not
    a feeling about parsing overhead: a number. If one consumer
    mirroring a whole store costs more than a few percent of a
@@ -787,6 +834,12 @@ worst time to be changing the store's interface.
   plane's input is hostile and unauthenticated; the control
   plane's is authenticated and local, so this is deferred rather
   than decided.
+- **How an authenticated identity maps to a scope.** That
+  authorisation belongs here rather than in the proxy is settled
+  above; whether the mapping is by group, by an explicit grant
+  per user, or by a token minted for a session is not. It wants
+  deciding against a real authentik configuration rather than on
+  paper.
 
 ## Related documents
 

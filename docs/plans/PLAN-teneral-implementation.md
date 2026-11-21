@@ -217,8 +217,7 @@ network whose owner will notice when it is wrong.
 **This plan does not cover:** DHCPv6, router advertisement or
 SLAAC (Neutron needs them, home IPAM mostly does not, and they
 are 4,649 lines of dnsmasq's problem); DNSSEC validation, now or
-ever; any flow-based or OVS datapath; the user interface, which
-is a separate repository consuming this one's API; and dnsmasq
+ever; any flow-based or OVS datapath; and dnsmasq
 configuration-file compatibility, which was considered and
 rejected -- it would have signed this project up for 286
 directives and for reproducing an option grammar that is the one
@@ -260,11 +259,22 @@ answers, so that no phase blocks waiting for one.
    no workable path to sending a frame to a client that cannot
    yet answer ARP. Absent one of those, Rust stands.
 
-3. **Where does the user interface live?** *Default: its own
-   repository*, consuming the API like any other client. Keeping
-   it out of this tree is what stops it acquiring a privileged
-   back door into the binding store, which is the failure mode
-   that makes the API untestable.
+3. **Where does the user interface live?** ~~*Default: its own
+   repository.*~~ **Resolved 2026-11-21, against the default:**
+   the daemon serves a simple web interface itself, built from the
+   `sfui` design system vendored into its static assets, alongside
+   the REST API, with both behind an authenticating reverse proxy
+   doing OIDC -- the arrangement the `private-ci` conductor
+   dashboard already runs.
+
+   The default existed to stop the interface acquiring a
+   privileged back door into the store. That risk does not go
+   away by being in one repository, so the protection is restated
+   as a rule instead of a repository boundary: the web interface
+   gets no API surface of its own, and every byte it shows arrives
+   over the same endpoints, with the same network scoping, as any
+   other client's. `docs/api-design.md` carries it, and a handler
+   that exists only for the UI is the thing to reject in review.
 
 4. **Does an OVS or flow-based front-end ever get built?**
    *Default: no.* It would serve only Neutron's non-default
@@ -395,7 +405,10 @@ when it is reached, by `/next-phase`.
 - **Phase 7: Home IPAM v1.** A single binary, a systemd unit,
   packaging, and the first real deployment on the operator's own
   network. The milestone at which this becomes useful rather than
-  interesting. The UI is a separate repository and out of scope.
+  interesting. Includes the simple web interface, built from
+  vendored `sfui`, and the authenticating proxy in front of it;
+  see `docs/api-design.md` for the identity model and the rule
+  that keeps the interface from acquiring an API of its own.
 - **Phase 8: Namespace datapath.** `setns` and one process over
   many networks, per 1c. The consolidation payoff, and the phase
   that tests whether phase 3's storage trait survives contact
