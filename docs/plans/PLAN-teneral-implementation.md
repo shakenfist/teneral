@@ -314,7 +314,7 @@ by the time it was executed.
 | Phase | Plan | Status | Merged |
 |-------|------|--------|--------|
 | 1. Research spikes | [PLAN-teneral-implementation-phase-01-research-spikes.md](PLAN-teneral-implementation-phase-01-research-spikes.md) | Complete | `homelab-deployments-lfs 658caab (!12)`, teneral `fa77a8e..1337e79` |
-| 2. Repository foundations | PLAN-teneral-implementation-phase-02-foundations.md | Proposed | |
+| 2. Repository foundations | [PLAN-teneral-implementation-phase-02-foundations.md](PLAN-teneral-implementation-phase-02-foundations.md) | In progress | |
 | 3. The binding store | PLAN-teneral-implementation-phase-03-binding-store.md | Proposed | |
 | 4. The control API | PLAN-teneral-implementation-phase-04-control-api.md | Proposed | |
 | 5. DHCPv4 front-end | PLAN-teneral-implementation-phase-05-dhcpv4.md | Proposed | |
@@ -388,11 +388,20 @@ when it is reached, by `/next-phase`.
   the two-tier CI and merge queue that gate them, `deny.toml` with
   the GPL/AGPL denial that open question 2 and the licence
   constraint both rest on, the `release-automation-rust` and
-  `review-tracking` templates from shakenfist/development,
-  `docs/provenance.md` with its first rows from 1b, and the
-  differential rig skeleton that runs a real dnsmasq and compares
-  bytes. The rig is foundations, not a testing afterthought: it is
-  the only lawful source of truth for behaviour no RFC specifies.
+  `review-tracking` templates from shakenfist/development, the
+  panic lints (`unwrap_used` in `[workspace.lints.clippy]`, with
+  `allow-unwrap-in-tests` in a root `clippy.toml`), CodeQL, and
+  the differential rig skeleton that compares bytes against a
+  real dnsmasq's recorded behaviour. The rig is foundations, not
+  a testing afterthought: it is the only lawful source of truth
+  for behaviour no RFC specifies.
+
+  `docs/provenance.md` was listed here too and is **done**:
+  phase 1's step 1f shipped it with 26 rows.
+  `docs/development.md`'s *Still to come* section is the fuller
+  statement of what remains, and names the panic lints and
+  CodeQL that this sketch first omitted; phase 2's own file
+  takes the union of the two.
 - **Phase 3: The binding store.** The layer everything else is a
   projection of: `(network, interface) x client identity -> facts`,
   where identity is the union of MAC, client-id, DUID/IAID,
