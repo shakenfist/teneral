@@ -285,6 +285,21 @@ answers, so that no phase blocks waiting for one.
    other client's. `docs/api-design.md` carries it, and a handler
    that exists only for the UI is the thing to reject in review.
 
+   **Amended 2026-11-23.** This repository is teneral's core
+   libraries, and the home IPAM becomes its own repository once it
+   is complete -- a separate product that happens to use teneral
+   underneath. The resolution above still holds, with one word
+   changed: the binary that serves the web interface is the IPAM's,
+   built from these libraries, rather than this repository's. The
+   split strengthens the rule rather than reopening it, because a
+   user interface in another repository cannot reach the store even
+   by accident: it has no access to the crate. The IPAM's name is
+   not settled. `tinyipam` was proposed; `skep` was offered as an
+   alternative, on the grounds that "tiny" is a promise a project
+   with DNS, a web interface, OIDC and packaging will outgrow, and
+   that the ecosystem's names are words rather than categories.
+   Nothing in phases 3 to 6 depends on the answer.
+
 4. **Does an OVS or flow-based front-end ever get built?**
    *Default: no.* It would serve only Neutron's non-default
    `dhcp` L2 extension, and OVN already occupies that design
@@ -424,6 +439,9 @@ redeploys it.
   vendored `sfui`, and the authenticating proxy in front of it;
   see `docs/api-design.md` for the identity model and the rule
   that keeps the interface from acquiring an API of its own.
+  Per open question 3 as amended, this phase lands in the IPAM's
+  own repository rather than here, and what lands here is whatever
+  it needed from the libraries and could not get.
 - **Phase 8: Namespace datapath.** `setns` and one process over
   many networks, per 1c. The consolidation payoff, and the phase
   that tests whether phase 3's storage trait survives contact
