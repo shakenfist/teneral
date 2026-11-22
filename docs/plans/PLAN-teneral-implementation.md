@@ -314,7 +314,7 @@ by the time it was executed.
 | Phase | Plan | Status | Merged |
 |-------|------|--------|--------|
 | 1. Research spikes | [PLAN-teneral-implementation-phase-01-research-spikes.md](PLAN-teneral-implementation-phase-01-research-spikes.md) | Complete | `homelab-deployments-lfs 658caab (!12)`, teneral `fa77a8e..1337e79` |
-| 2. Repository foundations | [PLAN-teneral-implementation-phase-02-foundations.md](PLAN-teneral-implementation-phase-02-foundations.md) | Complete | teneral `482edf7..` |
+| 2. Repository foundations | [PLAN-teneral-implementation-phase-02-foundations.md](PLAN-teneral-implementation-phase-02-foundations.md) | Complete | teneral `482edf7..8fa1b4b` |
 | 3. The binding store | PLAN-teneral-implementation-phase-03-binding-store.md | Proposed | |
 | 4. The control API | PLAN-teneral-implementation-phase-04-control-api.md | Proposed | |
 | 5. DHCPv4 front-end | PLAN-teneral-implementation-phase-05-dhcpv4.md | Proposed | |
