@@ -2,13 +2,38 @@
 # what a developer runs before proposing a commit, and ci.yml runs the
 # same command on every pull request, so the two cannot drift apart.
 #
-# There are no Rust hooks yet: there is no Cargo workspace to run them
-# over. rustfmt, clippy and cargo-deny arrive with it, running in a
-# Docker image rather than on the host, because Rust toolchains are
-# deliberately not installed on the development machine. See
-# docs/development.md.
+# The Rust hooks run in a Docker image rather than on the host, because
+# Rust toolchains are deliberately not installed on the development
+# machine, and they go through the Makefile so that there is one
+# description of how a container is started. Each is gated on the files
+# it has an opinion about: starting a container costs seconds, and a
+# hook that does it on every unrelated commit is a hook people learn to
+# skip. See docs/development.md.
 
 repos:
+  # rustfmt and clippy over the workspace, and the deterministic half
+  # of cargo-deny. Both call the Makefile; the script says why
+  # advisories are not here.
+  - repo: local
+    hooks:
+      - id: rust-check
+        name: rustfmt and clippy
+        entry: ./scripts/check-rust.sh lint
+        language: script
+        pass_filenames: false
+        files: \.rs$
+
+      # Gated on the manifests and the lockfile rather than on source,
+      # because those are what change the dependency tree this check
+      # has an opinion about. deny.toml is in the set too, so a change
+      # to the policy is checked by the policy.
+      - id: cargo-deny
+        name: cargo-deny licences, bans and sources
+        entry: ./scripts/check-rust.sh deny
+        language: script
+        pass_filenames: false
+        files: ^(.*/)?(Cargo\.toml|Cargo\.lock|deny\.toml)$
+
   # GitHub Actions workflow linter. The config declares the self-hosted
   # runner labels these workflows use, so a label that does not exist
   # on the fleet fails here rather than leaving a job queued for a

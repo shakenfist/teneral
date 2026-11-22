@@ -81,7 +81,7 @@ DOCKER_RUN := docker run --rm $(DOCKER_BASE_ARGS) $(CACHE_MOUNTS)
 # target below depends on.
 DOCKER_RUN_OFFLINE := docker run --rm --network none $(DOCKER_BASE_ARGS) $(CACHE_MOUNTS_RO)
 
-.PHONY: all image ensure-cache fetch lock build test lint clean clean-image help
+.PHONY: all image ensure-cache fetch lock build test lint deny deny-offline clean clean-image help
 
 all: build
 
@@ -93,6 +93,8 @@ help:
 	@echo "  make build    - Build debug binaries"
 	@echo "  make test     - Run the test suite"
 	@echo "  make lint     - Run rustfmt and clippy checks"
+	@echo "  make deny     - Run every cargo-deny check, advisories included"
+	@echo "  make deny-offline - Run the cargo-deny checks that need no network"
 	@echo "  make clean    - Remove build artifacts"
 
 # Build the image the rest of this file runs in. The Dockerfile copies
@@ -166,6 +168,35 @@ lint: fetch
 	$(DOCKER_RUN_OFFLINE) \
 		$(TENERAL_IMAGE) \
 		sh -c "cargo fmt --all --check && cargo clippy --frozen --workspace --all-targets -- -D warnings"
+
+# The supply-chain gate, in two halves, because only one of them is
+# deterministic.
+#
+# `deny-offline` runs the three checks whose answer is a function of
+# the tree alone: licences, bans and sources. The same Cargo.lock
+# gives the same verdict today and next month, so this half is a
+# commit hook (see .pre-commit-config.yaml). It is also the half that
+# enforces the licence constraint, which is why deny.toml exists at
+# all: teneral is Apache-2.0 and may not acquire a copyleft
+# dependency. --frozen is cargo-deny's own spelling of --locked plus
+# --offline, so this needs no network and runs against the read-only
+# cache like every other non-downloading target.
+#
+# `deny` runs those three plus `advisories`, which compares the tree
+# against the RustSec database and so needs both network -- to clone
+# or update that database -- and a cache it can write. Its answer
+# changes when somebody publishes an advisory, which is exactly why
+# it is not a commit hook: as one it would fail a commit that touches
+# no Rust at all, for a reason the committer did not cause. This is
+# the target to run when you want to ask the whole question
+# deliberately, and the one a scheduled supply-chain lane runs.
+deny-offline: fetch
+	$(DOCKER_RUN_OFFLINE) \
+		$(TENERAL_IMAGE) \
+		cargo deny --frozen check licenses bans sources
+
+deny: ensure-cache
+	$(DOCKER_RUN) $(TENERAL_IMAGE) cargo deny --locked check all
 
 # Clean build artifacts.
 #

@@ -1,0 +1,82 @@
+# cargo-deny configuration for teneral.
+#
+# Teneral is Apache-2.0 and may not acquire a GPL, LGPL or AGPL
+# dependency. That denial is expressed by the `allow` list below
+# and nothing else: under `[licenses] version = 2` cargo-deny
+# evaluates an allow-list and treats every unlisted licence as an
+# error, and it removed the separate `deny` key as redundant (see
+# cargo-deny PR 611, which rejects the key outright rather than
+# warning). So the GPL family is denied here by not appearing in
+# `allow`, and the two places a copyleft crate could still get in
+# are `allow` and `exceptions`. Both are listed explicitly, both
+# carry the rule in a comment, and a change to either is a licence
+# decision for a human rather than a lint fix.
+
+[graph]
+# The daemon is Linux-only. Evaluating other targets drags in
+# Windows and macOS crates that are never built, so their licences
+# are not ours to carry.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+# False, so the audit describes the tree that is actually shipped.
+# An optional feature that would pull in a copyleft crate is
+# caught when someone enables it, which is when it becomes true.
+all-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+unmaintained = "workspace"
+# Every entry is a known, accepted advisory and carries a comment
+# saying why it is accepted and what would remove it.
+ignore = []
+
+[licenses]
+version = 2
+# Permissive licences only. No copyleft licence appears here,
+# including the weak ones: adding one is a deliberate decision,
+# not a way to make the check pass.
+#
+# DENIED BY OMISSION, and this is the point of the file:
+#   GPL-1.0, GPL-2.0, GPL-3.0 (dnsmasq is GPL-2/3),
+#   LGPL-2.0, LGPL-2.1, LGPL-3.0,
+#   AGPL-1.0, AGPL-3.0 (Technitium DNS Server is GPL-3.0),
+#   SSPL-1.0, and everything else not written below.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "Unlicense",
+]
+confidence-threshold = 0.93
+# A per-crate exception is a licence decision. Each one needs a
+# comment naming who accepted it and on what grounds. A GPL,
+# LGPL, AGPL or SSPL crate is never an acceptable exception.
+exceptions = []
+unused-allowed-license = "allow"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+# One process serves every network, so a crate that panics on
+# packet-derived input is a cluster-wide outage. A crate banned
+# for that reason is listed here with the reason recorded.
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

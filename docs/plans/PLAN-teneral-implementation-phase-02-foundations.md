@@ -271,10 +271,19 @@ Each item is checkable by running something.
    demonstrated and recorded, both reverted.
 5. `clippy.toml` exists at the root and contains
    `allow-unwrap-in-tests = true`.
-6. `make deny` exits 0, and `grep -n 'deny *=' deny.toml` finds no
-   `licenses.deny` key.
-7. A GPL-licensed crate added as a dependency makes `make deny`
-   fail, naming the licence. Demonstrated, recorded, reverted.
+6. `make deny` exits 0 with `advisories ok, bans ok, licenses ok,
+   sources ok`, and the `[licenses]` table carries no `deny` key:
+   `awk '/^\[licenses\]/{f=1} /^\[/ && !/^\[licenses\]/{f=0}
+   f && /^deny/' deny.toml` prints nothing. A plain
+   `grep 'deny *='` is the wrong check and this item used to name
+   it: `[bans]` has a `deny` key of its own, deliberately empty,
+   so the grep matches on a correct file.
+7. A copyleft crate added as a dependency makes the licence check
+   fail, naming the licence. Demonstrated, recorded, reverted from
+   a copy rather than with `git checkout`. Prefer an **LGPL** crate
+   over a GPL one: weak copyleft is the case someone is most
+   likely to assume is acceptable, so denying it is the stronger
+   demonstration, and the allow-list denies both by omission.
 8. `Cargo.lock` is committed; `fetch` passes `--locked`, every
    compile target passes `--frozen`, and `lock` is the only target
    that can write the lockfile.
@@ -395,3 +404,34 @@ only the last two. The third premise held: teneral's
 `.github/actionlint.yaml` declares `static`, `claude-code`, `vm`,
 `debian-13` and `s`, so 2c has a heavier runner available and
 need invent no label.
+
+**2026-11-22, AEDT. `cargo deny` goes into pre-commit split in
+two, and the advisory half is deferred to a scheduled lane.**
+Step 2b's row says to add `cargo deny` to `pre-commit`. Only
+`licenses`, `bans` and `sources` went in, as the `deny-offline`
+`Makefile` target: those three are a function of `Cargo.lock`
+alone, so the same tree gives the same verdict today and next
+month, and they are the half that enforces the licence
+constraint the file exists for. `advisories` did not, because its
+answer changes when somebody publishes to the RustSec database:
+as a commit hook it would fail a commit touching no Rust at all,
+for a reason the committer did not cause. ryll puts exactly that
+check in a separate scheduled `supply-chain.yml` instead. **Step
+2c therefore owns a scheduled supply-chain lane running
+`make deny`**, which is the full check including advisories, and
+which needs network where the compile lanes do not. The lane is
+the one place CI runs something other than
+`pre-commit run --all-files`, which `docs/development.md`
+otherwise promises; it is scheduled rather than per-commit, so
+the promise that a developer's commit and a pull request check
+the same things is intact.
+
+**`deny.toml` needed no change for cargo-deny 0.22.0.** The file
+phase 1 wrote was transcribed as it stood and validated first
+time, with no rejected or deprecated key -- including
+`[advisories] unmaintained = "workspace"`, which has moved
+between releases. Note for a future reader that definition-of-done
+item 6's `grep -n 'deny *=' deny.toml` does match one line,
+`deny = []` at line 74. That is `[bans] deny`, a different key
+and a deliberately empty one; `[licenses] deny`, the key the item
+is about and the one cargo-deny rejects outright, is absent.
