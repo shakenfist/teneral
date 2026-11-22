@@ -12,8 +12,10 @@ and HTTP metadata are front-ends over a single store of bindings,
 rather than three services that each hold their own copy of who is
 who.
 
-**Status: nothing is built yet.** This repository currently holds
-the plan and the research spikes that gate it. See the
+**Status: early.** The repository carries its build, its lint and
+licence gates, its CI lanes and the differential rig; the daemon
+itself is still a skeleton that prints its version, and the binding
+store underneath it is being built now. See the
 [implementation plan](https://github.com/shakenfist/teneral/blob/develop/docs/plans/PLAN-teneral-implementation.md).
 
 ## Why

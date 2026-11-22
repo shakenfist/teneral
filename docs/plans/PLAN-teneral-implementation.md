@@ -85,8 +85,12 @@ enough to want phase files, so it uses them. The plan index is
 
 ## Situation
 
-Nothing has been built. This repository holds its templates, its
-documentation skeleton and this plan. What follows are the
+The daemon has not been built. Phase 2 built everything around it
+-- the Cargo workspace and its panic lints, the Docker build image
+and the `Makefile` that is the only way `cargo` ever runs, the
+licence gate, two-tier CI and the differential rig skeleton -- and
+the binary itself still does nothing but print its version. What
+follows are the
 measurements taken on 2026-11-21 that the plan rests on; a later
 phase that finds one of them wrong should say so here rather than
 quietly working around it.
@@ -330,7 +334,7 @@ by the time it was executed.
 |-------|------|--------|--------|
 | 1. Research spikes | [PLAN-teneral-implementation-phase-01-research-spikes.md](PLAN-teneral-implementation-phase-01-research-spikes.md) | Complete | `homelab-deployments-lfs 658caab (!12)`, teneral `fa77a8e..1337e79` |
 | 2. Repository foundations | [PLAN-teneral-implementation-phase-02-foundations.md](PLAN-teneral-implementation-phase-02-foundations.md) | Complete | teneral `482edf7..8fa1b4b` |
-| 3. The binding store | PLAN-teneral-implementation-phase-03-binding-store.md | Proposed | |
+| 3. The binding store | [PLAN-teneral-implementation-phase-03-binding-store.md](PLAN-teneral-implementation-phase-03-binding-store.md) | In progress | |
 | 4. The control API | PLAN-teneral-implementation-phase-04-control-api.md | Proposed | |
 | 5. DHCPv4 front-end | PLAN-teneral-implementation-phase-05-dhcpv4.md | Proposed | |
 | 6. DNS front-end | PLAN-teneral-implementation-phase-06-dns.md | Proposed | |
@@ -340,12 +344,13 @@ by the time it was executed.
 | 10. Generic content front-ends | PLAN-teneral-implementation-phase-10-content.md | Proposed | |
 | 11. Push audit | - | Proposed | |
 
-Phases 1 and 2 are the only phases scheduled. The operator has
-other projects in flight and has said explicitly that this one
-should not proceed past the prototype until those are further
-along, so phases 3 to 11 are `Proposed` rather than `Not started`.
-That is the honest status and it should not be promoted to make
-the table look busier.
+Phases 1 to 3 are scheduled. The first two said that they were
+the only ones that would be, because the operator had other
+projects in flight and had said this one should not proceed past
+the prototype until those were further along; he resumed it on
+2026-11-23. Phases 4 to 11 remain `Proposed` rather than
+`Not started`, which is the honest status and should not be
+promoted to make the table look busier.
 
 Both phases landed on `develop` without a pull request, because
 there is still no remote, so both `Merged` cells carry a
@@ -420,7 +425,12 @@ redeploys it.
   user-class and vendor-class, and facts are addresses,
   hostnames, lease state, options and arbitrary content blobs.
   SQLite behind a trait. The lease lifecycle and its durability
-  point. Two-network tests from the first commit.
+  point. Two-network tests from the first commit. This sketch
+  predates `docs/api-design.md`, which phase 1e wrote: its
+  *What this asks of the storage layer* section makes five
+  numbered demands that this sketch does not mention and that are
+  most of the phase's cost. The phase file is written against
+  that document rather than against this paragraph.
 - **Phase 4: The control API.** The transport chosen in 1e, CRUD
   over the store, watch/subscribe, authentication.
 - **Phase 5: DHCPv4 front-end.** The socket datapath without

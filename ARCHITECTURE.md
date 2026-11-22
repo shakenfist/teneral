@@ -51,9 +51,13 @@ inside a network namespace where one exists. Home networks have no
 namespaces; Shaken Fist and Neutron's DHCP agent both put each
 network in its own. A socket created in a namespace keeps serving
 that namespace after the process moves away, which is what lets a
-single process serve networks whose addresses overlap. That has not
-been confirmed experimentally yet, and it is the assumption the whole
-design rests on; the research spike that settles it is in
+single process serve networks whose addresses overlap. That was the
+assumption the whole design rested on, and it was confirmed
+experimentally on 2026-11-21: the measurement is the
+`netns-socket-bound-at-creation`, `netns-setns-moves-thread` and
+`netns-held-fd-keeps-namespace` rows in
+[docs/provenance.md](docs/provenance.md). A namespace holding more
+than one interface was not covered, and is still open; see
 [the implementation plan](docs/plans/PLAN-teneral-implementation.md).
 
 A flow-based datapath (OpenFlow packet-in, or tc-bpf keyed on
