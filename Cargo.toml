@@ -1,0 +1,61 @@
+[workspace]
+# One member for now. The architecture names several components, but
+# which of them become crates is a question for the phases that build
+# the binding store and the API; an empty crate created ahead of that
+# has to be kept compiling, kept linted and justified in review.
+members = ["teneral"]
+
+# The MSRV-aware resolver: it prefers the newest dependency version
+# whose own `rust-version` the floor declared below can still build,
+# and errors naming the crate when no version qualifies. Stated
+# explicitly because a virtual workspace manifest does not inherit a
+# member's edition default. This is what keeps that floor honest --
+# under the older resolver cargo picks the newest version regardless,
+# the build still succeeds on the container's much newer toolchain,
+# and the declared floor quietly becomes a fiction. Here, a
+# dependency that needs more makes that visible at resolution time,
+# and the floor is then raised deliberately.
+resolver = "3"
+
+[workspace.lints.clippy]
+# A panic is a cluster-wide outage here: one process serves every
+# network, so an `unwrap()` on anything derived from a packet is a
+# remote denial of service against all of them at once.
+#
+# `deny` rather than `warn`, which changes where the lint bites and
+# not whether. `make lint` passes `-D warnings`, so either setting
+# blocks the gate. The difference is everything before the gate: a
+# bare `cargo clippy`, and an editor running clippy as you type,
+# report `deny` as an error and `warn` as one more line of yellow
+# among many. Note that this is a clippy lint, so an ordinary
+# `cargo build` never evaluates it at all -- only clippy does.
+#
+# Test code is exempt through `allow-unwrap-in-tests` in the root
+# `clippy.toml`.
+unwrap_used = "deny"
+
+[workspace.package]
+version = "0.1.0"
+# Edition 2024. This is a new tree with nothing to migrate, so there
+# is no reason to start on an older edition, and the newer defaults
+# are ones this project wants: `unsafe_op_in_unsafe_fn` warns rather
+# than being silently allowed, and the tightened temporary-lifetime
+# and RPIT capture rules remove two classes of surprise from code
+# that will hold locks across awaits.
+edition = "2024"
+# 1.85 is the floor edition 2024 itself imposes, and nothing in the
+# tree needs more than that, so claiming more would be decoration.
+# Deliberately not the build image's compiler version: the image tag
+# says which toolchain builds the project, this says which toolchains
+# the source is willing to be built by, and the two answer different
+# questions.
+#
+# What raises it: a language or library feature stabilised later than
+# 1.85 that the code actually uses, or a dependency whose own
+# `rust-version` is higher -- which the resolver above turns into a
+# resolution failure naming the crate rather than a silent lie here.
+# Raise it in the same commit as the thing that needed it.
+rust-version = "1.85"
+license = "Apache-2.0"
+authors = ["Michael Still <mikal@stillhq.com>"]
+repository = "https://github.com/shakenfist/teneral"

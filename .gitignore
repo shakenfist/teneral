@@ -1,4 +1,11 @@
-/target
+# Cargo build output.
+/target/
+
+# The cargo download cache the Makefile bind-mounts into the build
+# container. CARGO_CACHE overrides where it lives; this is the
+# in-checkout default.
+/.cargo-cache/
+
 **/*.rs.bk
 Cargo.lock.orig
 *.swp

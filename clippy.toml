@@ -1,0 +1,6 @@
+# `unwrap_used` is denied for the workspace (see Cargo.toml), because
+# a panic in this daemon takes every network down at once. A test has
+# no such reach: a failed `unwrap()` there is how the test reports a
+# failure, and making test code thread results through instead buys
+# nothing and obscures what is being asserted.
+allow-unwrap-in-tests = true

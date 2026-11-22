@@ -1,0 +1,15 @@
+[package]
+name = "teneral"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "A DHCP and DNS daemon for many networks in one process"
+
+# Inherit the workspace lint table rather than restating it. Without
+# this the workspace `[workspace.lints]` block applies to nothing at
+# all, which fails quietly: the lints look configured and are not.
+[lints]
+workspace = true
