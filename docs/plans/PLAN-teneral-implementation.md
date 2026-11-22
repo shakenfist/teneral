@@ -314,7 +314,7 @@ by the time it was executed.
 | Phase | Plan | Status | Merged |
 |-------|------|--------|--------|
 | 1. Research spikes | [PLAN-teneral-implementation-phase-01-research-spikes.md](PLAN-teneral-implementation-phase-01-research-spikes.md) | Complete | `homelab-deployments-lfs 658caab (!12)`, teneral `fa77a8e..1337e79` |
-| 2. Repository foundations | [PLAN-teneral-implementation-phase-02-foundations.md](PLAN-teneral-implementation-phase-02-foundations.md) | In progress | |
+| 2. Repository foundations | [PLAN-teneral-implementation-phase-02-foundations.md](PLAN-teneral-implementation-phase-02-foundations.md) | Complete | teneral `482edf7..` |
 | 3. The binding store | PLAN-teneral-implementation-phase-03-binding-store.md | Proposed | |
 | 4. The control API | PLAN-teneral-implementation-phase-04-control-api.md | Proposed | |
 | 5. DHCPv4 front-end | PLAN-teneral-implementation-phase-05-dhcpv4.md | Proposed | |
@@ -325,12 +325,18 @@ by the time it was executed.
 | 10. Generic content front-ends | PLAN-teneral-implementation-phase-10-content.md | Proposed | |
 | 11. Push audit | - | Proposed | |
 
-Phase 1 is the only phase scheduled. The operator has other
-projects in flight and has said explicitly that this one should
-not proceed past the prototype until those are further along, so
-phases 2 to 11 are `Proposed` rather than `Not started`. That is
-the honest status and it should not be promoted to make the table
-look busier.
+Phases 1 and 2 are the only phases scheduled. The operator has
+other projects in flight and has said explicitly that this one
+should not proceed past the prototype until those are further
+along, so phases 3 to 11 are `Proposed` rather than `Not started`.
+That is the honest status and it should not be promoted to make
+the table look busier.
+
+Both phases landed on `develop` without a pull request, because
+there is still no remote, so both `Merged` cells carry a
+`first..last` range rather than a pull request number. Neither had
+a review pass or a CI run; the management session's read of the
+diff was the only check.
 
 ### Phase 1: Research spikes
 
@@ -372,36 +378,27 @@ recommends a transport. Phase 2 does not start until the operator
 has read the findings, because a no-go on 1c changes the project
 rather than the phase.
 
-### Phases 2 to 10
+### Phases 3 to 10
 
-These are sketched rather than planned, because phase 1 is
+These are sketched rather than planned, because phase 1 was
 expected to change them. Each gets its own phase file, written
 when it is reached, by `/next-phase`.
 
-- **Phase 2: Repository foundations.** The half of this that needs
-  no Rust code was landed ahead of phase 1 and is described in
-  `docs/development.md`: `pre-commit`, the lint and reviewer CI
-  lanes, the secret scanner, Renovate, the configuration export and
-  the review and retest bots. What is left here is everything that
-  needs code to act on: the Cargo workspace, the `Makefile` and the
-  Docker build image, `clippy.toml`, the build and test lanes and
-  the two-tier CI and merge queue that gate them, `deny.toml` with
-  the GPL/AGPL denial that open question 2 and the licence
-  constraint both rest on, the `release-automation-rust` and
-  `review-tracking` templates from shakenfist/development, the
-  panic lints (`unwrap_used` in `[workspace.lints.clippy]`, with
-  `allow-unwrap-in-tests` in a root `clippy.toml`), CodeQL, and
-  the differential rig skeleton that compares bytes against a
-  real dnsmasq's recorded behaviour. The rig is foundations, not
-  a testing afterthought: it is the only lawful source of truth
-  for behaviour no RFC specifies.
+Phase 2 was sketched here and is now complete; its own file is the
+record of what it shipped and why. In summary: the Cargo
+workspace with `unwrap_used = "deny"` inherited by every crate,
+the Docker build image and the `Makefile` that is the only way
+`cargo` is ever invoked, `clippy.toml`, `deny.toml` and the Rust
+`pre-commit` hooks, two-tier CI with the merge-queue gates, a
+scheduled supply-chain lane, CodeQL, the
+`release-automation-rust` and `review-tracking` templates, and the
+differential rig skeleton. Three things it did not do, each for a
+stated reason: the GitHub side of either template, which needs a
+repository that does not exist; a crate split, which would
+prejudge phases 3 and 4; and any dnsmasq run by the rig, because
+the lab is the only lawful place dnsmasq runs and phase 5
+redeploys it.
 
-  `docs/provenance.md` was listed here too and is **done**:
-  phase 1's step 1f shipped it with 26 rows.
-  `docs/development.md`'s *Still to come* section is the fuller
-  statement of what remains, and names the panic lints and
-  CodeQL that this sketch first omitted; phase 2's own file
-  takes the union of the two.
 - **Phase 3: The binding store.** The layer everything else is a
   projection of: `(network, interface) x client identity -> facts`,
   where identity is the union of MAC, client-id, DUID/IAID,
@@ -923,8 +920,9 @@ because the following statements will be true:
 
 * `pre-commit run --all-files` passes, and CI runs the same
   command on every pull request.
-* `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
-  `cargo test --all` and `cargo deny check` are all clean.
+* `make lint`, `make test` and `make deny` are all clean. Every
+  `cargo` invocation goes through the `Makefile` into the build
+  image; nothing Rust runs on the host.
 * No dependency, direct or transitive, carries a GPL or AGPL
   licence, and `cargo deny` is what proves it rather than
   inspection.
@@ -935,7 +933,9 @@ because the following statements will be true:
 * Every change to lookup or to the binding store carries a test
   with two networks holding the same address.
 * Where the change alters bytes on the wire, the differential rig
-  has been run against a real dnsmasq and the result is recorded.
+  carries a case comparing those bytes with a dnsmasq exchange
+  captured in the lab, and the case names the provenance rows it
+  supports.
 * Documentation in `docs/` describes any user-visible change.
   `AGENTS.md` changes only if a convention changed;
   `ARCHITECTURE.md` only if the shape of the system changed;
@@ -1009,6 +1009,49 @@ chosen to defer to here, so that we do not forget them.
   reject `hlen > 16` at ingress, because #111 is unreviewed,
   unmerged and unpublished, and 0.15.0 remains the only
   release.
+* **Renovate cannot see the Rust toolchain tag, so the base image
+  will never be bumped automatically.** The tag lives once, in the
+  `Makefile`, as `RUST_IMAGE` passed to a default-less `ARG` in
+  the `Dockerfile` -- which is the single place it was meant to
+  live, but Renovate's dockerfile manager reads `FROM` lines and
+  cannot see a version arriving as a build argument. Fixing it
+  means a `customManagers` rule in `renovate.json` matching the
+  `Makefile` assignment, with `datasource: docker` and
+  `depName: rust`. Until then the toolchain only moves when
+  somebody edits that line by hand, and nothing says so.
+* **The GitHub side of the build and review arrangement is not
+  set up, and cannot be until the repository exists.** Seven
+  steps, in order, with their exact commands and the reason each
+  detail matters: see *GitHub-side adoption* in the execution
+  notes of
+  [the foundations phase file](PLAN-teneral-implementation-phase-02-foundations.md).
+  They cover the `develop` ruleset, the `review-marks` environment
+  and its branch policy, the review-marks App and key, the merge
+  queue, and the `release` environment and tag ruleset. None of
+  them is ticked, worked around or disabled. Whoever creates
+  `shakenfist/teneral` does them; `docs/development.md` summarises
+  what is waiting for a reader who never sees this plan.
+* **Teneral is not registered in the fleet's own records.** Two
+  changes to shakenfist/development that this phase could not make
+  from here: a row for teneral in the "Projects using these
+  templates" table in `templates/review-tracking/README.md`, with
+  its default branch and the identity its prune job pushes as; and
+  bringing teneral into scope for the weekly consistency audit,
+  which is what would notice a drifted template copy here in
+  future. Both are cross-repository work and so land in that
+  repository, not this one.
+* **ryll's CodeQL workflow is the drifted copy, not teneral's.**
+  Establishing that teneral's bytes were right turned up that ryll
+  carries the same workflow with floating `@v4` action tags where
+  the fleet template pins by commit. Worth a one-line fix in ryll,
+  and worth noticing that nothing reported it.
+* **A release ships one unpackaged binary.** The release workflow
+  builds `make release` and uploads the binary; there is no `.deb`,
+  no `.rpm`, no tarball and no registry, because teneral has
+  nothing worth installing yet and choosing a package format in a
+  workflow is a decision made by the wrong person. Phase 7 is where
+  packaging is actually decided, and it should revisit the release
+  artefact at the same time.
 
 ### Bugs fixed during this work
 

@@ -85,21 +85,28 @@ noticing its own mistake.
 pre-commit run --all-files
 ```
 
-That covers the hooks: actionlint over `.github/workflows/`,
-shellcheck over `tools/`, and the formatting and whitespace
-hooks. `ci.yml` runs the same command on every pull request, so a
-clean local run is what makes the CI run boring.
+That covers the hooks: rustfmt and clippy over the workspace, the
+deterministic half of cargo-deny, actionlint over
+`.github/workflows/`, shellcheck over `scripts/` and `tools/`, and
+the formatting and whitespace hooks. `ci.yml` runs the same command
+on every pull request, so a clean local run is what makes the CI
+run boring.
 
-Then the Rust toolchain, which is the substance of wave 1 here:
+Then the rest of the build, which is the substance of wave 1 here:
 
 ```
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all
-cargo deny check
+make lint
+make test
+make deny
 ```
 
-`cargo deny check` is the licence gate as much as the advisory
+`make lint` is `cargo fmt --all --check` and
+`cargo clippy --workspace --all-targets -- -D warnings`. Every one
+of these runs cargo inside the build image: nothing Rust runs on
+the host here, so a bare `cargo` command is the wrong check even
+where one would work.
+
+`make deny` is the licence gate as much as the advisory
 gate. This project is Apache-2.0 and may not take a GPL or AGPL
 dependency even transitively, and `deny.toml` is what proves it;
 an inspection of `Cargo.toml` does not, because the problem
@@ -147,7 +154,7 @@ git diff "${AUDIT_RANGE:-origin/develop...HEAD}" -- '*.rs' ':!*/tests/*' ':!test
 # panic on a hostile length field; `get()` and `get(a..b)` return
 # None. This is the single most likely shape of a remotely
 # triggerable panic in this codebase.
-git diff "${AUDIT_RANGE:-origin/develop...HEAD}" -- 'src/*.rs' | \
+git diff "${AUDIT_RANGE:-origin/develop...HEAD}" -- 'teneral/src/' | \
     grep -nE '^\+[^+].*\[[a-z_][a-z_0-9]*(\s*\.\.|\s*\])'
 
 # New or widened unsafe. Raw sockets, AF_PACKET and setns are where
@@ -169,7 +176,7 @@ git diff "${AUDIT_RANGE:-origin/develop...HEAD}" -- 'Cargo.lock' | \
 # If the first command prints anything and the second prints
 # nothing, that is a finding before the code is even read.
 git diff "${AUDIT_RANGE:-origin/develop...HEAD}" --name-only -- \
-    'src/dhcp/*' 'src/dns/*' 'src/tftp/*' 'src/wire/*'
+    'teneral/src/dhcp/' 'teneral/src/dns/' 'teneral/src/tftp/' 'teneral/src/wire/'
 git diff "${AUDIT_RANGE:-origin/develop...HEAD}" --name-only -- 'docs/provenance.md'
 
 # Configuration read from a file rather than the API. The decision
@@ -177,13 +184,13 @@ git diff "${AUDIT_RANGE:-origin/develop...HEAD}" --name-only -- 'docs/provenance
 # the binding store the single source of truth and what removed the
 # need to reproduce dnsmasq's option grammar. A file parser
 # creeping back in is an architectural regression, not a feature.
-git diff "${AUDIT_RANGE:-origin/develop...HEAD}" -- 'src/*.rs' | \
+git diff "${AUDIT_RANGE:-origin/develop...HEAD}" -- 'teneral/src/' | \
     grep -nE '^\+[^+].*(read_to_string|File::open|/etc/|\.conf|\.yaml|\.toml")'
 
 # Hard-coded addresses, interfaces and ports. A network daemon with
 # a baked-in 10.0.0.1, eth0 or :67 works in one deployment and in
 # no other. Test fixtures are expected to hit this; src/ is not.
-git diff "${AUDIT_RANGE:-origin/develop...HEAD}" -- 'src/*.rs' | \
+git diff "${AUDIT_RANGE:-origin/develop...HEAD}" -- 'teneral/src/' | \
     grep -nE '^\+[^+].*([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|"(eth|ens|br-|veth)[a-z0-9-]*"|:(53|67|68|69|80|547)\b)'
 
 # TODO / FIXME / HACK / XXX, and new suppressions
@@ -221,10 +228,12 @@ not exist in the differential rig, is worse than no row: it
 converts an open question into a settled one without settling it.
 
 `REVIEWS.md` needs no change in a pull request that changes code
-or documentation, and review tracking is not set up in this
-repository yet, so there is nothing to prune. The phase that
-adopts the `review-tracking` template is what makes the fleet
-rule live here.
+or documentation: it is generated, and `prune-reviews.yml` is what
+retires a mark whose file has changed. That workflow cannot run
+until the repository has a remote and its GitHub-side
+configuration, so until then `REVIEWS.md` is only as current as the
+last hand-run of `./tools/review-tracking.sh regen`. Either way, do
+not hand-edit it.
 
 ## Wave 2: Deeper review
 
@@ -448,9 +457,13 @@ and whether it is blocking or advisory.
 
 Review `git diff "${AUDIT_RANGE:-origin/develop...HEAD}"` for test
 coverage. Tests are Rust: unit tests beside the code, integration
-tests under `tests/`, and the differential rig under
-`tests/differential/` which runs a real dnsmasq and compares
-bytes. All are run by `cargo test --all`.
+tests under `teneral/tests/`, and the differential rig under
+`teneral/tests/differential/`, which compares teneral's bytes with
+a dnsmasq exchange captured in a lab. It runs no dnsmasq itself,
+deliberately: the lab is the only lawful place dnsmasq runs, and
+the phase that builds the DHCPv4 front end redeploys the
+Linux-bridge lab playbook to capture into the corpus. All are run
+by `make test`.
 
 - **The two-network test.** Does every change to lookup or to the
   binding store have a test with two networks holding the *same*
@@ -750,9 +763,8 @@ class, and a recommended fix.
 
 After all agents complete:
 
-- [ ] Wave 1 passed (`pre-commit` clean, `cargo fmt --check`,
-      `cargo clippy -- -D warnings`, `cargo test --all` and
-      `cargo deny check` clean, greps reviewed).
+- [ ] Wave 1 passed (`pre-commit` clean, `make lint`, `make test`
+      and `make deny` clean, greps reviewed).
 - [ ] Wave 2 findings reviewed.
 - [ ] Any blocking findings from 2a/2b/2c fixed and re-verified.
 - [ ] Security findings assessed -- critical and high must be

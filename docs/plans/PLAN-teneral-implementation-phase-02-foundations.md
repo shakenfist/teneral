@@ -690,3 +690,28 @@ Release automation, before the first release (steps 2 to 4 of
    it counts only a `merge_group` run or a push to the default
    branch, and this repository's CI reports its results through
    `Can enqueue` and `Can merge`.
+
+**2026-11-22, AEDT. The `Merged` cell is deliberately half-filled.**
+Decision 9 lands this phase on `develop` as a `first..last` range,
+and the range starts at `482edf7`. The last commit cannot be known
+from inside the phase, because 2f's own commit is the last one and
+is not written yet, so the master plan records
+`teneral 482edf7..` and the management session completes it once
+the branch lands -- exactly as phase 1 did. A reader finding an
+open-ended range there is looking at a gap that is recorded, not at
+an oversight.
+
+**2f found `PUSH-AUDIT.md` falsified in more places than its row
+names.** The two the row names were real: the differential rig is
+at `teneral/tests/differential/`, not `tests/differential/`, and it
+deliberately runs no dnsmasq. Three more were not noticed when the
+row was written. Wave 1 ran bare `cargo` commands, which this phase
+made the wrong check in a repository where every `cargo` goes
+through the `Makefile` into a container. Several of its greps
+filtered on `src/*.rs` and `src/dhcp/*`, pathspecs that match
+nothing now that the crate owns `teneral/src/` -- the worst kind of
+wrong for a check that reports rather than blocks, because it
+passes silently. And it still said review tracking was not set up,
+which is now half true in a way worth stating precisely. The master
+plan's success criteria carried the same bare `cargo` commands and
+were corrected with them.

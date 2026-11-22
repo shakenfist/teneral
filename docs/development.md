@@ -3,22 +3,57 @@
 How to build, lint and test teneral, what CI runs, and which parts of
 the arrangement live in GitHub's settings rather than in this tree.
 
-Teneral has no Cargo workspace yet, so this page is in two halves:
-what is in place now, and what arrives with the first code. The
-[implementation plan](plans/PLAN-teneral-implementation.md) says when.
+The build, the lint suite, the licence gate and the CI lanes are all
+in the tree. What is not in place is the GitHub-side half of the
+arrangement, because this repository has no remote yet; the last two
+sections say what is waiting on that. The
+[implementation plan](plans/PLAN-teneral-implementation.md) tracks
+the rest.
 
 ## Rust is built in Docker, not on the host
 
-Rust toolchains are deliberately not installed on the development
-machine, which runs several Rust projects at different toolchain
-versions. The build therefore happens inside a container image the
+A rustup-managed toolchain is deliberately not installed on the
+development machine, which runs several Rust projects at different
+toolchain versions. (A distribution Rust happens to be there; it is
+not what this project builds with, and no `cargo` command here is
+meant to find it.) The build happens inside a container image the
 repository defines, following the pattern
 [ryll](https://github.com/shakenfist/ryll) and
 [instar](https://github.com/shakenfist/instar) already use: a
 `Makefile` wraps `docker run` so that `make lint`, `make build` and
 `make test` work the same on a laptop and on a CI runner.
 
-None of that exists yet. It arrives with the workspace.
+`make help` lists the targets. `make image` builds the image,
+`make fetch` populates the dependency cache with the network on, and
+every compile target then runs `--frozen` and `--offline` with that
+cache mounted read-only, because a dependency's `build.rs` runs
+arbitrary code. `make lock` is the only target allowed to write
+`Cargo.lock`, so taking a new dependency is a deliberate step rather
+than a side effect of a build. In CI the cache has to live outside
+the checkout, which `actions/checkout` cleans on every run; override
+`CARGO_CACHE` to move it.
+
+The toolchain is pinned once, by the image tag in the `Makefile`.
+There is deliberately no `rust-toolchain.toml`: it makes rustup try
+to sync a channel, which fails in a container with no network. The
+language floor is `rust-version` in `[workspace.package]`, so a
+too-old toolchain fails with cargo's own MSRV error instead.
+
+`unwrap_used` is `deny` in `[workspace.lints.clippy]`, and every
+crate inherits it with `[lints] workspace = true`. A root
+`clippy.toml` sets `allow-unwrap-in-tests = true`, so test code is
+exempt. `deny` rather than `warn` is chosen so that a bare
+`cargo clippy`, and an editor running clippy as you type, report the
+call as an error the moment it is written rather than as one more
+line of yellow met at push time. It is a clippy lint, so no
+`cargo build` evaluates it at any level.
+
+`make test` runs the workspace's tests, among them the differential
+rig that compares teneral's bytes with a captured dnsmasq exchange.
+[The differential rig](differential-rig.md) describes what a case
+asserts, why each one names a row in the
+[provenance record](provenance.md), and why its corpus is captured
+in a lab rather than from a dnsmasq the rig runs itself.
 
 ## Linting
 
@@ -27,23 +62,39 @@ pre-commit run --all-files
 ```
 
 That is the whole gate, and it is what `.github/workflows/ci.yml`
-runs. Nothing in CI names a linter directly, so a hook added to
+runs. No gating lane names a linter directly, so a hook added to
 `.pre-commit-config.yaml` is enforced on the next pull request without
 a CI change, and CI cannot end up checking something different from
-what a developer's commit checked.
+what a developer's commit checked. The one check CI runs that a
+developer's commit does not is the advisory half of `cargo deny`,
+which is in a scheduled lane that gates nothing, for the reason
+below.
 
 The hooks today:
 
 | Hook | What it reads |
 |------|---------------|
+| `rust-check` | The workspace, when a `.rs` file changed: `cargo fmt --all --check`, then `cargo clippy --workspace --all-targets -- -D warnings`. |
+| `cargo-deny` | `Cargo.toml`, `Cargo.lock` and `deny.toml`, for licences, bans and sources -- so a change to the policy is checked by the policy. |
 | `actionlint` | The workflow files, including their embedded shell. Its runner-label list is `.github/actionlint.yaml`. |
-| `trailing-whitespace`, `end-of-file-fixer`, `check-yaml`, `check-merge-conflict` | Everything. |
+| `trailing-whitespace`, `end-of-file-fixer`, `check-yaml`, `check-merge-conflict` | Everything, except that the two rewriting hooks skip weAudit's review marks under `.vscode/`, which are generated without a trailing newline. |
 | `shellcheck` | Shell under `scripts/` and `tools/`, with `-x` so a sourced sibling is followed. |
 | `gitleaks` | The working tree, for credentials. |
 | `skillsaw` | The agent context -- `AGENTS.md` and anything else an agent is handed -- for malformed structure, smuggled instructions and pasted secrets. |
 
-`rustfmt`, `clippy` and `cargo deny` join the list with the
-workspace, running through the Docker image rather than on the host.
+The two Rust hooks call the `Makefile` through
+`scripts/check-rust.sh`, so they run in the build image rather than
+on the host and there is one description of how a container is
+started. Each is gated on the files it has an opinion about: starting
+a container costs seconds, and a hook that does it on every unrelated
+commit is a hook people learn to skip.
+
+`cargo deny`'s advisory check is deliberately not a hook. Its answer
+changes when somebody publishes to the RustSec database, so as a
+commit hook it would fail a commit touching no Rust at all, for a
+reason the committer did not cause. `make deny-offline` is the half
+that is a function of `Cargo.lock` alone and so is reproducible; the
+full `make deny` runs in `supply-chain.yml` instead.
 
 ## What CI runs
 
@@ -54,25 +105,45 @@ queued forever.
 
 | Workflow | Trigger | What it does |
 |----------|---------|--------------|
-| `ci.yml` | Pull requests to `develop`, and `workflow_dispatch` | The `pre-commit` suite, then the automated reviewer once it passes. |
+| `ci.yml` | Pull requests to `develop`, `merge_group`, and `workflow_dispatch` | Two tiers, described below: the `pre-commit` suite and a debug build on a pull request, the test suite on a merge-queue entry, and the automated reviewer once the lint passes. |
+| `supply-chain.yml` | Weekly, pull requests, and `workflow_dispatch` | `make deny` -- every cargo-deny check, advisories included. It appears in no `needs:` list and gates nothing: an advisory published between a pull request opening and its merge is not that pull request's fault, and a gate on it would eject a queue entry for something the author did not cause. |
+| `codeql-analysis.yml` | Pushes to `develop`, pull requests, and weekly | GitHub's code scanning. The file is the fleet template verbatim and pins no languages; CodeQL's own autodetection finds Rust. |
+| `release.yml` | Tags matching `v*` | The release gate and build. See [releasing](releasing.md). |
+| `prune-reviews.yml` | Pushes, and daily | Retires review marks whose file has changed since it was read, and imports shakenfist/development's reviews of the template files copied from there. Needs GitHub-side configuration that does not exist yet; see below. |
 | `secret-scan.yml` | Pull requests, pushes to `develop`, and `workflow_dispatch` | `gitleaks` over the branch and the history behind it. Separate from `ci.yml` because it needs the push trigger, and because it must read the prose a path filter would skip. |
 | `renovate.yml` | Hourly | Dependency updates, from the policy in `renovate.json`. |
 | `export-repo-config.yml` | Daily | Exports this repository's GitHub settings and opens a pull request when they have changed, so the settings below are reviewable in version control. |
 | `pr-re-review.yml` | Comment `@shakenfist-bot please re-review` | Another pass of the automated reviewer on a pull request. |
 | `pr-retest.yml` | Comment `@shakenfist-bot please retest` | Re-dispatches the test workflow without a new commit. |
 
-`ci.yml` carries no path filter and no two-tier smoke/merge split, and
-declares no `Can enqueue` / `Can merge` gates. Everything in the
-repository today is prose, and every hook above reads prose, so a
-filter would skip the only job there is. The filter, the merge tier and
-the gates arrive with the code they exist to protect; the fleet shape
-to copy them from is
-[andris's `ci.yml`](https://github.com/shakenfist/andris/blob/develop/.github/workflows/ci.yml)
-and the reasoning is in shakenfist/development's
+`ci.yml`'s two tiers are `lint` and `build` on `pull_request`,
+gating `Can enqueue`, and `test` on `merge_group`, gating
+`Can merge`. `Can see status` runs on every event and depends on
+nothing, so a required check always reports. `workflow_dispatch`
+runs both tiers, which is what makes `pr-retest.yml` a full retest.
+`test` is in the merge tier for what the suite becomes rather than
+what it is: `build` and `lint` already compile the workspace and
+`clippy --all-targets` type-checks the test targets, so what `test`
+adds is *running* them, and the growth in it is the differential
+comparisons against a captured corpus.
+
+A `check_paths` job detects changes that cannot affect the build, and
+`build` and `test` skip them -- a skipped job satisfies a required
+check, which a trigger-level filter would not. `lint` deliberately
+does not consume the filter: it runs the whole `pre-commit` suite,
+most of which reads human-written text, so a documentation-only
+change is exactly the change those hooks exist to catch, and
+filtering it would skip the only check such a change has. The
+reasoning behind the fleet's shape is in shakenfist/development's
 [expensive-lane-path-filter](https://github.com/shakenfist/development/blob/main/docs/audits/expensive-lane-path-filter.md)
 and
 [merge-group-cancellation](https://github.com/shakenfist/development/blob/main/docs/audits/merge-group-cancellation.md)
 criteria.
+
+None of these lanes has ever run. There is no remote, so every
+workflow here is unexercised; `actionlint` checks their structure,
+their embedded shell and their runner labels, and nothing checks
+their logic until the first push.
 
 ## Settings that are not in this tree
 
@@ -86,7 +157,7 @@ them daily, which is how a change to one becomes visible here.
 | `RENOVATE_TOKEN` secret | An organisation token | `renovate.yml` pushes branches with it. |
 | Delete branch on merge | On | |
 | Secret scanning and push protection | On | |
-| Branch ruleset on `develop` | Required reviews and required status checks | The checks to require are the jobs in `ci.yml`; a merge queue, and the `Can enqueue` / `Can merge` gates it needs, come with the merge tier. |
+| Branch ruleset on `develop` | Required reviews and required status checks | The checks to require are `Can see status`, `Can enqueue` and `Can merge`, which is what makes the merge queue work. |
 
 Three of those -- the Renovate token, secret scanning, and the ruleset
 -- are only visibly working once something has run. A scheduled
@@ -99,46 +170,52 @@ reasoning is shakenfist/development's
 criterion, which reports a workflow that has never succeeded on the
 default branch and has failed three times unattended.
 
-A merge queue is required of a repository that publishes releases, so
-it is adopted along with release automation rather than now. When it
-is, `max_entries_to_build` and `min_entries_to_merge` are both `1`; the
+A merge queue is required of a repository that publishes releases,
+and `ci.yml` reports through the gates it needs, so enabling it on
+`develop` is one of the steps waiting below. `max_entries_to_build`
+and `min_entries_to_merge` are both `1`; the
 reasoning is in shakenfist/development's
 [merge-queue-config](https://github.com/shakenfist/development/blob/main/docs/audits/merge-queue-config.md)
 criterion.
 
-## Still to come
+## Review tracking is adopted in the tree and not on GitHub
 
-These are the fleet conventions teneral does not yet meet, each
-because it has nothing to act on. They are work for the foundations
-phase of the
-[implementation plan](plans/PLAN-teneral-implementation.md), not
-oversights.
+Human review tracking, from shakenfist/development's
+[`review-tracking`](https://github.com/shakenfist/development/tree/main/templates/review-tracking)
+template, records which source files a person has actually read, as
+distinct from which ones a tool has checked. The file half is here:
+`.github/workflows/prune-reviews.yml` and the two scripts under
+`tools/` are byte-for-byte copies of the template, the scope policy
+in `.vscode/review-scope.toml` and the `.gitignore` entry for
+weAudit's per-session day log are this repository's own, and
+`REVIEWS.md` is generated by `./tools/review-tracking.sh regen`. It
+currently reports that none of the in-scope files has been reviewed
+by anybody, which is correct.
 
-- **The Cargo workspace**, the `Makefile` and the Docker build image,
-  and with them the `rustfmt`, `clippy` and `cargo deny` hooks and the
-  build and test lanes.
-- **`deny.toml`**, which is what proves no GPL or AGPL dependency
-  enters the tree. That is a licence constraint rather than a
-  preference; see the [provenance record](provenance.md).
-- **The panic lints**: `unwrap_used` set to `warn` or `deny` in the
-  workspace manifest's `[workspace.lints.clippy]`, every crate
-  inheriting it, and `allow-unwrap-in-tests = true` in a root
-  `clippy.toml` so test code is exempt. A panic here is an outage for
-  every network at once, so this is not style; `AGENTS.md` carries it
-  as an invariant.
-- **Two-tier CI** with a path filter and the `Can enqueue` /
-  `Can merge` gates, and the merge queue they back.
-- **Release automation**, from shakenfist/development's
-  [`release-automation-rust`](https://github.com/shakenfist/development/tree/main/templates/release-automation-rust)
-  template.
-- **Human review tracking**, from shakenfist/development's
-  [`review-tracking`](https://github.com/shakenfist/development/tree/main/templates/review-tracking)
-  template: `.vscode/review-scope.toml`, `REVIEWS.md` and the pruning
-  workflow. It tracks which source files a human has read, so it is
-  deployed once there are source files.
-- **CodeQL**, from shakenfist/development's
-  [`codeql`](https://github.com/shakenfist/development/tree/main/templates/codeql)
-  template, whose language matrix needs code to analyse.
+The other half is configuration on GitHub, and none of it can exist
+while there is no repository: an environment whose deployment-branch
+policy is what keeps the push credential unreadable from any other
+branch, and -- only where the default branch's ruleset requires a
+pull request -- an App, its key in that environment, and a bypass
+for it on the ruleset. Until they exist `prune-reviews.yml` cannot
+run, so no stale mark is pruned and shakenfist/development's own
+reviews of the template files copied from there are not imported;
+`REVIEWS.md` is only as current as the last hand-run of the script.
+The steps and their exact commands are in shakenfist/development's
+[code-review-tracking](https://github.com/shakenfist/development/blob/main/docs/code-review-tracking.md).
+
+## Waiting on the repository existing
+
+There is no remote, so nothing on the GitHub side of any of this is
+set up, and none of the ten workflows has ever run. Whoever creates
+`shakenfist/teneral` does, as well as the settings above: the
+`review-marks` environment and the rest of the review-tracking
+configuration just described; the merge queue on `develop`; and, for
+releases, a `release` environment with required reviewers deploying
+only from `v*` tags and a tag ruleset restricting who may create
+one. [Releasing](releasing.md) links the fleet's setup document for
+the last two. None of it is an oversight and none of it has been
+worked around.
 
 ## The fleet conventions themselves
 
