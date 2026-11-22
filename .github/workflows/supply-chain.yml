@@ -42,6 +42,18 @@ on:
     - cron: '30 8 * * 1'
   pull_request:
     branches: [develop]
+    # A pull request that changes nothing but review marks changes no
+    # dependency, so there is nothing here for it to say. A
+    # trigger-level filter is safe for this workflow precisely because
+    # it gates nothing: a workflow that never starts reports no job, so
+    # this form would block a merge forever on a required check. The
+    # review state only -- .vscode/review-scope.toml decides which
+    # files are reviewed at all, so a change to it is a policy change
+    # and gets the full suite.
+    paths-ignore:
+      - 'REVIEWS.md'
+      - '.vscode/*.weaudit'
+      - '.vscode/*.weaudit-shas.json'
   workflow_dispatch:
 
 permissions:

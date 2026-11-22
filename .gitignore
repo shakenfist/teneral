@@ -10,3 +10,12 @@
 Cargo.lock.orig
 *.swp
 .DS_Store
+
+# weAudit's per-session log of which files were opened. Nothing reads
+# it, it attests to nothing, and it churns on every review session, so
+# without this it rides along in every review commit. Note that this
+# file ignores nothing else under .vscode/: the review marks, their
+# sidecars, the imports file the prune workflow writes and
+# review-scope.toml are all committed, and are visible to git here
+# because there is no .vscode rule for an exception to undo.
+.vscode/.weauditdaylog

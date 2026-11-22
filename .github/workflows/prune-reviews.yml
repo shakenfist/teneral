@@ -1,0 +1,177 @@
+name: Prune and import review marks
+
+# Keep this repository's review state honest without a human in the
+# loop, on its default branch only:
+#
+# * prune drops review marks whose file has changed since it was
+#   reviewed, since a mark attests to exact file content;
+# * import marks files whose content is byte-identical to a blob fully
+#   reviewed in shakenfist/development, pointing each entry at the
+#   signed commit there that holds the review.
+#
+# Both results land in one unsigned commit. Its author and committer
+# are shakenfist-bot, set by the script; the push is made by the
+# shakenfist-review-marks GitHub App where the default branch ruleset
+# requires a pull request, and with GITHUB_TOKEN otherwise. That is
+# safe for different reasons: prune only ever removes marks, and every
+# imported entry is a pointer to a signed attestation which import
+# verifies with gitsign before writing it. See "Steady state" in
+# https://github.com/shakenfist/development/blob/main/docs/code-review-tracking.md
+#
+# This file is copied byte-for-byte from templates/review-tracking/ in
+# shakenfist/development into every adopted repository, so nothing in
+# it names a repository or a branch. Change the template, not a copy.
+
+on:
+  # Any push to the default branch can make a mark stale. The branch
+  # cannot be named here, because it differs across the fleet, so
+  # pushes to every branch start a run and the job's guard below
+  # skips all but the default. Tags can be filtered without naming
+  # anything, so they are, which keeps releases out of the Actions
+  # tab. The branches line is not redundant: a push trigger that
+  # filters only tags does not run for branch pushes at all. Listing
+  # the fleet's usual default branches instead, as
+  # templates/mermaid-lint does, would spare the skipped runs, but a
+  # repository whose default is not listed would then only ever prune
+  # daily, with nothing to say so: a missed lint run fails loudly on
+  # its pull request, a missed prune leaves stale marks counting as
+  # reviewed.
+  push:
+    branches: ['**']
+    tags-ignore: ['**']
+  # Daily as well, because what import can bring in changes when
+  # shakenfist/development reviews something, and nothing is pushed
+  # here when that happens.
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+# Serialise runs so that overlapping merges cannot race the push. The
+# ref is in the group so that the skipped runs for pushes to other
+# branches cannot displace a pending default branch run.
+concurrency:
+  group: prune-reviews-${{ github.ref }}
+
+jobs:
+  prune-and-import:
+    name: Prune and import review marks
+    # Pushes to every branch start a run (see on: above), and only the
+    # default branch's should land anything. A scheduled run only ever
+    # runs on the default branch, so its event name is a sufficient
+    # guard, and the disjunct keeps the guard independent of whether
+    # the payload carries a repository object.
+    if: >-
+      github.event_name == 'schedule' ||
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    # An ephemeral vm runner, a fresh machine per job, so that nothing
+    # an earlier job ran is still on the machine while this one holds
+    # the App's key and the token minted from it.
+    runs-on: [self-hosted, vm, debian-13, s]
+    # The App's key is a secret of this environment, whose deployment
+    # branch policy admits the default branch alone, so no other ref's
+    # run is given it. Every adopting repository has the environment
+    # with that policy before its first run, key or no key: one GitHub
+    # creates on first reference has no policy, and would admit any
+    # branch once a key was added to it. deployment: false keeps these
+    # runs out of the repository's Deployments view; the environment's
+    # secrets are still resolved, and the job fails at once if the
+    # environment ever gains a custom deployment protection rule.
+    environment:
+      name: review-marks
+      deployment: false
+    # Import verifies each source commit's signature against Rekor,
+    # with a two minute timeout per commit, and stops verifying after
+    # three timeouts in one run (VERIFY_TIMEOUT_BUDGET in
+    # scripts/review-tracking.py), skipping the rest for a later run.
+    # So a Rekor that hangs costs each pass of import at most about six
+    # minutes, and the three passes a run makes when concurrent merges
+    # reject its first two pushes about eighteen, inside this budget
+    # with room for the clone, the gitsign download and the
+    # verifications that succeed. A Rekor that answers slowly but
+    # inside the timeout never spends the budget, so for that this
+    # timeout is the only bound: a run that exceeds it is killed, and
+    # the next push or daily run lands the same state. A vm runner
+    # boots in about two minutes (98 seconds from queue to start,
+    # measured) before the job starts; were that counted here too, it
+    # would still fit.
+    timeout-minutes: 30
+    # Where the default branch ruleset requires a pull request, the
+    # push is made by the shakenfist-review-marks GitHub App, which is
+    # the ruleset's bypass actor: GitHub does not accept the built-in
+    # Actions app as one. The App's key lives in the review-marks
+    # environment above, which only the default branch can use. A
+    # repository with no such ruleset holds no key, mints nothing and
+    # pushes with GITHUB_TOKEN, which is what contents: write is for;
+    # the App's token carries its own permissions, which this block
+    # does not constrain. An App push, like the PAT push before it,
+    # retriggers this workflow once, into a run that finds nothing to
+    # do.
+    permissions:
+      contents: write
+    env:
+      # The guard above means this is the default branch in every run
+      # that gets here. ref_name is the fallback should an event lack a
+      # repository object; for a scheduled run it is the default branch
+      # too.
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch || github.ref_name }}
+      # Whether the review-marks environment holds the App's key, as
+      # 'true' or 'false'. The secrets context is not available in a
+      # step's if:, so presence is exposed to the token step's guard
+      # this way.
+      HAS_REVIEW_MARKS_KEY: ${{ secrets.REVIEW_MARKS_APP_KEY != '' }}
+    steps:
+      # No actions/checkout. This job assumes a runner that may run
+      # pull request code and reuse the workspace, .git included, as
+      # the static runners do, where a hook an earlier job left would
+      # run during the checkout and could rewrite the script before the
+      # next step ran it with the push token. The vm runner above
+      # starts each job with an empty workspace; the design is kept as
+      # defence in depth, and because runs-on is one line. So the script
+      # comes from a fresh clone of the default branch in RUNNER_TEMP,
+      # made ignoring the runner's git configuration and any repository
+      # above RUNNER_TEMP, in a step without the token; nothing in the
+      # job reads the workspace.
+      # These repositories are public, so no clone needs credentials.
+      - name: Fetch the prune script
+        working-directory: ${{ runner.temp }}
+        run: >-
+          rm -rf prune-script &&
+          GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+          GIT_CEILING_DIRECTORIES="$(dirname "${RUNNER_TEMP}")"
+          git clone --quiet --depth 1 --branch "${DEFAULT_BRANCH}"
+          "https://github.com/${GITHUB_REPOSITORY}" prune-script
+
+      # Mint an installation token for the App, per run, limited to this
+      # repository and to contents: write, and revoked by the action
+      # when the job ends. Skipped where the environment holds no key;
+      # a skipped step's output is empty, so the || in PUSH_TOKEN below
+      # falls through to GITHUB_TOKEN. There is no owner or repositories
+      # input, on purpose: the App is installed on several repositories,
+      # and naming the owner would widen every token to all of them,
+      # whereas with neither set the token is limited to the current
+      # repository. The action is pinned to a commit, unlike the fleet's
+      # other action references, because this step handles the key of
+      # the identity that bypasses the ruleset, and a moved tag would
+      # hand that key to whatever the tag then named. The vm runners set
+      # a proxy in the environment, and the action refuses to start
+      # while one is set unless Node.js is told to honour it, rather
+      # than let its requests bypass the proxy; NODE_USE_ENV_PROXY does
+      # that, and changes nothing on a runner with no proxy set.
+      - name: Mint the push token
+        id: app-token
+        if: env.HAS_REVIEW_MARKS_KEY == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        env:
+          NODE_USE_ENV_PROXY: '1'
+        with:
+          client-id: ${{ vars.REVIEW_MARKS_APP_CLIENT_ID }}
+          private-key: ${{ secrets.REVIEW_MARKS_APP_KEY }}
+          permission-contents: write
+
+      - name: Prune and import review marks
+        working-directory: ${{ runner.temp }}
+        run: prune-script/tools/ci-prune-reviews.sh
+        env:
+          PUSH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}

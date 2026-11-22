@@ -311,13 +311,22 @@ Each item is checkable by running something.
     to the template: `.github/workflows/prune-reviews.yml`,
     `tools/ci-prune-reviews.sh` and `tools/review-tracking.sh`,
     each verified with `diff`. `.vscode/review-scope.toml` exists
-    and the `.gitignore` exception for
-    `.vscode/*.weaudit-shas.json` is present, both being adoption
-    steps the adopter writes rather than things the template
-    carries. The GitHub-side adoption steps -- the `review-marks`
-    environment with its default-branch policy, and the App, its
-    key and the ruleset bypass -- are recorded as blocked on the
-    repository existing, not ticked and not silently skipped.
+    and `.gitignore` carries `.vscode/.weauditdaylog`, both being
+    adoption steps the adopter writes rather than things the
+    template carries. This item used to ask for a `.gitignore`
+    *exception* for the review state, which is wrong here: an
+    exception is only needed where `.gitignore` excludes
+    `.vscode/`, and this repository does not, so the state files
+    are already visible to git. What such a repository needs is
+    the opposite entry, ignoring weAudit's per-session day log,
+    which attests to nothing and would otherwise ride along in
+    every review commit. The rewriting pre-commit hooks must also
+    exclude `^\.vscode/.*\.weaudit`, scoped per hook so that the
+    content scanners still read review prose. The GitHub-side
+    adoption steps -- the `review-marks` environment with its
+    default-branch policy, and the App, its key and the ruleset
+    bypass -- are recorded as blocked on the repository existing,
+    not ticked and not silently skipped.
 15. The differential rig's harness fails a case whose provenance
     row is removed. Demonstrated and recorded.
 16. `docs/development.md` contains no sentence saying the Cargo
@@ -550,3 +559,134 @@ in it is the differential comparisons against a captured corpus.
 Placing it there now is cheaper than moving it later under time
 pressure. `workflow_dispatch` runs both tiers, which keeps
 `pr-retest.yml` a full retest.
+
+**2026-11-22, AEDT. The `.gitignore` adoption step for review
+tracking is a no-op here, and the opposite entry was needed
+instead.** Definition-of-done item 14 asks that "the `.gitignore`
+exception for `.vscode/*.weaudit-shas.json` is present". It is not,
+and must not be: teneral's `.gitignore` carries no `.vscode` rule
+at all, so every review-state file -- the weAudit marks, their
+sidecars, `.vscode/imports.weaudit-shas.json` and
+`review-scope.toml` -- is already visible to git, and a `!`
+negation with nothing to negate would read as a guard that does
+something. Adoption step 1 asks for the *reverse* entry in a
+repository that does not ignore `.vscode/`, and that was added:
+`.vscode/.weauditdaylog`, weAudit's per-session log of which files
+were opened, which attests to nothing and would otherwise ride
+along in every review commit. Item 14 should be read as "the
+`.gitignore` is correct for whichever case the repository is in",
+and 2f can correct it at source.
+
+**The pre-commit half of adoption step 1 did apply.** teneral runs
+`trailing-whitespace` and `end-of-file-fixer`, which rewrite what
+they are given, and the review-mark generator emits no trailing
+newline -- so without an exclude every `pre-commit run --all-files`
+rewrites the marks and reports a failure that cannot usefully be
+fixed. Both hooks now exclude `^\.vscode/.*\.weaudit`, scoped to
+those two hooks rather than at the top level, so that gitleaks and
+skillsaw still read the review notes: they are human-written prose,
+which is exactly where a credential or a smuggled character lands.
+This is what the `review-marks-pre-commit` audit checks.
+
+**Adoption step 8's `paths-ignore` was already half done, and the
+other half went to `supply-chain.yml`.** `ci.yml` filters the
+review state at the job level, which is the form a required check
+needs, and `codeql-analysis.yml` is the fleet template and carries
+both forms already. The one code-shaped workflow left was
+`supply-chain.yml`, which gates nothing and so may safely use the
+trigger-level form; it now skips `REVIEWS.md` and the two weAudit
+patterns on `pull_request`, and deliberately not
+`.vscode/review-scope.toml`, which is policy rather than review
+state. `secret-scan.yml` was deliberately left alone: it is a
+content scanner, and step 8 says not to blind those.
+
+**The `release-automation-rust` build section needed a `release`
+target that did not exist.** The template's example build job runs
+`make release` and uploads `target/release-assets/`. Teneral's
+`Makefile` had no `release` target -- step 2a wrote `build`, which
+is a debug compile -- so the section was filled with a `release`
+target of its own: `cargo build --release --frozen --workspace`,
+offline and against the read-only cache like every other compile
+target. A release must not ship a debug binary, and the workflow
+should not have to know the flags that distinguish the two. The
+artefact is that one binary, unpackaged: no `.deb`, no `.rpm`, no
+tarball and no registry, because teneral has nothing worth
+installing yet and inventing a package format here would be a
+decision made by whoever wrote the workflow rather than by whoever
+has to support it. The example's runner label was also `m`, which
+the fleet has but this repository does not use; it is `s` like
+every other container lane here.
+
+**The optional Makefile wrappers were declined.** The template's
+README says a repository *may* add `make propose-release X.Y.Z`,
+as ryll and andris do. Teneral does not. Passing a version to a
+`make` target needs a second goal plus a no-op rule to absorb it,
+which is fifteen lines of make machinery standing in front of a
+script that already takes the version as an ordinary argument, and
+no audit asks for the wrappers. `docs/releasing.md` records the
+choice beside the process, so the next person to wonder finds the
+reason rather than an omission.
+
+**`REVIEWS.md` was generated, not written.**
+`./tools/review-tracking.sh regen` produced it, against the
+`shakenfist/development` clone the wrapper finds. It says 0 of 40
+in-scope files are reviewed, which is correct: no file in this
+repository has been reviewed by anybody, and the import that would
+carry in shakenfist/development's own review of the six copied
+template files runs in CI, which cannot run. `scope-orphans`
+reports every tracked file either in scope or explicitly excluded,
+so `review-scope-completeness` would pass.
+
+**GitHub-side adoption, blocked on the repository existing.** None
+of the following can be done while there is no `shakenfist/teneral`
+on GitHub and no remote. They are not ticked, not worked around and
+not disabled; whoever creates the repository does them, in this
+order, and the file half of both templates is already in the tree
+waiting for them.
+
+Review tracking, before `prune-reviews.yml`'s first run (adoption
+steps 3 and 7 of shakenfist/development's
+`docs/code-review-tracking.md`, which carries the exact commands):
+
+1. A ruleset protecting `develop` from history rewrites, with at
+   least the `deletion` and `non_fast_forward` rules.
+2. A `review-marks` environment whose `deployment_branch_policy` is
+   `{"protected_branches": false, "custom_branch_policies": true}`,
+   with exactly one deployment-branch policy: `type: branch`,
+   `name: develop`, no glob characters and no tag entry. Required
+   whether or not the repository will hold a key, because an
+   environment GitHub creates on first reference has no policy at
+   all and a key added later would then be readable from any
+   branch. Read both back and check them; "admits the default
+   branch" is not the test.
+3. Only if `develop`'s ruleset requires a pull request, and then in
+   this order: install the `shakenfist-review-marks` App on the
+   repository; set its private key as the `REVIEW_MARKS_APP_KEY`
+   secret of the `review-marks` environment and nowhere else, which
+   is a fleet-wide key rotation rather than a new key for this
+   repository; and add the App (app id 5538020) to that ruleset's
+   bypass actors, carrying every existing actor over. Without the
+   ruleset, none of the three is needed and the push uses
+   `GITHUB_TOKEN`. With the ruleset and without the key, the first
+   run fails closed on the refused push, which is the only signal
+   that the key is missing.
+4. Add teneral to the "Projects using these templates" table in
+   `templates/review-tracking/README.md`, in shakenfist/development,
+   with its default branch and which identity it pushes as. That is
+   a change to another repository, so it is not in this tree.
+
+Release automation, before the first release (steps 2 to 4 of
+`templates/release-automation/RELEASE-SETUP.md`):
+
+5. A `release` environment with required reviewers, deploying only
+   from tags matching `v*`. The `release-environment-protection`
+   audit checks exactly this.
+6. A `Release tags` tag ruleset targeting `v*`, with restricted
+   creations and deletions and force pushes blocked, and the person
+   who pushes release tags on its bypass list -- `sign-tag` needs no
+   bypass of its own. `current_user_can_bypass` must read `always`
+   for whoever runs `tools/tag-release.sh`.
+7. The merge queue on `develop`, which the release gate depends on:
+   it counts only a `merge_group` run or a push to the default
+   branch, and this repository's CI reports its results through
+   `Can enqueue` and `Can merge`.

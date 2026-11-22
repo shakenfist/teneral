@@ -81,7 +81,7 @@ DOCKER_RUN := docker run --rm $(DOCKER_BASE_ARGS) $(CACHE_MOUNTS)
 # target below depends on.
 DOCKER_RUN_OFFLINE := docker run --rm --network none $(DOCKER_BASE_ARGS) $(CACHE_MOUNTS_RO)
 
-.PHONY: all image ensure-cache fetch lock build test lint deny deny-offline clean clean-image help
+.PHONY: all image ensure-cache fetch lock build release test lint deny deny-offline clean clean-image help
 
 all: build
 
@@ -91,6 +91,7 @@ help:
 	@echo "  make fetch    - Pre-download crates into the cargo cache"
 	@echo "  make lock     - Refresh Cargo.lock after a dependency change"
 	@echo "  make build    - Build debug binaries"
+	@echo "  make release  - Build optimised binaries, as a release does"
 	@echo "  make test     - Run the test suite"
 	@echo "  make lint     - Run rustfmt and clippy checks"
 	@echo "  make deny     - Run every cargo-deny check, advisories included"
@@ -150,6 +151,17 @@ build: fetch
 	$(DOCKER_RUN_OFFLINE) \
 		$(TENERAL_IMAGE) \
 		sh -c "rustc --version && cargo build --frozen --workspace"
+
+# Build optimised binaries. This is what the release workflow runs, and
+# the only reason it is a separate target from `build`: a release must
+# not ship a debug binary, and the workflow should not have to know the
+# cargo flags that distinguish the two. Offline and against the
+# read-only cache like every other compile target, so a dependency's
+# build script still runs with no network.
+release: fetch
+	$(DOCKER_RUN_OFFLINE) \
+		$(TENERAL_IMAGE) \
+		sh -c "rustc --version && cargo build --release --frozen --workspace"
 
 test: fetch
 	$(DOCKER_RUN_OFFLINE) \

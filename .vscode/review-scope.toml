@@ -1,0 +1,94 @@
+# Which files are subject to whole-file review (see
+# shakenfist/development docs/code-review-tracking.md). Patterns are
+# fnmatch-style against repo-relative paths; '*' matches across
+# directory separators. An empty include list would mean all tracked
+# files; the extensions are enumerated instead, so that a file type
+# arriving here that nobody considered fails the
+# review-scope-completeness audit and somebody decides, rather than
+# joining the review queue silently.
+#
+# Rust is the only language this project compiles, and shell is the
+# only other thing it executes: scripts/ holds the pre-commit hook
+# entry points and tools/ the release and review-tracking wrappers,
+# all of which run with a developer's or a CI runner's privileges.
+#
+# The YAML is executable in practice. The workflows under
+# .github/workflows/ decide what runs, on which runner, with which
+# permissions and against which secrets -- this repository's lanes
+# bind-mount the checkout into a container where a dependency's build
+# script runs arbitrary code, and the release workflow signs and
+# publishes -- and .pre-commit-config.yaml and .github/actionlint.yaml
+# are what constrain them. A reviewer reading .github/ is the real
+# boundary the fork guards in ci.yml lean on, so those files have to
+# be read.
+#
+# TOML, JSON, the Makefile and the Dockerfile are the configuration
+# that decides what gets built and what is allowed into it. The Cargo
+# manifests name every dependency and carry the lint policy that makes
+# a panic a build failure; deny.toml decides which licences and
+# advisories are tolerated, and is the only thing standing between an
+# Apache-2.0 daemon and a copyleft dependency; clippy.toml tunes the
+# lints; renovate.json decides which updates arrive unattended; the
+# Dockerfile pins the toolchain the whole project is compiled by; and
+# the Makefile is the entry point every local and CI build goes
+# through, so a change to it changes what every lane runs. A
+# dependency added to a manifest is as consequential as a line of code
+# and is reviewed as one.
+#
+# .gitignore is included because what it hides is a security property:
+# a pattern that silently swallows a credentials file is invisible
+# until it is not. It is also what keeps the review marks themselves
+# visible to git, which the prune workflow depends on.
+#
+# The patches staged under upstream/ are in scope. They are source
+# code this project proposes to another project in Michael's name,
+# which is the one case where a defect is not ours to fix after the
+# fact, so they are read before they are sent rather than after.
+#
+# Markdown is included. This repository's documentation carries the
+# reasoning the code cannot -- why dnsmasq's behaviour is being
+# reproduced rather than invented, and which observed behaviour each
+# claim rests on -- and prose drifts out of step with the code just as
+# quietly as code does, with nothing like a compiler to notice.
+#
+# docs/plans/ is excluded: plan files are point-in-time records of
+# intended work rather than living artifacts, and this repository is
+# being built phase by phase from them, so including them would swamp
+# the queue with documents nobody will edit again. PLAN-TEMPLATE.md
+# and PUSH-AUDIT.md are deliberately *not* excluded with them -- both
+# are templates that every future plan and every future push is
+# written against, so they are living documents that happen to be
+# about plans.
+#
+# The remaining excludes are files whose content no human decides, and
+# a review mark on one of those attests to nothing:
+#
+# - Cargo.lock is written by cargo and by Renovate. The decisions in
+#   it are made in the manifests, which are in scope.
+# - .github/exported-config/ is a snapshot of this repository's GitHub
+#   settings, written by export-repo-config.yml. It is a record of
+#   state configured in the GitHub UI, not an input to anything. It
+#   does not exist yet -- there is no repository for it to be exported
+#   from -- and is named here so that it never becomes an orphan.
+# - LICENSE is verbatim upstream licence text.
+#
+# The review tooling's own state files -- REVIEWS.md, this file, and
+# the .vscode/<user>.weaudit pair -- are excluded by the helper itself
+# (its built-in exclusions are '.vscode/*' and REVIEWS.md) and are
+# deliberately not repeated here. They cannot attest to themselves, so
+# the exclusion is not a decision this repository gets to make: a '!'
+# re-include here would not override it, and an exclude entry would
+# read as a choice that was never available. The include list above
+# matches several of them on paper, which is why this is written down
+# rather than left to be rediscovered.
+include = [
+    '*.rs', '*.sh', '*.md', '*.yml', '*.yaml',
+    '*.toml', '*.json', '*.patch', '*.gitignore',
+    '*Makefile', '*Dockerfile',
+]
+exclude = [
+    'docs/plans/*',
+    '*Cargo.lock',
+    '.github/exported-config/*',
+    'LICENSE',
+]

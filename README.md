@@ -57,6 +57,8 @@ as addresses, the same mechanism serves instance metadata.
   -- the intended shape of the system.
 - [Development](https://github.com/shakenfist/teneral/blob/develop/docs/development.md)
   -- how to build, lint and test, and what CI runs.
+- [Releasing](https://github.com/shakenfist/teneral/blob/develop/docs/releasing.md)
+  -- how a release is proposed, tagged, signed and published.
 - [Agent guidance](https://github.com/shakenfist/teneral/blob/develop/AGENTS.md)
   -- conventions for working in this repository.
 

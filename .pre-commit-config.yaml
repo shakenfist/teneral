@@ -51,9 +51,21 @@ repos:
       # space, so a blank context line is one space and nothing else.
       # Stripping it silently corrupts every patch staged under
       # upstream/, which is why they are excluded rather than fixed.
+      #
+      # The review marks and their sidecars are excluded from both
+      # rewriting hooks because their generator emits no trailing
+      # newline, so end-of-file-fixer rewrites them on every
+      # --all-files run and reports a failure nobody can usefully fix:
+      # committing the newline only means the next regeneration drops
+      # it again. The exclude is on these two hooks rather than at the
+      # top level on purpose -- review notes are human-written prose,
+      # and a blanket exclude would stop gitleaks and skillsaw reading
+      # exactly the kind of text a credential or a smuggled character
+      # lands in.
       - id: trailing-whitespace
-        exclude: '\.patch$'
+        exclude: '(\.patch$|^\.vscode/.*\.weaudit)'
       - id: end-of-file-fixer
+        exclude: '^\.vscode/.*\.weaudit'
       - id: check-yaml
       - id: check-merge-conflict
 
