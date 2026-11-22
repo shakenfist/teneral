@@ -1,0 +1,70 @@
+# A DHCPOFFER as dnsmasq 2.91 sent it: one Ethernet frame, 342 bytes,
+# exactly as captured.
+#
+# Observed on 2026-11-21 at Unix time 1795245120.949489, on the bridge
+# br-n1 of the Linux-bridge lab -- dnsmasq 2.91 on Debian 13, kernel
+# 6.12.117+deb13-amd64, serving dhcp-range=10.0.0.100,10.0.0.150,12h on
+# the gateway interface gw-n1. This answers request.hex. case.toml
+# beside this file carries the capture's full provenance and the
+# docs/provenance.md rows the pair supports.
+#
+# These are bytes observed coming out of a running program. Nothing here
+# is derived from dnsmasq's source code, and nothing may be: dnsmasq is
+# GPL-2/3 and teneral is Apache-2.0, so an observation is the only
+# lawful source for a behaviour no RFC specifies.
+#
+# Hex text rather than a binary blob, for two reasons: a reviewer can
+# read the diff when a fixture changes, and the bytes can carry the
+# field annotations below. The harness strips comments and whitespace
+# and compares what decodes. The annotations are a reading aid; the
+# bytes are what the rig asserts on.
+
+# Ethernet: dst fa:16:3e:00:01:0a, src fa:16:3e:00:01:01, type 0x0800 (IPv4)
+fa 16 3e 00 01 0a fa 16 3e 00 01 01 08 00
+
+# IPv4: 10.0.0.1 -> 10.0.0.128, protocol 17, total length 328
+45 c0 01 48 40 5a 00 00 40 11 24 0b 0a 00 00 01
+0a 00 00 80
+
+# UDP: 67 -> 68, length 308, checksum 0x15c6
+00 43 00 44 01 34 15 c6
+
+# BOOTP: op=2 htype=1 hlen=6 hops=0
+02 01 06 00
+# xid=0x2c72847d, secs=0, flags=0x0000 (broadcast flag clear)
+2c 72 84 7d 00 00 00 00
+# ciaddr=0.0.0.0 yiaddr=10.0.0.128 siaddr=10.0.0.1 giaddr=0.0.0.0
+00 00 00 00 0a 00 00 80 0a 00 00 01 00 00 00 00
+# chaddr=fa:16:3e:00:01:0a, padded to 16 bytes
+fa 16 3e 00 01 0a 00 00 00 00 00 00 00 00 00 00
+# sname, 64 bytes, unused
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+# file, 128 bytes, unused
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+# magic cookie 99.130.83.99
+63 82 53 63
+
+# Options, one per line, in the order they were sent.
+35 01 02                                        # option 53 dhcp-message-type: OFFER (2)
+36 04 0a 00 00 01                               # option 54 server-identifier: 10.0.0.1
+33 04 00 00 a8 c0                               # option 51 ip-address-lease-time: 43200 seconds
+3a 04 00 00 54 60                               # option 58 renewal-time-t1: 21600 seconds
+3b 04 00 00 93 a8                               # option 59 rebinding-time-t2: 37800 seconds
+01 04 ff ff ff 00                               # option 1 subnet-mask: 255.255.255.0
+1c 04 0a 00 00 ff                               # option 28 broadcast-address: 10.0.0.255
+03 04 0a 00 00 01                               # option 3 router: 10.0.0.1
+06 04 0a 00 00 01                               # option 6 domain-name-server: 10.0.0.1
+ff                                              # option 255 end
+
+# 8 bytes of padding after the end option.
+00 00 00 00 00 00 00 00

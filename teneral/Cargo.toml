@@ -13,3 +13,27 @@ description = "A DHCP and DNS daemon for many networks in one process"
 # all, which fails quietly: the lints look configured and are not.
 [lints]
 workspace = true
+
+# Only the differential rig reads these. `toml` is the format cargo
+# itself reads, which is the reason a case's metadata is written in
+# it: the alternative was a bespoke key-value file and a hand-written
+# parser to go with it, in a repository that already cannot build
+# without a TOML parser.
+[dev-dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "1.2.2"
+
+# The differential rig. `harness = false` replaces libtest with the
+# rig's own `main`, which is what makes `make test` print the corpus
+# case by case rather than one opaque `ok`: libtest captures a test's
+# output and shows it only when the test fails, and a rig whose
+# passing runs say nothing is a rig that can quietly stop checking
+# anything. Two consequences, both recorded in
+# tests/differential/README.md: `cargo test <filter>` does not filter
+# inside this target, and nothing in it is a `#[test]`, so
+# `allow-unwrap-in-tests` does not reach it and the rig obeys
+# `unwrap_used` like ordinary code.
+[[test]]
+name = "differential"
+path = "tests/differential/main.rs"
+harness = false

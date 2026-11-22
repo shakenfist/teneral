@@ -81,10 +81,18 @@
 # read as a choice that was never available. The include list above
 # matches several of them on paper, which is why this is written down
 # rather than left to be rediscovered.
+# The hex-text fixtures in the differential rig's corpus are in
+# scope, and they are the one kind of file here whose review is about
+# where the content came from rather than what it says. A fixture is
+# bytes observed coming out of a running program; bytes somebody
+# assembled from an RFC, or transcribed out of a GPL implementation,
+# would read identically and would make every citation resting on
+# them false. They are written as annotated hex rather than as a
+# binary blob exactly so that a human can read one.
 include = [
     '*.rs', '*.sh', '*.md', '*.yml', '*.yaml',
     '*.toml', '*.json', '*.patch', '*.gitignore',
-    '*Makefile', '*Dockerfile',
+    '*Makefile', '*Dockerfile', '*.hex',
 ]
 exclude = [
     'docs/plans/*',

@@ -115,6 +115,9 @@ language, not the reason for the project.
 
 - [docs/provenance.md](docs/provenance.md) -- where each behaviour
   came from, and the licence reason that matters.
+- [docs/differential-rig.md](docs/differential-rig.md) -- how a
+  behaviour gets measured and kept, and how a case in the corpus is
+  tied to the row it is evidence for.
 - [docs/plans/](docs/plans/) -- what is being built, in what
   order, and what is deliberately excluded.
 - [AGENTS.md](AGENTS.md) -- the invariants that follow from this

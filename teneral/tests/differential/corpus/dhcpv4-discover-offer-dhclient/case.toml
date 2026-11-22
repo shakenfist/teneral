@@ -1,0 +1,65 @@
+# One captured DHCPv4 exchange. See ../../README.md for what a case
+# is, and ../../../../../docs/differential-rig.md for how a capture
+# gets into this corpus lawfully.
+
+summary = "A DISCOVER from ISC dhclient, and the OFFER dnsmasq 2.91 sent back."
+
+# The docs/provenance.md rows these bytes are the evidence for, by row
+# id. The harness fails this case if the list is empty or if a row id
+# is not in that file's `Row id` column -- which is the one thing this
+# rig really checks today.
+#
+# Only rows this one exchange is evidence of, on its own. The capture
+# also supports `dhcp-address-by-identity`, but that row rests on the
+# same address being offered to two different clients, which is two
+# exchanges and so is two cases rather than a claim this one can make.
+provenance = [
+    "dhcp-unasked-option-set",
+    "dhcp-reply-unicast-to-offered",
+]
+
+request = "request.hex"
+response = "response.hex"
+
+[capture]
+observed = "2026-11-21"
+server = "dnsmasq 2.91, Debian 13, kernel 6.12.117+deb13-amd64, serving dhcp-range=10.0.0.100,10.0.0.150,12h on gw-n1"
+client = "ISC dhclient 4.4.3-P1 on a client endpoint of the same bridge, address flushed first"
+link_type = "EN10MB"
+# The capture file is kept outside this repository, on the development
+# workstation: a pcap is not an artifact a reviewer can read, and the
+# frames that matter are in the tree as hex text instead. The digest is
+# here so the two can be tied back together.
+pcap = "lbrlab-1795244131-br-n1-dhcp.pcap"
+pcap_sha256 = "81255c2875d5d018b71e6297ff5608d589b65dc3ec8ed0ae4b2a338ed1c766db"
+frames = "1 and 2 of 8"
+write_up = "linux-bridge-lab.md, experiment 2"
+request_bytes = 342
+response_bytes = 342
+
+[comparison]
+subject = "dhcpv4"
+status = "pending"
+asserts = """
+Given request.hex, on a network configured as the lab's gw-n1 was --
+one range 10.0.0.100 to 10.0.0.150, a 12h lease, the server itself at
+10.0.0.1 -- teneral's DHCPv4 front end emits a reply that matches
+response.hex in every field it is meant to match: the same nine
+options in the same order (53, 54, 51, 58, 59, 1, 28, 3, 6), none of
+which the client asked for; lease, T1 and T2 of 43200, 21600 and 37800
+seconds; router and dns-server defaulting to the server's own address;
+the xid and chaddr echoed from the request; and the reply unicast to
+the address being offered, in a frame addressed to the client's MAC.
+
+It is not byte-for-byte equality, and saying so is part of the case.
+Which address comes out of the range is teneral's own choice:
+dnsmasq's pick is by client identity rather than by a counter, which
+is a measured behaviour and not a contract, so yiaddr and the IP
+destination are asserted to agree with each other rather than to be
+10.0.0.128. The IP and UDP checksums are likewise recomputed rather
+than compared.
+
+Where teneral comes to differ from dnsmasq deliberately, this case
+asserts the difference instead of being deleted: an omitted case and a
+case nobody wrote look identical a year later.
+"""
