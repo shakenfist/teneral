@@ -240,9 +240,12 @@ once would trip over each other's half-finished work.
 
 Each item is checkable by running something.
 
-1. `make build` produces a binary, with nothing Rust installed on
-   the host: `which cargo` on the host fails and the build still
-   succeeds.
+1. `make build` produces a binary, and builds it in the container
+   rather than on the host. The host carries a distribution Rust
+   1.85.1, so an absent host toolchain is the wrong test: instead,
+   every `cargo` invocation in the `Makefile` is inside a
+   `docker run`, and the build reports the image's compiler rather
+   than the host's 1.85.1.
 2. `make test` and `make lint` both exit 0, and `make lint` runs
    both `cargo fmt --all --check` and `cargo clippy --workspace
    --all-targets -- -D warnings`.
@@ -312,3 +315,23 @@ Three gates, all cheap to ask about and expensive to get wrong:
 
 Kept as the phase runs, for departures from the plan and for the
 things a later reader would otherwise have to reconstruct.
+
+**2026-11-22, AEDT. Back brief answered, all three gates as
+planned.** Decision 1 stands: `unwrap_used = "deny"` rather than
+ryll's `warn`. Decision 7 stands: the CI lanes are written now,
+knowing they cannot run, and the GitHub repository is still not
+created. Decision 2 stands: the build image is derived from the
+plain `rust:` image that 1d measured, not ryll's devcontainer.
+
+**A planning premise was wrong: this host has a Rust toolchain.**
+`/usr/bin/cargo` and `/usr/bin/rustc` are a distribution Rust
+1.85.1, from Debian packages rather than rustup. The operator's
+preference is against *rustup-managed* toolchains on the host,
+which is what the `ryll` and `instar` Docker pattern exists to
+avoid, and it is unaffected. But definition-of-done item 1 was
+written to assert `which cargo` fails, which would never have
+passed. It now asserts the thing actually worth asserting --
+that every `cargo` in the `Makefile` runs inside a container,
+and that the build reports the image's compiler rather than
+1.85.1. Corrected before step 2a ran, so no step was briefed
+against it.
