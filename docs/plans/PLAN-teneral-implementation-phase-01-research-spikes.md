@@ -1782,3 +1782,8 @@ uncommitted for the management session to review. The teneral
 session's to add once the commits exist. A reader finding only the
 GitLab merge request there is looking at a gap that is recorded,
 not at an oversight.
+
+**2026-11-22, AEDT. The gap is closed.** The phase landed on
+`develop` as a fast-forward, and the cell now also records
+`fa77a8e..1337e79`. The worktree and branch were removed once
+every commit was confirmed an ancestor of `develop`.
