@@ -1,0 +1,76 @@
+name: Supply chain
+
+# The advisory half of cargo-deny.
+#
+# `make deny` runs every cargo-deny check: licences, bans and sources,
+# which are a function of Cargo.lock alone, and `advisories`, which
+# compares the dependency tree against the RustSec database and so
+# needs network. The first three are a pre-commit hook (see
+# .pre-commit-config.yaml and the Makefile's `deny-offline` target), so
+# they are already gated on every commit and every pull request.
+# `advisories` is not, and deliberately: its answer changes when
+# somebody publishes to that database, so as a commit hook it would
+# fail a commit touching no Rust at all, for a reason the committer did
+# not cause.
+#
+# So it runs here instead. The schedule is what catches advisory drift
+# against develop in the gaps between pull requests, when no other run
+# would notice; the pull_request trigger is what tells a contributor
+# that the tree they are adding to has a known-vulnerable dependency,
+# at the moment that information is useful.
+#
+# This job gates nothing. It is in no `needs:` list in ci.yml, and
+# "Can enqueue" and "Can merge" do not wait on it, because an advisory
+# published this morning is not the pull request's fault and must not
+# block its merge. Acting on one is a decision, not a build failure.
+#
+# It is also the one place CI runs something other than
+# `pre-commit run --all-files`. docs/development.md promises that a
+# developer's commit and a pull request check the same things, and that
+# promise is intact: everything deterministic is in pre-commit, and
+# what runs here is precisely the check that cannot be deterministic.
+#
+# The runner needs a Docker daemon, because `make deny` -- like every
+# other cargo invocation in this repository -- runs cargo inside the
+# build container. `deny` is the one Makefile target that is networked
+# and writes the cargo cache, which is what cloning or updating the
+# RustSec database requires.
+on:
+  schedule:
+    # Weekly at 08:30 UTC on Monday. Off the hour, so this does not
+    # queue behind every other cron on the fleet.
+    - cron: '30 8 * * 1'
+  pull_request:
+    branches: [develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-deny:
+    name: cargo deny
+    runs-on: [self-hosted, vm, debian-13-docker, s]
+    timeout-minutes: 45
+    # A fork guard, for the same reason ci.yml's lanes carry one: this
+    # job runs the Makefile from the checkout on a credentialed runner,
+    # and a fork can edit the Makefile. The scheduled run is what keeps
+    # develop covered.
+    if: >-
+      github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name == github.repository
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-cargo-deny
+      cancel-in-progress: true
+    env:
+      # Outside the checkout, so actions/checkout's default
+      # `clean: true` does not delete it every run, but inside the
+      # runner's work directory for this repository. See ci.yml.
+      CARGO_CACHE: ${{ github.workspace }}/../teneral-cargo-cache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Run every cargo-deny check
+        run: make deny

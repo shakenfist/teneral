@@ -5,10 +5,19 @@
 # labels in use are declared, so a label that does not exist on the
 # fleet -- a typo, or a retired image such as debian-12 -- fails here
 # rather than leaving a job queued for a runner that never comes.
+#
+# Adding a label here does not create a runner. The fleet's own
+# workflows are the evidence that one exists: debian-13-docker is
+# declared below because the ryll and instar repositories run their
+# container-wrapped build lanes on it, and everything Rust in this
+# repository compiles inside a container, so a lane that calls the
+# Makefile needs an image with a Docker daemon. Do not declare a label
+# no other repository is already running on.
 self-hosted-runner:
   labels:
     - static
     - claude-code
     - vm
     - debian-13
+    - debian-13-docker
     - s

@@ -296,7 +296,17 @@ Each item is checkable by running something.
     gate jobs all have counterparts: `Can see status`,
     `Can enqueue` and `Can merge`. The first was missed when this
     plan was written.
-13. A CodeQL workflow exists and its language matrix names Rust.
+13. `.github/workflows/codeql-analysis.yml` is byte-identical to
+    `shakenfist/development/templates/codeql/codeql-analysis.yml`,
+    verified with `diff`, and CodeQL analyses Rust in it. There is
+    deliberately **no** language matrix, which is what this item
+    asked for when the plan was written: the template pins no
+    `languages` and CodeQL's own autodetection finds Rust, so a
+    matrix would be a divergence from the template that buys
+    nothing. The evidence that it finds Rust is a real run rather
+    than a reading -- ryll's CodeQL job logs `Autodetected
+    languages: rust, ...` and `Running queries for rust` -- and no
+    lane in this repository can be run until there is a remote.
 14. `review-tracking`'s three files are present and byte-identical
     to the template: `.github/workflows/prune-reviews.yml`,
     `tools/ci-prune-reviews.sh` and `tools/review-tracking.sh`,
@@ -435,3 +445,108 @@ item 6's `grep -n 'deny *=' deny.toml` does match one line,
 `deny = []` at line 74. That is `[bans] deny`, a different key
 and a deliberately empty one; `[licenses] deny`, the key the item
 is about and the one cargo-deny rejects outright, is absent.
+
+**2026-11-22, AEDT. Step 2c's row stated the runner-label rule
+too bluntly, and the correction matters.** The row said the labels
+"must be ones `.github/actionlint.yaml` declares" and "do not
+invent runner labels". But `actionlint.yaml` declares only the
+labels this repository already uses, as its own comment says, so
+read literally the rule would confine every new lane to the
+`static` pool -- which carries git and little else and has no
+Docker daemon. The real rule is: never use a label the fleet does
+not have, and the fleet's own workflows are the evidence of what
+it has. `debian-13-docker` is used by ryll, instar, kerbside,
+shakenfist and a dozen others, so it exists; it is now declared in
+`actionlint.yaml`, with a comment saying that declaring a label
+does not create a runner. `l` was deliberately not adopted: it is
+the scarcest pool on the fleet and this workspace is one small
+crate, so every container lane runs at `s`.
+
+**The existing `lint` job had to move off the `static` pool, which
+is a consequence of 2b rather than a choice of 2c.** Step 2b put
+`rustfmt`, `clippy` and `cargo deny` into `pre-commit` as hooks
+that call the `Makefile`, and the `Makefile` runs every `cargo`
+inside `docker run`. `pre-commit run --all-files` therefore now
+needs a Docker daemon, which the `static` image does not have, so
+the job would have failed the first time a commit touched a `.rs`
+file. It still runs exactly the same command; only `runs-on`
+changed, to `[self-hosted, vm, debian-13-docker, s]`. Moving to a
+`vm` runner also means it now carries the fork guard the rest of
+the fleet puts on anything that runs checkout content on a
+credentialed runner.
+
+**CodeQL does analyse Rust, and the fleet template needs no
+change to do it.** Checked rather than assumed, two ways. GitHub's
+"Workflow configuration options for code scanning" page lists Rust
+among the languages code scanning supports and gives its
+identifier as `rust` in the language-identifier table, with no
+preview or beta label -- the only "public preview" wording on that
+page is about model packs and threat models. And empirically:
+ryll carries the same workflow with the same
+autodetection, differing from the template only in using floating
+`@v4` action tags where the template pins by commit -- so ryll is
+the drifted copy and the one written here is the correct one. Its
+most recent successful run, checked in the management session with
+`gh run view`, logs `Autodetected languages: rust, python,
+javascript, ruby, actions`, `None of the languages in this project
+require extra build steps`, and `Running queries for rust`. So
+autodetection finds Rust without a `languages` pin, and the
+template's `Autobuild` step is a no-op for it. The file is
+therefore copied byte for byte, which `diff` against
+`shakenfist/development/templates/codeql/codeql-analysis.yml`
+confirms, and no comment was added to it -- the template's README
+says to copy it verbatim and the fleet audit compares the bytes,
+so the reasoning is recorded here instead.
+
+**Definition-of-done item 13 is wrong and was not worked around.**
+It asks that "a CodeQL workflow exists and its language matrix
+names Rust". There is no language matrix: the fleet template
+deliberately pins no `languages`, the README names the only two
+repositories that diverge and why, and teneral adding a third
+divergence would buy nothing CodeQL does not already do by itself.
+The checkable claim the item should make is that a CodeQL workflow
+exists and CodeQL analyses Rust in it, which the ryll evidence
+above establishes for these exact bytes. Left for 2f to correct at
+source rather than edited here.
+
+**The supply-chain lane gates nothing, deliberately.**
+`supply-chain.yml` runs `make deny` -- the full check, advisories
+included -- weekly and on pull requests, and appears in no
+`needs:` list. An advisory published between a pull request opening
+and its merge is not that pull request's fault, and a gate on it
+would eject a queue entry for something the author did not cause.
+The half that *is* the author's fault, licences and bans and
+sources, is already a `pre-commit` hook and so is gated inside
+`lint` with everything else a developer can reproduce locally.
+
+**`lint` does not consume the path filter, unlike `build` and
+`test`.** ryll can filter its lint job because its lint job is
+Rust-only and its prose scanners are separate jobs. Teneral's one
+`lint` job runs the whole `pre-commit` suite, most of which reads
+human-written text -- trailing whitespace, YAML validity, gitleaks,
+skillsaw over the agent context -- so a documentation-only change
+is exactly the change those hooks exist to catch. Filtering it
+would skip the only check such a change has.
+
+**The cargo cache has to live outside the checkout in CI.** The
+`Makefile`'s in-checkout default is deleted every run by
+`actions/checkout`, whose `clean: true` runs `git clean -ffdx`,
+and the `Makefile` comment already says to override `CARGO_CACHE`
+for that reason. Every container lane sets it to
+`${{ github.workspace }}/../teneral-cargo-cache`: outside the
+checkout so it survives the clean, inside the runner's work
+directory for this repository so it is per-repository and needs no
+hardcoded home path.
+
+**Tiering, stated so a reader can see it was chosen.** `lint` and
+`build` are the cheap tier, on `pull_request`, gating
+`Can enqueue`; `test` is the expensive tier, on `merge_group`,
+gating `Can merge`; `Can see status` runs on every event and
+depends on nothing. `test` is in the merge tier for what the suite
+becomes rather than what it is -- `build` and `lint` already
+compile the workspace and `clippy --all-targets` type-checks the
+test targets, so what `test` adds is *running* them, and the growth
+in it is the differential comparisons against a captured corpus.
+Placing it there now is cheaper than moving it later under time
+pressure. `workflow_dispatch` runs both tiers, which keeps
+`pr-retest.yml` a full retest.

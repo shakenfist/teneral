@@ -1,48 +1,189 @@
 name: CI
 
-# Teneral has no Cargo workspace yet, so the only gate here is the
-# pre-commit suite: actionlint over these workflow files, shellcheck
-# over anything in scripts/, gitleaks, and skillsaw over the agent
-# context. That is deliberately the same command a developer runs
-# before a commit, so CI and the commit hook cannot drift apart --
-# running the hooks rather than naming the linters is what keeps the
-# two in step as hooks are added.
+# CI runs in two tiers.
 #
-# The Rust lanes -- rustfmt, clippy, cargo test, cargo deny -- arrive
-# with the workspace, and so do the two-tier smoke/merge split and the
-# "Can enqueue"/"Can merge" gates the rest of the fleet runs. See
-# docs/development.md for what is still to come and
-# docs/plans/PLAN-teneral-implementation.md for when.
+# The cheap tier -- lint and build -- runs on pull_request and gates
+# the "Can enqueue" status check. The expensive tier -- test -- runs on
+# merge_group and gates "Can merge", so the slow work happens against
+# the exact commit that is about to land rather than on every push to a
+# pull request. workflow_dispatch deliberately runs both tiers, so
+# pr-retest.yml's `gh workflow run` stays a full retest (it dispatches
+# whatever the RETEST_WORKFLOW repository variable names, which for
+# this repository must be set to ci.yml; docs/development.md records
+# that) and so the merge tier can be exercised on a branch.
 #
-# There is no path filter. Everything this repository currently holds
-# is prose, and every linter here reads prose, so a filter that
-# skipped documentation would skip the whole job. A filter belongs
-# here once there is code for it to distinguish documentation from.
+# Which tier each lane sits in, and why:
+#
+#   lint  - cheap. It is `pre-commit run --all-files`, the same command
+#           a developer runs before proposing a commit, so CI and the
+#           commit hook cannot drift apart. It is also the broadest
+#           signal available for the least work: rustfmt, clippy, the
+#           deterministic half of cargo-deny, actionlint, shellcheck,
+#           gitleaks and the agent-context lint, in one container.
+#   build - cheap. A debug compile against a warm cargo cache. Every
+#           other lane presumes the tree compiles, so finding out that
+#           it does not belongs in the fastest tier.
+#   test  - expensive, and placed here for what the suite becomes
+#           rather than what it is today. `make build` and `make lint`
+#           between them already compile the workspace and type-check
+#           its test targets (clippy runs --all-targets), so what this
+#           lane adds is *running* the tests. The growth in it is the
+#           differential comparisons against a captured corpus, which
+#           will be the slowest thing this repository runs and the
+#           thing that most needs to run against the commit that is
+#           actually landing. Putting it in the merge tier now is
+#           cheaper than moving it later, when moving it would be a
+#           judgement made under time pressure.
+#
+# cargo-deny's advisory check is in neither tier. It lives in
+# supply-chain.yml, on a schedule and on pull requests, and gates
+# nothing: its verdict changes when somebody publishes to the RustSec
+# database, so a failure there is usually not the pull request's fault
+# and must not block a merge. The half that *is* the pull request's
+# fault -- licences, bans and sources, which are a function of
+# Cargo.lock alone -- is a pre-commit hook, so it is gated here, inside
+# lint, like everything else a developer can reproduce locally.
+#
+# Changes that cannot affect the build -- documentation under docs/ and
+# the review-tracking artefacts -- are skipped by the check_paths job
+# below. The gates still pass: their jq treats a skipped dependency as
+# success.
+#
+# lint deliberately does *not* consume check_paths, unlike build and
+# test. Most of what pre-commit runs reads human-written text --
+# trailing whitespace, YAML validity, gitleaks, the agent-context lint
+# -- and a documentation-only change is exactly the change that breaks
+# those. Skipping lint on a docs-only pull request would skip the only
+# check that change has.
 #
 # The secret scanner is not here. It lives in secret-scan.yml, which
 # also runs on pushes to develop, and which deliberately reads
 # everything: a credential lands in a plan as easily as in a script.
 #
-# workflow_dispatch is what pr-retest.yml dispatches. It needs the
-# RETEST_WORKFLOW repository variable set to ci.yml, since the
-# template's default names a functional-tests.yml this repository does
-# not have; docs/development.md records that.
+# Every self-hosted job below that runs code from the checkout carries
+# a fork guard, because the `vm` runners hold fleet credentials and a
+# fork can edit whatever such a job runs -- including the Makefile,
+# which is what these lanes invoke. The guard is defence in depth: a
+# fork can delete it in the same pull request, so the real boundary is
+# GitHub's fork workflow approval and a reviewer reading .github/ and
+# the Makefile first. A fork's pull request therefore reaches the gates
+# with its lanes skipped, which the jq reads as success; that is the
+# same trade the rest of the fleet makes.
 on:
   pull_request:
     branches: [develop]
+  merge_group:
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  # Detect changes that cannot affect the build, so the compile lanes
+  # can skip them. For workflow_dispatch the filter step is skipped and
+  # the output defaults to code_changed=true, so everything runs.
+  check_paths:
+    name: "Check paths"
+    runs-on: [self-hosted, static]
+    timeout-minutes: 10
+    # contents for the merge_group checkout, pull-requests for the
+    # API-backed filter. Job-level permissions replace the workflow's
+    # rather than extending them, so contents: read is restated.
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code_changed: ${{ steps.filter.outputs.code || 'true' }}
+    steps:
+      # Only merge_group needs a checkout: there the filter diffs
+      # against base_sha with git. On pull_request it reads the changed
+      # files from the API, as codeql-analysis.yml's check_paths does,
+      # so a fork's content never reaches the persistent static pool.
+      #
+      # This is the one checkout in this workflow that keeps its
+      # credentials. The filter fetches base_sha to diff against it,
+      # and the default fetch-depth of 1 does not include it. The
+      # lanes below pass persist-credentials: false instead, because
+      # each of them bind-mounts the checkout into a container where a
+      # dependency's build script runs arbitrary code, and a token
+      # left in .git/config would be inside that mount. Nothing from
+      # the checkout runs here.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: github.event_name == 'merge_group'
+
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
+        id: filter
+        if: github.event_name != 'workflow_dispatch'
+        with:
+          # On merge_group, compare against the base_sha fixed in the
+          # event payload -- the develop commit the queue built this
+          # entry on -- not against the develop branch itself, which is
+          # what the action falls back to with no base. The branch
+          # moves: once the queue has merged this entry, develop
+          # contains the queued commit, so a "Re-run all jobs" would
+          # diff against a base already holding HEAD, find nothing, and
+          # let "Can merge" go green having tested nothing. A re-run
+          # keeps its original payload, so it sees the same diff as the
+          # first attempt. On pull_request the action ignores base and
+          # compares against the pull request's base branch; develop is
+          # only the fallback for an event with no merge_group payload.
+          base: ${{ github.event.merge_group.base_sha || 'develop' }}
+          # By default a file matches if it matches ANY listed pattern,
+          # which makes '**' match everything and silently defeats the
+          # '!' exclusions. 'every' requires a file to match ALL
+          # patterns, which is the correct semantics for an "everything
+          # except the documentation and review artefacts" filter.
+          predicate-quantifier: 'every'
+          # Keep in step with codeql-analysis.yml's filter, which also
+          # skips .vscode/review-scope.toml because CodeQL does not
+          # read it. Here a change to the review scope is linted like
+          # anything else, because it decides what gets reviewed at
+          # all.
+          filters: |
+            code:
+              - '**'
+              - '!docs/**'
+              - '!REVIEWS.md'
+              - '!.vscode/*.weaudit'
+              - '!.vscode/*.weaudit-shas.json'
+
+  # ----------------------------------------------------------------
+  # Cheap tier: runs on pull_request (and workflow_dispatch) and gates
+  # "Can enqueue".
+  # ----------------------------------------------------------------
+
+  # Everything Rust in this repository compiles inside a container (see
+  # the Makefile), and the pre-commit hooks that call it are no
+  # exception, so this job needs a runner with a Docker daemon. That is
+  # why it no longer runs on `[self-hosted, static]`: the static pool
+  # carries git and little else, and the Rust hooks would fail there
+  # the moment a commit touched a .rs file or a manifest.
+  #
+  # The first run on a given runner also pays for the build image,
+  # which installs cargo-deny from source. The docker daemon on these
+  # runners is persistent, so later runs hit its layer cache; the
+  # timeout is sized for the cold case.
   lint:
     name: Lint
-    runs-on: [self-hosted, static]
-    timeout-minutes: 15
+    runs-on: [self-hosted, vm, debian-13-docker, s]
+    timeout-minutes: 45
+    # No check_paths dependency: see the header. A documentation-only
+    # change is precisely what the prose hooks exist to check.
+    if: >-
+      github.event_name != 'merge_group'
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-lint
       cancel-in-progress: true
+    env:
+      # Outside the checkout, so actions/checkout's default
+      # `clean: true` -- which runs `git clean -ffdx` -- does not
+      # delete the cargo cache on every run; but still inside the
+      # runner's work directory for this repository, so it is
+      # per-repository and survives between runs. The Makefile
+      # resolves it to an absolute path.
+      CARGO_CACHE: ${{ github.workspace }}/../teneral-cargo-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -66,6 +207,75 @@ jobs:
         if: always()
         run: rm -rf "${RUNNER_TEMP}/venv-lint"
 
+  build:
+    name: Build
+    runs-on: [self-hosted, vm, debian-13-docker, s]
+    timeout-minutes: 45
+    needs: [check_paths]
+    if: >-
+      github.event_name != 'merge_group'
+      && needs.check_paths.outputs.code_changed != 'false'
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-build
+      cancel-in-progress: true
+    env:
+      # See the lint job for why this lives outside the checkout.
+      CARGO_CACHE: ${{ github.workspace }}/../teneral-cargo-cache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # `make build` prints the compiler it used, which is how a reader
+      # confirms the container's toolchain built this rather than
+      # whatever rustc happens to be on the runner.
+      - name: Build the workspace
+        run: make build
+
+  # ----------------------------------------------------------------
+  # Both tiers. The suite runs on a pull request, where a failing test
+  # is the author's to see before review rather than at merge time,
+  # and again on merge_group, because the commit the queue builds is
+  # the branch merged into its base and so is not the tree the pull
+  # request tested. That second run is the whole purpose of a merge
+  # queue: it catches two changes that each pass alone and fail
+  # together. It is cheap today -- one test -- and when the
+  # differential rig arrives and the suite stops being cheap, the
+  # pull-request run is the one to reconsider, not this one.
+  # ----------------------------------------------------------------
+
+  test:
+    name: Test
+    runs-on: [self-hosted, vm, debian-13-docker, s]
+    timeout-minutes: 60
+    needs: [check_paths]
+    # The fork guard matters here as it does for the other
+    # pull_request lanes: merge_group only fires on a commit the queue
+    # has already accepted, and workflow_dispatch needs write access,
+    # but a pull_request can come from anywhere.
+    if: >-
+      (github.event_name == 'merge_group'
+       || github.event_name == 'workflow_dispatch'
+       || (github.event_name == 'pull_request'
+           && github.event.pull_request.head.repo.full_name
+              == github.repository))
+      && needs.check_paths.outputs.code_changed != 'false'
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-test
+      cancel-in-progress: true
+    env:
+      # See the lint job for why this lives outside the checkout.
+      CARGO_CACHE: ${{ github.workspace }}/../teneral-cargo-cache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Run the test suite
+        run: make test
+
   # The body lives once, in shakenfist/actions. The permissions block
   # has to be here rather than there -- a cross-repository reusable
   # workflow cannot grant itself more token scope than its caller has
@@ -74,7 +284,10 @@ jobs:
   #
   # The needs: list is the "review only once CI has passed" gate: a job
   # skipped because a dependency failed never starts the reusable
-  # workflow. Every job added to the smoke tier belongs in it.
+  # workflow. It names every lane that runs on a pull_request, and
+  # only those: a lane that never runs on one would leave the reviewer
+  # permanently skipped. Every job added that runs on a pull_request
+  # belongs in it.
   #
   # Deliberately no secrets: inherit. Nothing in the reviewer chain
   # reads a secret -- it authenticates with github.token under the
@@ -82,8 +295,70 @@ jobs:
   # repository holds to a workflow in another one, for nothing.
   automated_reviewer:
     name: "Automated reviewer"
-    needs: [lint]
+    needs: [lint, build, test]
     permissions:
       contents: read
       pull-requests: write
     uses: shakenfist/actions/.github/workflows/pr-auto-review.yml@main
+
+  # ----------------------------------------------------------------
+  # The gates. "Can enqueue" and "Can merge" are the status checks the
+  # branch ruleset requires; "Can see status" proves the ruleset can
+  # see this workflow's checks at all. Each gate uses always() so it
+  # still runs when a dependency failed or was skipped, and its jq maps
+  # every dependency to "success or skipped" and requires all of them.
+  # That is what lets a documentation-only change -- where check_paths
+  # skips the compile lanes -- pass; a cancelled or failed dependency
+  # fails the gate.
+  # ----------------------------------------------------------------
+
+  can_see_status:
+    name: "Can see status"
+    runs-on: [self-hosted, static]
+    # Runs "true", so five minutes is generous even on a busy runner.
+    timeout-minutes: 5
+    steps:
+      - name: "Immediate success"
+        run: true
+
+  can_enqueue:
+    name: "Can enqueue"
+    needs:
+      - check_paths
+      - lint
+      - build
+      - test
+    if: always() && github.event_name != 'merge_group'
+    permissions:
+      actions: read
+    runs-on: [self-hosted, static]
+    # A jq expression over the needs context.
+    timeout-minutes: 5
+    steps:
+      - env:
+          NEEDS_JSON: "${{toJSON(needs)}}"
+        name: Transform outcomes
+        run: |
+          echo "ALL_SUCCESS=$(echo "$NEEDS_JSON" | jq '. | to_entries | map([.value.result == "success", .value.result == "skipped"] | any) | all')" >>$GITHUB_ENV
+      - name: Check outcomes
+        run: "[ $ALL_SUCCESS == true ]"
+
+  can_merge:
+    name: "Can merge"
+    needs:
+      - check_paths
+      - test
+    if: always() && github.event_name == 'merge_group'
+    permissions:
+      actions: read
+    runs-on: [self-hosted, static]
+    # A jq expression over the needs context.
+    timeout-minutes: 5
+    steps:
+      - env:
+          NEEDS_JSON: "${{toJSON(needs)}}"
+        name: Transform outcomes
+        run: |
+          echo "ALL_SUCCESS=$(echo "$NEEDS_JSON" | jq '. | to_entries | map([.value.result == "success", .value.result == "skipped"] | any) | all')" >>$GITHUB_ENV
+      - name: Check outcomes
+        run: "[ $ALL_SUCCESS == true ]"
