@@ -134,8 +134,15 @@ Checked against the tree on 2026-11-22, at `1337e79`.
    this changes only where the lint bites. That is exactly why it
    is worth changing. Under `warn`, a developer builds locally for
    an afternoon accumulating `unwrap()` calls and meets them all
-   at push time; under `deny`, the first one fails the build that
-   introduced it. `AGENTS.md` carries "a panic is a cluster-wide
+   at push time; under `deny`, the first one is an error the
+   moment clippy sees it -- a bare `cargo clippy` with no flags,
+   and an editor running clippy as you type, both report it red
+   rather than as one more line of yellow among many. Note what
+   `deny` does *not* buy, because the first draft of this
+   decision claimed it: `unwrap_used` is a clippy lint, so an
+   ordinary `cargo build` never evaluates it at whatever level,
+   and nothing makes a compile fail on one. `AGENTS.md` carries
+   "a panic is a cluster-wide
    outage" as an invariant rather than a preference, and the
    phases that follow -- a packet parser, a lease table, an option
    encoder -- are precisely where an `unwrap()` is cheapest to
@@ -221,7 +228,7 @@ once would trip over each other's half-finished work.
 | 2a | high | opus | none | The workspace, the build image and the `Makefile`. Read decisions 1, 2, 3, 5 and 6 and survey findings 8, 9 and 10 first. Create: a root `Cargo.toml` with `[workspace]`, `[workspace.package]` (edition, `rust-version`, `license = "Apache-2.0"`) and `[workspace.lints.clippy]` carrying `unwrap_used = "deny"`; one binary crate whose `Cargo.toml` says `[lints] workspace = true`; a root `clippy.toml` with `allow-unwrap-in-tests = true`; a `Dockerfile` for the build image per decision 2; and a `Makefile` wrapping `docker run` with targets `build`, `test`, `lint`, `fetch` and `lock`, following ryll's `Makefile` for the cache and flag discipline (decision 6) but not its devcontainer. The binary's `main` may do nothing but print its version -- do not invent daemon behaviour. Verify by running `make build`, `make test` and `make lint` and pasting their output into the commit message; `make lint` must run `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings`. Prove decision 1 bites: add an `unwrap()` to a non-test function, show the build fails, add one to a test, show it passes, then revert both. Nothing Rust may be installed on the host. |
 | 2b | medium | opus | none | `deny.toml` and the Rust pre-commit hooks. Transcribe `deny.toml` from the 1d findings in `docs/plans/PLAN-teneral-implementation-phase-01-research-spikes.md` -- it is a complete file there, written against a real tree, and decision 4 says transcribe rather than rewrite. Do not write a `licenses.deny` list: survey finding 5 says cargo-deny rejects the key outright under `version = 2`. Add a `deny` target to the `Makefile` and add `rustfmt`, `clippy` and `cargo deny` to `.pre-commit-config.yaml` as local hooks that call the `Makefile`, so that CI keeps running nothing but `pre-commit run --all-files` as `docs/development.md` promises. Verify the denial actually denies: add a GPL-licensed crate as a dependency, show `make deny` fails and name the licence it reported, then remove it. Record that command and its output. |
 | 2c | high | opus | none | Two-tier CI, the merge queue and CodeQL. Read decision 7 and survey findings 7 and 13: these lanes cannot run until the repository has a remote, which is deliberate and must not be worked around by inventing a trigger that would fire locally. Rewrite `.github/workflows/ci.yml` to ryll's two-tier shape -- read `ryll/.github/workflows/ci.yml` as the pattern -- with a path filter, a cheap tier gating `Can enqueue` on `pull_request`, an expensive tier gating `Can merge` on `merge_group`, and the build, test, lint and deny lanes from 2a and 2b placed in the right tier. Keep the existing `lint` and `automated_reviewer` jobs working. Add CodeQL from shakenfist/development's `templates/codeql`, with Rust in its language matrix. Everything must pass `actionlint`, which is already a pre-commit hook, and the runner labels must be ones `.github/actionlint.yaml` declares. Do not invent runner labels. |
-| 2d | medium | opus | none | The two fleet templates. Copy `templates/release-automation-rust` and `templates/review-tracking` from `shakenfist/development` byte for byte where the template is byte-for-byte, and make the follow-on edits each template's own README says to make -- read both READMEs first. `review-tracking` brings `.vscode/review-scope.toml`, `REVIEWS.md` and a pruning workflow, and `docs/development.md` says it is deployed once there are source files, which 2a has now created. Do not hand-adapt a template file that is meant to be copied verbatim: the fleet runs a consistency audit that compares them. |
+| 2d | medium | opus | none | The two fleet templates. Copy `templates/release-automation-rust` and `templates/review-tracking` from `shakenfist/development` byte for byte where the template is byte-for-byte, and make the follow-on edits each template's own README says to make -- read both READMEs first. `review-tracking` brings exactly three files -- `prune-reviews.yml` and two scripts under `tools/` -- all byte-identical copies naming no repository or branch; `.vscode/review-scope.toml` and the `.gitignore` exception are adoption steps you write, and `REVIEWS.md` is generated by the script rather than copied. Its README is explicit that the workflow does not work without GitHub-side configuration: a `review-marks` environment carrying a specific default-branch policy, and where the default branch's ruleset requires a pull request, the `shakenfist-review-marks` App, its key and a bypass. None of that can be created while there is no repository, so do the file half, write what the adopter owns, and record the GitHub-side steps as blocked -- do not pretend them done and do not invent a substitute. `release-automation-rust` is five files whose scripts need `chmod +x` after copying, and its flow calls `make lock` and `make test`, which 2a has created. `docs/development.md` says review tracking is deployed once there are source files, which 2a has now created. Do not hand-adapt a template file that is meant to be copied verbatim: the fleet runs a consistency audit that compares them. |
 | 2e | high | opus | none | The differential rig skeleton. Read decision 8: this defines a shape and runs no dnsmasq. Create the rig's directory, a README stating what it is for and why it cannot run yet, the corpus layout for captured request/response pairs, and the comparison harness with at least one case that runs against a recorded fixture rather than a live server. Every case names the `docs/provenance.md` row it supports, and the harness fails a case that names no row -- that check is the point of the skeleton, so write it and show it failing on a case with the row removed. Phase 1's *Future work* says phase 5 redeploys the Linux-bridge lab playbook rather than inventing a rig; say so in the README so phase 5 does not start over. |
 | 2f | medium | opus | none | Fold back and close out. Four things, and nothing else -- this step writes no new code. (1) Update `docs/development.md`: its *Still to come* list (lines 109-141) must no longer name anything this phase shipped, and its "Teneral has no Cargo workspace yet" framing and the "None of that exists yet" line under *Rust is built in Docker* are both now false. (2) Update `AGENTS.md` only if a *convention* changed -- the panic lint being `deny` rather than `warn` is one, because it is a thing an agent cannot infer from the code; do not move reference material into it. (3) Correct the master plan where this phase proved it wrong, and set phase 2's `Status` to `Complete` with its `Merged` cell per decision 9; `docs/plans/index.md` stays `In progress`. (4) Add anything this phase declined to the master plan's *Future work*. Run `pre-commit run --all-files` and fix what it reports. |
 
@@ -251,7 +258,15 @@ Each item is checkable by running something.
    --all-targets -- -D warnings`.
 3. `unwrap_used = "deny"` appears in `[workspace.lints.clippy]`
    and the crate's `Cargo.toml` says `[lints] workspace = true`.
-4. An `unwrap()` added to a non-test function fails `make lint`;
+4. An `unwrap()` added to a non-test function fails `make lint`,
+   and also fails a bare `cargo clippy` carrying no
+   `-D warnings` -- the second is what distinguishes the
+   manifest's `deny` from the gate's flag. Beware a false pass
+   here: a construction that borrows a temporary fails with
+   `E0716`, which looks like a lint failure in `make lint`'s
+   output and is not one, so the added call must be on a
+   `&'static str` or similar. The same call added to a `#[test]`
+   function does not fail;
    the same call added to a `#[test]` function does not. Both
    demonstrated and recorded, both reverted.
 5. `clippy.toml` exists at the root and contains
@@ -268,11 +283,22 @@ Each item is checkable by running something.
 10. `pre-commit run --all-files` passes, and `rustfmt`, `clippy`
     and `cargo deny` are hooks in it.
 11. `actionlint` passes on every file in `.github/workflows/`.
-12. `ci.yml` declares a `merge_group` trigger, and jobs named for
-    the `Can enqueue` and `Can merge` gates both exist.
+12. `ci.yml` declares a `merge_group` trigger, and ryll's three
+    gate jobs all have counterparts: `Can see status`,
+    `Can enqueue` and `Can merge`. The first was missed when this
+    plan was written.
 13. A CodeQL workflow exists and its language matrix names Rust.
-14. `REVIEWS.md` and `.vscode/review-scope.toml` exist, and the
-    pruning workflow from the template is present.
+14. `review-tracking`'s three files are present and byte-identical
+    to the template: `.github/workflows/prune-reviews.yml`,
+    `tools/ci-prune-reviews.sh` and `tools/review-tracking.sh`,
+    each verified with `diff`. `.vscode/review-scope.toml` exists
+    and the `.gitignore` exception for
+    `.vscode/*.weaudit-shas.json` is present, both being adoption
+    steps the adopter writes rather than things the template
+    carries. The GitHub-side adoption steps -- the `review-marks`
+    environment with its default-branch policy, and the App, its
+    key and the ruleset bypass -- are recorded as blocked on the
+    repository existing, not ticked and not silently skipped.
 15. The differential rig's harness fails a case whose provenance
     row is removed. Demonstrated and recorded.
 16. `docs/development.md` contains no sentence saying the Cargo
@@ -335,3 +361,37 @@ that every `cargo` in the `Makefile` runs inside a container,
 and that the build reports the image's compiler rather than
 1.85.1. Corrected before step 2a ran, so no step was briefed
 against it.
+
+**2026-11-22, AEDT. Decision 1 claimed something clippy does not
+do.** It said that under `deny` the first `unwrap()` "fails the
+build that introduced it". It does not: `unwrap_used` is a clippy
+lint, and `cargo build` invokes rustc, which never evaluates
+clippy's lints at any level. Step 2a found this while
+demonstrating the lint, and the decision is reworded to claim
+what is true -- that `deny` makes a bare `cargo clippy`, and an
+editor running clippy as you type, report the call as an error
+rather than a warning. The decision stands on that narrower
+ground, which is narrower than the back brief described it.
+
+**The toolchain tag is invisible to Renovate.** It lives once, in
+the `Makefile`, as `RUST_IMAGE` passed to a default-less `ARG` in
+the `Dockerfile` -- one place, which is what decision 3 asked
+for, but Renovate's dockerfile manager reads `FROM` lines and
+cannot see a version arriving as a build argument. Automatic
+base-image bumps therefore need a `customManagers` rule. Left for
+2f to record in the master plan's *Future work* rather than
+solved here, since Renovate is already configured and this is a
+gap in its coverage rather than a defect in the build.
+
+**Three premises in this plan were checked against the fleet
+before their steps were briefed, and two were wrong.** The
+`review-tracking` template brings three files, not the
+`.vscode/review-scope.toml` and `REVIEWS.md` this plan first
+credited it with, and its workflow needs GitHub-side
+configuration that cannot exist without a repository; step 2d's
+row and definition-of-done item 14 are rewritten accordingly.
+ryll carries three merge gates rather than two, so item 12 named
+only the last two. The third premise held: teneral's
+`.github/actionlint.yaml` declares `static`, `claude-code`, `vm`,
+`debian-13` and `s`, so 2c has a heavier runner available and
+need invent no label.
