@@ -19,11 +19,12 @@
 //! The store's interface is asynchronous, and the blocking it does is
 //! confined to threads the store itself owns rather than handed to a
 //! runtime's shared blocking pool. A caller that wrapped one of these
-//! methods in a helper for moving blocking work off its own thread
-//! would have misread the interface: there is nothing left for such a
-//! helper to move. That phrase is deliberately not written as the
-//! name of the function in question, so that a search of this crate
-//! for callers of it keeps answering "none".
+//! methods in `tokio::task::spawn_blocking` would have misread the
+//! interface: there is nothing left for such a helper to move. Nor
+//! could this crate make that call itself. It depends on tokio for
+//! channels alone, and `spawn_blocking` does not exist without a
+//! runtime feature, so the dependency's own feature list is what
+//! holds the rule rather than anybody's vigilance.
 //!
 //! What exists so far is the foundation and the configured resources
 //! a lookup is scoped by: a database that opens, migrates itself

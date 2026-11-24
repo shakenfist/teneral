@@ -41,6 +41,23 @@
 //! channel that the owning thread blocks on, and the reply is a
 //! one-shot that the caller awaits; nothing else in the crate needs
 //! to know a runtime exists.
+//!
+//! One place blocking does still happen on the caller's thread, and
+//! it is named here rather than left for somebody to find. Both
+//! `Drop` implementations below end a thread and then join it, and a
+//! join blocks whoever is dropping. For the store that happens once,
+//! at shutdown. For a view it happens every time one is dropped,
+//! which in a request handler is once a request -- and what it waits
+//! for is a parked thread waking, a read transaction ending and a
+//! stack unwinding, none of which touches the disk. The exception is
+//! a view dropped while one of its own queries is still running,
+//! which only a cancelled future can arrange: that join waits for the
+//! query. Joining is not optional, because the transaction lives on
+//! that thread's stack and the thread returning is the only thing
+//! that can end it; a view that skipped the join would leave a read
+//! transaction open for the life of the process. The honest summary
+//! is that the `fsync` is on a thread this store owns and the
+//! thread's own teardown is not.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

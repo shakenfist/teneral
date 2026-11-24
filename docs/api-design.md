@@ -228,8 +228,20 @@ interface name is unique only within a network namespace, and
 both of the namespace-using consumers put every network in one
 of its own. Identity without the namespace would collide the
 moment a second consumer named its interfaces by role rather
-than by network. The other half of this resource is a
-constraint rather than a field: **an interface belongs to
+than by network.
+
+Note that this is the only row in the table above where the
+identity and the uniqueness key are not the same thing. The
+network is part of how an attachment is *addressed*, because
+every resource is reached under the network that owns it, but
+what makes an attachment unique is narrower: the namespace and
+the interface name alone, with the network an ordinary attribute
+of the row. That is not a looseness in the table. It is the
+constraint below expressed as a key, and the store implements it
+that way deliberately, because a uniqueness key that included
+the network would permit precisely the configuration the next
+paragraph forbids. The other half of this resource is therefore
+a constraint rather than a field: **an interface belongs to
 exactly one network, and claiming an attached interface for a
 second network is refused.** That refusal is the single most
 important validation in the API, because it is the one place

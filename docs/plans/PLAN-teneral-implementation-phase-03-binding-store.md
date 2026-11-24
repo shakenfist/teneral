@@ -619,15 +619,25 @@ named.
     namespace-socket assumption is unconfirmed, or that the
     binding store is to come.
 23. No container or process this phase started is still running.
-24. Decision 3's boundary holds, checked three ways. `grep -rn
-    spawn_blocking teneral-store/src` finds nothing; the
-    `tokio` dependency in `teneral-store/Cargo.toml` carries
-    `default-features = false` with `features = ["sync"]` and
-    the runtime features appear only under
-    `[dev-dependencies]`; and the store's own tests drive it
-    through the async interface rather than a synchronous back
-    door, so no test reaches a blocking call the trait does not
-    expose.
+24. Decision 3's boundary holds, and the check that matters is a
+    compile-time one rather than a grep. The `tokio` dependency
+    in `teneral-store/Cargo.toml` carries
+    `default-features = false` with `features = ["sync"]`, and
+    the runtime features appear only under `[dev-dependencies]`;
+    `spawn_blocking` does not exist without a runtime feature,
+    so a call to it in the crate fails to build with
+    `cannot find function spawn_blocking in module tokio::task`.
+    Demonstrate that once and restore. The store's own tests
+    must also drive it through the async interface rather than a
+    synchronous back door, so that no test reaches a blocking
+    call the trait does not expose.
+
+    This item was first written as a grep for the token, which
+    was a worse check for a reason worth keeping: a grep cannot
+    tell a call from a doc comment explaining the rule, so it
+    put pressure on the documentation to avoid naming the
+    function it was about. The feature list is the real
+    guarantee and the prose is then free to be plain.
 
 ## Back brief
 
@@ -762,7 +772,112 @@ transient. `make build` and `make lint` still exit 0, the
 warnings being cargo manifest lints that `-D warnings` does not
 reach. 3b's review checks they have cleared.
 
-**Extras kept, with the reasoning for each.** `STRICT` on both
+**2026-11-25 (AEDT): step 3b. Decision 3 works as written, which
+is the finding that mattered most.** The async trait over
+threads the store owns compiles and behaves: `blocking_recv`
+needs no runtime feature, so `tokio` stays at
+`features = ["sync"]`, and the writer thread and the
+thread-per-view both do what the decision said they would. One
+mechanical point the decision does not state, found in the
+building: a per-view job closure cannot take a
+`Transaction<'_>`, because that means naming two higher-ranked
+lifetimes inside a boxed `FnOnce`. It takes `&Connection`
+instead and the view's thread passes `&*transaction`, so
+statements still run inside the view's transaction. Worth
+recording because the next person to touch that type will
+otherwise try the obvious thing first, as this step did.
+
+Two traits rather than one: `BindingStore` with eleven methods
+and `ReadHandle` with seven, a store and a view of a store
+being different things with different lifetimes. The
+store-global exceptions to demand 4 are `epoch`,
+`schema_version`, `read` and `interface_owner` on the first, and
+`cursor` and `networks` on the second. `interface_owner` is the
+interesting one and its justification is worth repeating here:
+its *answer* is a network, so there is no network to ask within,
+and it is the resolution step the datapath performs before
+anything is scoped. It is also the opposite of the shape demand
+4 warns against -- it takes no network and returns the one it
+found, so a caller cannot ask it about one network and be handed
+another's answer.
+
+**The review made two corrections, both at the root rather than
+the symptom.** The first was mine to make because the step had
+been put in an awkward position by a check this plan got wrong.
+Definition-of-done item 24 was a grep for `spawn_blocking` in
+the crate's sources, and a grep cannot tell a call from a doc
+comment explaining the rule -- so documenting the rule tripped
+the check, and the step contorted the sentence to avoid naming
+the function it was about. The real guarantee is better than the
+grep anyway: `spawn_blocking` does not exist without a tokio
+runtime feature, and the crate has only `sync`, so the call does
+not compile. Demonstrated: `cannot find function spawn_blocking
+in module tokio::task`. Item 24 is rewritten around that, and
+the crate's documentation now names the function plainly.
+
+The second was a tension between two documents that the step
+found and flagged rather than quietly picking a side, which was
+the right call. `docs/api-design.md`'s resource table gives an
+attachment's identity as `(network, namespace, interface name)`,
+while decision 6 requires a primary key of `(namespace, ifname)`
+with the network an ordinary column. The step implemented
+decision 6. Both are right and the table was the loose one: the
+network is part of how an attachment is addressed, and the
+uniqueness key is deliberately narrower, because a key including
+the network would permit exactly the second claim that the
+paragraph immediately below the table calls the single most
+important validation in the API. `docs/api-design.md` now says
+so, in the only row of that table where identity and uniqueness
+key differ.
+
+**One thing the module's own claim overstated, now corrected in
+place.** The design says the blocking is confined to threads the
+store owns. The work is, but both `Drop` implementations end a
+thread and join it, and a join blocks whoever is dropping --
+which for a view is once per request in phases 4 to 6. What it
+waits for is a parked thread waking, a read transaction ending
+and a stack unwinding, none of which touches a disk, so it is
+not in the class of thing decision 3 was worried about. The
+exception is a view dropped while one of its own queries is
+still running, which only a cancelled future can arrange, and
+that join waits for the query. The join cannot be dropped: the
+transaction lives on that thread's stack, so the thread
+returning is the only thing that can end it. `sqlite.rs` now
+says all of this where a reader of the design will meet it.
+
+**Extras kept, with the reasoning for each.** Range overlap
+within a network is refused, which was not asked for and is
+right: two ranges in one network that both contain an address
+make "the lowest free address" a question with two answers.
+Identical ranges in *different* networks are permitted and the
+two-network fixture depends on it. Name validation refuses empty
+names, names over 255 bytes, control characters, and a `/` in a
+namespace or interface name, that being the character joining
+them into an event's resource id. Event state is built by
+SQLite's `json_object`, so the escaping is the engine's and no
+serialisation dependency was added. A `Clock` arrived a step
+early because `event_log.recorded_at` has no `DEFAULT`, so
+writing any event needs one; minimal, and 3d was going to need
+it regardless. `address_range` carries `CHECK` constraints
+bounding its addresses to 32 bits, which is decision 5 enforced
+by the database rather than by the code that writes it.
+
+Point reads -- only `interface_owner` today -- run on the writer
+thread rather than opening a view, so they wait behind whatever
+write is in progress. Documented at the call with its cost and
+its fix, which is a small pool of reader threads and not a
+change to any signature.
+
+Verified in review rather than taken on report: the trait script
+catches a write that loses its network parameter
+(`create_network ... FAIL takes no network and is not enumerated
+as store-global`) and exits 1 on a mutant and 0 on a clean tree,
+so it is usable as a gate; 39 tests pass; the attachment
+constraint is refused by the database with `UNIQUE constraint
+failed: attachment.namespace, attachment.ifname`; and the three
+`unused dependency` warnings from 3a have cleared.
+
+**Earlier extras, from 3a.** `STRICT` on both
 tables, which was not asked for and should have been: without it
 an INTEGER column stores the text `10.0.0.5` happily and every
 comparison against it answers something other than what the
