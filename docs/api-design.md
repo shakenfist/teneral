@@ -290,11 +290,13 @@ several bindings could match, the order of preference is fixed
 by this API, published, and returned alongside every lookup
 result. It is not configurable per network, because a
 per-network precedence makes it impossible to reason about what
-two networks will do with the same client. No RFC specifies such
-an order, so this is teneral's own choice rather than anything
-observed elsewhere, and the API's documentation is its only
-source -- which is exactly why a consumer must be told which
-selector matched rather than inferring it.
+two networks will do with the same client. Most of the order is
+teneral's own choice rather than anything specified or observed
+elsewhere, which is exactly why a consumer must be told which
+selector matched rather than inferring it -- but not all of it
+is, and the paragraphs below say which step is specified and
+where. This sentence used to claim no RFC fixed any of it, which
+was wrong; RFC 2131 section 4.2 settles the top pair.
 
 The order, highest first, is the client identifier, then the
 DUID and IAID, then the hardware address, then the user class,
