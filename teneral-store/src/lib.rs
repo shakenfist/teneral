@@ -40,13 +40,25 @@
 //! wrong network. Over those again are the leases: who is using which
 //! address right now, how an address is chosen for a client that has
 //! none, and the two operations that settle a binding against a lease
-//! in one step rather than two. The reads over the history come next.
+//! in one step rather than two. Over all of it sit the reads a
+//! consumer watches with: a snapshot of one network taken at a single
+//! position, the events after a position together with the refusals a
+//! position can be met with instead, the bound that keeps the history
+//! finite, and the per-network digest that answers "do we still agree"
+//! in one value.
+//!
+//! What is deliberately not here is anything that speaks to anything.
+//! There is no transport, no stream and no wire format: this crate's
+//! half of the watch contract is the snapshot, the history, and the
+//! positions that join the two without a gap or an overlap. Turning a
+//! refusal into a `resync` on a connection belongs to the layer above.
 
 mod clock;
 mod cursor;
 mod db;
 mod error;
 mod guard;
+mod history;
 mod identity;
 mod lease;
 mod model;
@@ -64,6 +76,7 @@ mod test_support;
 pub use clock::{Clock, SystemClock};
 pub use cursor::Cursor;
 pub use error::{Error, Result};
+pub use history::{Digest, Event, EventKind, History, Retention, Snapshot};
 pub use identity::Epoch;
 pub use model::{AddressRange, Attachment, Binding, Explanation, Lease, Network};
 pub use schema::SCHEMA_VERSION;

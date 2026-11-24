@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use rusqlite::Connection;
 
 use crate::clock::Clock;
+use crate::history::Retention;
 use crate::sqlite::SqliteStore;
 use crate::store::BindingStore;
 
@@ -162,12 +163,29 @@ impl TwoNetworks {
     /// rather than leaving them passing against a database no code
     /// path can produce.
     pub(crate) async fn new(label: &str) -> Self {
+        Self::with_retention(label, Retention::default()).await
+    }
+
+    /// Build the fixture over a store that keeps `retention`'s worth
+    /// of history.
+    ///
+    /// A test of the bound cannot use the default window without
+    /// writing fifty thousand events, and a test that did would be
+    /// testing the number rather than the mechanism. This keeps the
+    /// mechanism the same one the daemon runs: the window is a
+    /// parameter of the store, so a tight one exercises the same
+    /// truncation inside the same transaction.
+    pub(crate) async fn with_retention(label: &str, retention: Retention) -> Self {
         let directory = TempStore::new(label);
         let clock = Arc::new(TestClock::new(FIXTURE_NOW));
 
-        let store = SqliteStore::with_clock(directory.path(), Arc::clone(&clock) as Arc<dyn Clock>)
-            .await
-            .expect("a store in a fresh directory");
+        let store = SqliteStore::with_clock_and_retention(
+            directory.path(),
+            Arc::clone(&clock) as Arc<dyn Clock>,
+            retention,
+        )
+        .await
+        .expect("a store in a fresh directory");
 
         for network in [ALPHA, BETA] {
             store.create_network(network).await.expect("a network");

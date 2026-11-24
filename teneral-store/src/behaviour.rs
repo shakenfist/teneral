@@ -16,7 +16,10 @@ use std::net::Ipv4Addr;
 
 use rusqlite::{Connection, ErrorCode};
 
+use crate::cursor::Cursor;
 use crate::error::Error;
+use crate::history::{Event, EventKind, History, Retention};
+use crate::identity::Epoch;
 use crate::model::{Binding, Lease};
 use crate::selector::{ClientIdentity, Selector, SelectorKind};
 use crate::store::BindingStore;
@@ -2733,4 +2736,559 @@ async fn a_network_with_a_lease_on_it_will_not_be_removed() {
     let view = fixture.store.read().await.unwrap();
     assert!(view.network(ALPHA).await.unwrap().is_none());
     assert!(view.network(BETA).await.unwrap().is_some());
+}
+
+// ---------------------------------------------------------------------
+// The history, the bound on it, and the digest.
+// ---------------------------------------------------------------------
+
+/// Long enough that a test of the count bound is not quietly a test
+/// of the age bound.
+const A_YEAR: u64 = 365 * 86_400;
+
+/// The position before everything, which is what a consumer that has
+/// read the whole history from the beginning would have presented
+/// before the first write.
+fn start(fixture: &TwoNetworks) -> Cursor {
+    Cursor::new(fixture.store.epoch().clone(), 0)
+}
+
+/// A history that could be resumed, or a failure naming what came
+/// back instead.
+fn resumed(history: History) -> (Vec<Event>, Cursor) {
+    match history {
+        History::Resumed { events, cursor } => (events, cursor),
+        other => panic!("expected a resumable history, got {other:?}"),
+    }
+}
+
+/// How many of these events describe one resource in one network.
+///
+/// The question every "exactly once" assertion here is really asking:
+/// a consumer applies events by resource, so a write delivered twice
+/// and a write delivered never are both counted here.
+fn occurrences(events: &[Event], network: &str, resource_id: &str) -> usize {
+    events
+        .iter()
+        .filter(|event| event.network == network && event.resource_id == resource_id)
+        .count()
+}
+
+/// Every position still in the log, oldest first, read with the engine
+/// because the bound is a property of the table rather than of any
+/// answer the store gives.
+fn retained(connection: &Connection) -> Vec<i64> {
+    let mut statement = connection
+        .prepare("SELECT seq FROM event_log ORDER BY seq")
+        .unwrap();
+    let rows = statement.query_map([], |row| row.get(0)).unwrap();
+
+    rows.map(|row| row.unwrap()).collect()
+}
+
+/// How far the log says it has been truncated.
+fn evicted_through(connection: &Connection) -> i64 {
+    connection
+        .query_row(
+            "SELECT evicted_through FROM event_history WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_snapshot_is_a_consistent_view_and_a_resume_joins_it_exactly_once() {
+    let fixture = TwoNetworks::new("snapshot-resume").await;
+    let reserved = selector(SelectorKind::Mac, SHARED_MAC);
+    let id = format!("mac:{SHARED_MAC}");
+
+    let view = fixture.store.read().await.unwrap();
+    let before = view.snapshot(ALPHA).await.unwrap();
+    let at = before.cursor.clone();
+
+    // The snapshot's position is the view's, which is what makes it
+    // the position to resume at rather than a position near it.
+    assert_eq!(view.cursor(), &at);
+    assert_eq!(occurrences(&before.events, ALPHA, &id), 0);
+
+    // A writer commits while the view is held.
+    let written = fixture
+        .store
+        .create_binding(ALPHA, &reserved, in_pool(50), None)
+        .await
+        .unwrap();
+    assert!(written.sequence() > at.sequence());
+
+    // The same view, asked again after that commit, gives the same
+    // snapshot. This is the half that cannot be got by walking the
+    // tables as they change: a snapshot that moved would deliver the
+    // write below twice, and one that was assembled read by read
+    // could contain half of it.
+    let after = view.snapshot(ALPHA).await.unwrap();
+    assert_eq!(before, after);
+
+    // And the view's own history after its own position is empty, for
+    // the same reason: the position it reports is exactly where its
+    // snapshot ends.
+    let (nothing, reached) = resumed(view.history(ALPHA, &at).await.unwrap());
+    assert!(nothing.is_empty(), "{nothing:?}");
+    assert_eq!(reached, at);
+    drop(view);
+
+    // Resuming from the snapshot's position delivers the write, once.
+    let later = fixture.store.read().await.unwrap();
+    let (events, reached) = resumed(later.history(ALPHA, &at).await.unwrap());
+    assert_eq!(occurrences(&events, ALPHA, &id), 1);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].cursor, written);
+    assert_eq!(events[0].kind, EventKind::Binding);
+    assert_eq!(events[0].network, ALPHA);
+    assert!(events[0].state.is_some());
+
+    // No gap either, which is the other half of the join: the event
+    // delivered is the one the snapshot did not contain, and nothing
+    // sits between the two positions.
+    assert_eq!(events[0].cursor.sequence(), at.sequence() + 1);
+
+    // And nothing is delivered twice: from where that read reached,
+    // there is nothing more to have.
+    let (again, _) = resumed(later.history(ALPHA, &reached).await.unwrap());
+    assert!(again.is_empty(), "{again:?}");
+}
+
+#[tokio::test]
+async fn a_snapshots_events_say_what_the_live_events_said() {
+    let fixture = TwoNetworks::new("snapshot-states").await;
+
+    // All five kinds, so that the comparison below covers every state
+    // this store knows how to write.
+    configure(
+        &fixture,
+        ALPHA,
+        &selector(SelectorKind::Mac, SHARED_MAC),
+        in_pool(60),
+    )
+    .await;
+    take(&fixture, ALPHA, &client(MAC_ONE), in_pool(50), DAY).await;
+
+    let view = fixture.store.read().await.unwrap();
+    let snapshot = view.snapshot(ALPHA).await.unwrap();
+    let (events, _) = resumed(view.history(ALPHA, &start(&fixture)).await.unwrap());
+
+    // The state in a snapshot and the state in the event the same
+    // write emitted are built by two statements in two modules, and a
+    // consumer applies both as descriptions of one resource. A drift
+    // between them would have it believing two different things about
+    // the same binding, so the two are compared here rather than
+    // being kept in step by hand.
+    let mut kinds = Vec::new();
+    for event in &snapshot.events {
+        let live = events
+            .iter()
+            .rev()
+            .find(|candidate| {
+                candidate.kind == event.kind
+                    && candidate.resource_id == event.resource_id
+                    && candidate.network == event.network
+            })
+            .unwrap_or_else(|| panic!("no event for {:?} {}", event.kind, event.resource_id));
+
+        assert_eq!(event.state, live.state, "{:?}", event.kind);
+        assert_eq!(event.cursor, live.cursor, "{:?}", event.kind);
+
+        // A snapshot says where a resource was last written and not
+        // when, a resource row carrying the one and not the other.
+        assert!(event.recorded_at.is_none());
+        assert_eq!(live.recorded_at, Some(FIXTURE_NOW));
+
+        if !kinds.contains(&event.kind) {
+            kinds.push(event.kind);
+        }
+    }
+
+    for kind in EventKind::ALL {
+        assert!(kinds.contains(&kind), "no {kind:?} in the snapshot");
+    }
+}
+
+#[tokio::test]
+async fn a_resume_delivers_the_intermediate_states_and_not_only_the_outcome() {
+    let fixture = TwoNetworks::new("intermediate-states").await;
+
+    let view = fixture.store.read().await.unwrap();
+    let away = view.cursor().clone();
+    drop(view);
+
+    // A client takes an address and gives it up again while the
+    // consumer is away. Collapsing these two into nothing would be
+    // cheaper and would leave a consumer that was holding the lease
+    // never seeing it end.
+    let lease = take(&fixture, ALPHA, &client(MAC_ONE), in_pool(50), DAY).await;
+    fixture
+        .store
+        .revoke_lease(ALPHA, in_pool(50), &lease.cursor)
+        .await
+        .unwrap();
+
+    let view = fixture.store.read().await.unwrap();
+    let (events, _) = resumed(view.history(ALPHA, &away).await.unwrap());
+
+    let address = in_pool(50).to_string();
+    assert_eq!(occurrences(&events, ALPHA, &address), 2);
+    assert_eq!(events.len(), 2);
+    assert!(events[0].state.is_some(), "the lease was taken");
+    assert!(events[1].state.is_none(), "and then given up");
+    assert!(events[0].cursor.sequence() < events[1].cursor.sequence());
+
+    // The store's current state says nothing about either, which is
+    // why the history has to.
+    assert!(view.lease(ALPHA, in_pool(50)).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn a_history_read_scoped_to_one_network_sees_only_its_own_events() {
+    let fixture = TwoNetworks::new("scoped-history").await;
+    let shared = selector(SelectorKind::Mac, SHARED_MAC);
+    let id = format!("mac:{SHARED_MAC}");
+
+    let view = fixture.store.read().await.unwrap();
+    let at = view.cursor().clone();
+    drop(view);
+
+    // The same client, bound to the same address, in both networks:
+    // the two events are identical but for the network they name, so
+    // a read that leaked between networks could not be told from a
+    // correct one by looking at a resource identity.
+    let in_alpha = fixture
+        .store
+        .create_binding(ALPHA, &shared, in_pool(50), None)
+        .await
+        .unwrap();
+    let in_beta = fixture
+        .store
+        .create_binding(BETA, &shared, in_pool(50), None)
+        .await
+        .unwrap();
+
+    let view = fixture.store.read().await.unwrap();
+
+    let (alpha, _) = resumed(view.history(ALPHA, &at).await.unwrap());
+    assert_eq!(alpha.len(), 1);
+    assert_eq!(alpha[0].cursor, in_alpha);
+    assert_eq!(alpha[0].network, ALPHA);
+    assert_eq!(occurrences(&alpha, BETA, &id), 0);
+
+    let (beta, _) = resumed(view.history(BETA, &at).await.unwrap());
+    assert_eq!(beta.len(), 1);
+    assert_eq!(beta[0].cursor, in_beta);
+    assert_eq!(beta[0].network, BETA);
+    assert_eq!(occurrences(&beta, ALPHA, &id), 0);
+
+    // Each event names its network even on a read that named one. A
+    // handler that learned to infer it from the question is wrong the
+    // day the question widens -- as it does here.
+    let (both, _) = resumed(view.history_everywhere(&at).await.unwrap());
+    assert_eq!(both.len(), 2);
+    assert_eq!(both[0].network, ALPHA);
+    assert_eq!(both[1].network, BETA);
+    assert_eq!(both[0].resource_id, both[1].resource_id);
+    assert!(both[0].cursor.sequence() < both[1].cursor.sequence());
+    assert_eq!(fixture.store.cross_network_answers(), 0);
+}
+
+#[tokio::test]
+async fn a_position_the_store_has_evicted_is_told_so_rather_than_handed_nothing() {
+    // Two events of history, which the fixture's own six writes have
+    // already pushed past. The bound is the mechanism the daemon runs
+    // with a larger number.
+    let fixture = TwoNetworks::with_retention("evicted", Retention::new(2, A_YEAR).unwrap()).await;
+    let early = start(&fixture);
+
+    let view = fixture.store.read().await.unwrap();
+    let answer = view.history(ALPHA, &early).await.unwrap();
+
+    match &answer {
+        History::Evicted {
+            presented,
+            evicted_through,
+        } => {
+            assert_eq!(presented, &early);
+            assert_eq!(
+                evicted_through.sequence(),
+                view.cursor().sequence() - 2,
+                "the mark should name the last position that is gone"
+            );
+            assert_eq!(evicted_through.epoch(), fixture.store.epoch());
+        }
+        other => panic!("expected the position to be reported as evicted, got {other:?}"),
+    }
+
+    // The thing this answer is not. An empty resume is what a store
+    // without a durable low-water mark would have to say here, and it
+    // would tell a consumer that has missed six events that it is up
+    // to date.
+    assert!(!matches!(answer, History::Resumed { .. }));
+
+    // A position inside the window still resumes, and so does the
+    // mark itself: what a consumer at a position needs is the events
+    // *after* it, so the oldest resumable position is the one the
+    // eviction reached, not the one after it.
+    let (events, _) = resumed(view.history(ALPHA, view.cursor()).await.unwrap());
+    assert!(events.is_empty());
+
+    let at_the_mark = Cursor::new(fixture.store.epoch().clone(), view.cursor().sequence() - 2);
+    assert!(matches!(
+        view.history(ALPHA, &at_the_mark).await.unwrap(),
+        History::Resumed { .. }
+    ));
+}
+
+#[tokio::test]
+async fn a_position_from_another_epoch_is_told_the_epoch_changed() {
+    let fixture = TwoNetworks::new("epoch-mismatch").await;
+
+    let view = fixture.store.read().await.unwrap();
+
+    // A position whose sequence number is perfectly plausible here
+    // and belongs to a different store's order. Without the epoch
+    // this would resume, and the consumer would be handed another
+    // history's events under numbers it recognised.
+    let elsewhere = Cursor::new(Epoch::for_test("00000000000000000000000000000000"), 1);
+
+    match view.history(ALPHA, &elsewhere).await.unwrap() {
+        History::EpochChanged { presented, store } => {
+            assert_eq!(&presented, elsewhere.epoch());
+            assert_eq!(&store, fixture.store.epoch());
+        }
+        other => panic!("expected the epoch to be reported as changed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_position_the_store_never_issued_is_not_reported_as_evicted() {
+    let fixture = TwoNetworks::new("never-issued").await;
+
+    let view = fixture.store.read().await.unwrap();
+    let ahead = Cursor::new(
+        fixture.store.epoch().clone(),
+        view.cursor().sequence() + 100,
+    );
+
+    // The epoch matches and the position is ahead of everything this
+    // store has issued, which is what a restore from a file-level
+    // backup looks like from in here: the epoch comes back with the
+    // file and the sequence counter comes back wound to where the
+    // backup was taken.
+    //
+    // Reporting it as eviction would say something was discarded when
+    // nothing was ever there, and that distinction is the whole
+    // reason the low-water mark is recorded rather than inferred.
+    match view.history_everywhere(&ahead).await.unwrap() {
+        History::NeverIssued { presented, latest } => {
+            assert_eq!(presented, ahead);
+            assert_eq!(&latest, view.cursor());
+        }
+        other => panic!("expected the position to be reported as never issued, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn the_history_is_bounded_by_a_count_of_events() {
+    let fixture =
+        TwoNetworks::with_retention("bound-count", Retention::new(3, A_YEAR).unwrap()).await;
+
+    // The fixture writes six events and the age bound cannot bite for
+    // a year, so what is left is the count's doing.
+    let behind = fixture.behind_the_store();
+    let kept = retained(&behind);
+    assert_eq!(kept.len(), 3);
+
+    let view = fixture.store.read().await.unwrap();
+    let latest = i64::try_from(view.cursor().sequence()).unwrap();
+    assert_eq!(kept, vec![latest - 2, latest - 1, latest]);
+    assert_eq!(evicted_through(&behind), latest - 3);
+    drop(view);
+
+    // And the window moves with each write rather than being trimmed
+    // when something remembers to: one more write, one more eviction.
+    fixture.store.create_network("gamma").await.unwrap();
+
+    let kept = retained(&behind);
+    assert_eq!(kept.len(), 3);
+    assert_eq!(kept[2], latest + 1);
+    assert_eq!(evicted_through(&behind), latest - 2);
+}
+
+#[tokio::test]
+async fn the_history_is_also_bounded_by_the_age_of_its_events() {
+    let fixture =
+        TwoNetworks::with_retention("bound-age", Retention::new(50_000, 60).unwrap()).await;
+
+    let behind = fixture.behind_the_store();
+    assert_eq!(retained(&behind).len(), 6);
+
+    // Two minutes later, everything the fixture wrote is outside a
+    // one-minute window -- and the count bound, which has room for
+    // fifty thousand, is not what removes it.
+    fixture.clock.advance(120);
+    let written = fixture.store.create_network("gamma").await.unwrap();
+
+    let kept = retained(&behind);
+    assert_eq!(kept, vec![i64::try_from(written.sequence()).unwrap()]);
+    assert_eq!(
+        evicted_through(&behind),
+        i64::try_from(written.sequence()).unwrap() - 1
+    );
+
+    // The write that did the evicting is still resumable from, which
+    // it has to be: its position is what the caller was just handed.
+    let view = fixture.store.read().await.unwrap();
+    assert!(matches!(
+        view.history_everywhere(&written).await.unwrap(),
+        History::Resumed { .. }
+    ));
+}
+
+#[tokio::test]
+async fn a_refused_write_evicts_nothing() {
+    let fixture =
+        TwoNetworks::with_retention("bound-atomic", Retention::new(3, A_YEAR).unwrap()).await;
+
+    let behind = fixture.behind_the_store();
+    let kept = retained(&behind);
+    let mark = evicted_through(&behind);
+
+    // A write this tight a bound would certainly evict for, refused
+    // after its event was appended. The truncation is in the write's
+    // own transaction, so it goes back with it: a store that
+    // truncated outside the write would have moved the mark for a
+    // change that never happened, and told a consumer afterwards that
+    // it could not resume from a position whose events are all still
+    // there.
+    let refusal = fixture.store.create_network(ALPHA).await.unwrap_err();
+    assert!(matches!(refusal, Error::Conflict { .. }));
+
+    assert_eq!(retained(&behind), kept);
+    assert_eq!(evicted_through(&behind), mark);
+}
+
+#[tokio::test]
+async fn the_digest_changes_in_its_own_network_and_not_in_the_other() {
+    let fixture = TwoNetworks::new("digest").await;
+    let reserved = selector(SelectorKind::Mac, SHARED_MAC);
+
+    let view = fixture.store.read().await.unwrap();
+    let alpha_before = view.digest(ALPHA).await.unwrap();
+    let beta_before = view.digest(BETA).await.unwrap();
+    let position_before = view.cursor().clone();
+    drop(view);
+
+    // A binding configured in one network.
+    let written = fixture
+        .store
+        .create_binding(BETA, &reserved, in_pool(50), None)
+        .await
+        .unwrap();
+
+    let view = fixture.store.read().await.unwrap();
+    assert_ne!(view.digest(BETA).await.unwrap(), beta_before);
+
+    // And the assertion the digest exists for. The store's position
+    // moved, so a digest derived from it -- or from anything global
+    // -- would have moved here too, and every consumer mirroring
+    // every other network would resync for a change that cannot
+    // affect it.
+    assert!(written.sequence() > position_before.sequence());
+    assert_eq!(view.digest(ALPHA).await.unwrap(), alpha_before);
+    drop(view);
+
+    // The other way round, so that neither network is the one that
+    // happens to work.
+    let in_alpha = fixture
+        .store
+        .create_binding(ALPHA, &reserved, in_pool(50), None)
+        .await
+        .unwrap();
+
+    let view = fixture.store.read().await.unwrap();
+    let alpha_now = view.digest(ALPHA).await.unwrap();
+    let beta_now = view.digest(BETA).await.unwrap();
+    assert_ne!(alpha_now, alpha_before);
+
+    // A configuration taken back to where it was reads as where it
+    // was, which is what a consumer comparing one value against the
+    // one it remembers needs: removing the binding leaves the
+    // network's configured set exactly as it was before it existed.
+    fixture
+        .store
+        .delete_binding(ALPHA, &reserved, &in_alpha)
+        .await
+        .unwrap();
+
+    let view = fixture.store.read().await.unwrap();
+    assert_eq!(view.digest(ALPHA).await.unwrap(), alpha_before);
+    assert_eq!(view.digest(BETA).await.unwrap(), beta_now);
+}
+
+#[tokio::test]
+async fn the_digest_does_not_move_when_a_lease_does() {
+    let fixture = TwoNetworks::new("digest-leases").await;
+
+    let view = fixture.store.read().await.unwrap();
+    let before = view.digest(ALPHA).await.unwrap();
+    drop(view);
+
+    let lease = take(&fixture, ALPHA, &client(MAC_ONE), in_pool(50), DAY).await;
+
+    // A digest answers "do we still agree about the configuration".
+    // A lease is not configuration -- it changes whenever a client
+    // appears -- so a digest that followed leases would change
+    // constantly and would answer "has anything happened", which is
+    // what the watch stream is for.
+    let view = fixture.store.read().await.unwrap();
+    assert_eq!(view.digest(ALPHA).await.unwrap(), before);
+
+    // The lease is in the snapshot all the same, so the digest's
+    // silence about it is a choice rather than a resource the store
+    // forgot.
+    let snapshot = view.snapshot(ALPHA).await.unwrap();
+    assert_eq!(
+        occurrences(&snapshot.events, ALPHA, &in_pool(50).to_string()),
+        1
+    );
+    drop(view);
+
+    fixture
+        .store
+        .revoke_lease(ALPHA, in_pool(50), &lease.cursor)
+        .await
+        .unwrap();
+
+    let view = fixture.store.read().await.unwrap();
+    assert_eq!(view.digest(ALPHA).await.unwrap(), before);
+}
+
+#[tokio::test]
+async fn a_network_the_store_does_not_hold_has_no_snapshot_and_no_digest() {
+    let fixture = TwoNetworks::new("absent-network").await;
+    let view = fixture.store.read().await.unwrap();
+
+    // Not an empty snapshot and not a digest of nothing. A consumer's
+    // next act on a complete snapshot is to delete whatever the store
+    // did not mention, so "there is no such network" and "this
+    // network is configured with nothing" must not share an answer.
+    assert!(matches!(
+        view.snapshot("gamma").await.unwrap_err(),
+        Error::UnknownNetwork { .. }
+    ));
+    assert!(matches!(
+        view.digest("gamma").await.unwrap_err(),
+        Error::UnknownNetwork { .. }
+    ));
+
+    // And the two networks that do exist are unaffected by having
+    // been asked about one that does not.
+    assert!(view.snapshot(ALPHA).await.is_ok());
+    assert!(view.digest(BETA).await.is_ok());
 }

@@ -537,13 +537,39 @@ acquires a bug it cannot reproduce.
 
 A cursor is a pair: an **epoch** and a **sequence**. The
 sequence is a monotonically increasing number assigned to every
-mutation of the store, in one total order. The epoch changes
-whenever the sequence cannot be trusted to continue -- the store
-was restored from a backup, the event history was truncated past
-what a client might hold, or the daemon's identity of the store
-changed. An epoch is what stops a restored daemon from handing
-out sequence numbers a client has already seen attached to
-different events.
+mutation of the store, in one total order. The epoch says whose
+sequence numbers those are: it is generated when the store is
+created and does not change while that store is the store, so a
+consumer presenting a remembered cursor is told "carry on from
+here" rather than being handed a different history's events
+under numbers it recognises.
+
+Three things can be wrong with a presented cursor, and they are
+answered separately because the consumer is in a different
+position in each. Its epoch may not be this store's. Its
+sequence may have been truncated out of the retained history. Or
+its sequence may be *ahead* of everything this store has ever
+issued.
+
+The third is worth dwelling on, because it is what a restore
+from a backup looks like from the inside -- and because this
+section first said the epoch changes when a store is restored,
+which the storage layer cannot make true. The epoch lives in the
+database file, so restoring the file brings the epoch back with
+it, along with a sequence counter wound back to where the backup
+was taken. What marks that event is therefore not the epoch but
+a consumer presenting a position the store has not issued, which
+is why that is an answer of its own rather than being reported
+as eviction. The epoch still does the job it is load-bearing
+for, which is telling two stores' orders apart; noticing that
+one store's order has been rewound is the third answer's.
+
+Truncation does not change the epoch either, and that is
+deliberate rather than an omission. Retention is per daemon
+rather than per client, so a history truncated past what one
+absent consumer held must not invalidate the cursor every
+*present* consumer is holding: eviction is reported to the
+consumer it affects and to nobody else.
 
 Order is total across the whole store, but **a consumer must
 not read causality between networks from it**. Two networks'
@@ -586,12 +612,20 @@ neither. Collapsing them would be cheaper and would make the
 stream unusable as a sequence, because a consumer that was
 holding the earlier state would never see it end.
 
-**Resync.** If the epoch does not match, or the sequence has
-been evicted from the retained history, the server does **not**
-start streaming from the present. It sends a `resync` event
-naming the reason -- the epoch changed, or the cursor was
-evicted -- and then behaves exactly like a new client: snapshot,
-in-sync marker, stream.
+**Resync.** If any of the three things above is wrong with the
+cursor, the server does **not** start streaming from the
+present. It sends a `resync` event naming the reason -- the
+epoch changed, the cursor was evicted, or the cursor is a
+position this store never issued -- and then behaves exactly
+like a new client: snapshot, in-sync marker, stream.
+
+The reasons are three answers and not one message, in the store
+and on the wire both. A consumer logs them differently and an
+operator reads them differently: an epoch that changed is a
+different store, an evicted cursor is a consumer that was away
+too long, and a position never issued is a store that has gone
+backwards -- which is the only one of the three that means
+somebody should go and look at the daemon.
 
 The resync is sent **in band, as data on the stream**, not as a
 connection error or an HTTP status. This is deliberate. A

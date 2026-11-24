@@ -39,16 +39,23 @@
 //!    enumerated in each trait's doc comment below, because a reader
 //!    needs to be able to tell a deliberate one from an oversight.
 //! 5. **History retention belongs to the store.** The event every
-//!    write emits is already durable, written in the same transaction
-//!    as the write it describes; the methods that read that history
-//!    back and the bound that truncates it are not on these traits
-//!    yet, and the gap is named here rather than left to be
-//!    discovered.
+//!    write emits is durable, written in the same transaction as the
+//!    write it describes -- and so is the truncation that keeps the
+//!    history finite: the bound is applied inside the write that
+//!    triggered it, and the low-water mark it moves is a row in the
+//!    database rather than a counter in memory.
+//!    [`ReadHandle::history`] is where that history is read, and a
+//!    position that has fallen outside the window is told so rather
+//!    than handed an empty answer, which is the whole reason the mark
+//!    is kept. A ring buffer in the layer above would lose its history
+//!    at every restart and so turn every restart into a resync for
+//!    every consumer, which is the resume path wasted entirely.
 
 use async_trait::async_trait;
 
 use crate::cursor::Cursor;
 use crate::error::Result;
+use crate::history::{Digest, History, Snapshot};
 use crate::identity::Epoch;
 use crate::model::{AddressRange, Attachment, Binding, Explanation, Lease, Network};
 use crate::selector::{ClientIdentity, Selector};
@@ -462,7 +469,8 @@ pub trait BindingStore: Send + Sync {
 /// is not something to keep open between requests.
 ///
 /// Store-global methods, enumerated so that a reader can tell them
-/// from an oversight: `cursor`, `networks`, `explain`.
+/// from an oversight: `cursor`, `networks`, `explain`,
+/// `history_everywhere`.
 ///
 /// - `cursor` is the position this view reads at, which spans every
 ///   network because the order does.
@@ -477,6 +485,15 @@ pub trait BindingStore: Send + Sync {
 ///   network an interface resolved to is half of what makes it a
 ///   diagnostic, because an interface attached to the wrong network
 ///   looks exactly like a binding that does not match.
+/// - `history_everywhere` reads the history of every network at once,
+///   which is a scope a watch may legitimately ask for. It is the one
+///   method here with a network-named twin: [`ReadHandle::history`]
+///   is the scoped read and is what a watch on one network uses.
+///   Composing the wide answer out of the narrow one would mean
+///   merging several networks' orders in the layer least able to
+///   check that it merged them correctly, so the store does it. Every
+///   event still names its network, and the interleaving still says
+///   nothing about causality between them.
 #[async_trait]
 pub trait ReadHandle: Send {
     /// The position in the store's order that every answer from this
@@ -666,4 +683,96 @@ pub trait ReadHandle: Send {
     /// is a step of the address selection order, so hiding it would
     /// hide the input to that step.
     async fn leases_held_by(&self, network: &str, identity: &ClientIdentity) -> Result<Vec<Lease>>;
+
+    /// Everything `network` holds, as one event per resource, read at
+    /// this handle's position.
+    ///
+    /// Serves demands 2, 4 and 5, and it is the first half of the
+    /// contract a watching consumer is held to. The snapshot is read
+    /// at a single position -- it is this view, so it is a consistent
+    /// view and not a walk that races mutations -- and it carries that
+    /// position with it. A stream that then resumes at exactly that
+    /// position has no gap to lose an event in and no overlap to
+    /// deduplicate, because the snapshot is everything up to and
+    /// including it and a resume asks for what came after.
+    ///
+    /// Every event names its network, including here where the caller
+    /// named one. A handler that learned to infer it is wrong the day
+    /// somebody widens the question.
+    ///
+    /// A snapshot is of one network because everything in it is; a
+    /// consumer watching several takes one per network from the same
+    /// handle, which is the same position for all of them and so the
+    /// same guarantee. A network this view does not hold is refused
+    /// rather than answered with an empty snapshot: the act a consumer
+    /// performs on a complete snapshot is to delete whatever the store
+    /// did not mention, so "there is no such network" and "this
+    /// network has nothing in it" must not share an answer.
+    async fn snapshot(&self, network: &str) -> Result<Snapshot>;
+
+    /// What happened in `network` after `after`, or why it cannot be
+    /// told.
+    ///
+    /// Serves demands 1, 4 and 5, and it is the second half of the
+    /// watch contract. A position inside the retained history is
+    /// answered with every event after it, in order, **including the
+    /// intermediate states**: a lease created and then released while
+    /// a consumer was away produces both events and not neither,
+    /// because a consumer that was holding the earlier state would
+    /// otherwise never see it end.
+    ///
+    /// A position that cannot be resumed from is answered with which
+    /// of the three reasons applies, as a value rather than as an
+    /// error with a sentence in it -- the layer above turns each into
+    /// its own `resync` reason, and a consumer that had to parse a
+    /// message to tell them apart would stop being able to the day the
+    /// message was reworded. [`History`] is where each is described.
+    ///
+    /// The events run up to this handle's own position, which the
+    /// answer carries, so reading a snapshot and then resuming from
+    /// its position joins exactly: no event is delivered twice and
+    /// none is skipped.
+    ///
+    /// The order events come back in is the order the store applied
+    /// them, and within one network that order is meaningful. Across
+    /// networks it is **not causality**: two networks' events are
+    /// interleaved by nothing more than when they arrived, and a
+    /// consumer that reads "this happened because of that" out of two
+    /// adjacent positions in different networks has invented a
+    /// relationship the store never claimed. This layer can only say
+    /// so, which is why it says so here.
+    async fn history(&self, network: &str, after: &Cursor) -> Result<History>;
+
+    /// What happened anywhere in the store after `after`, or why it
+    /// cannot be told.
+    ///
+    /// Store-global, for the reason in this trait's doc comment: the
+    /// scope of a watch may be every network, and merging the
+    /// per-network reads to serve it belongs here rather than above.
+    /// Everything [`ReadHandle::history`] says applies, and the
+    /// warning about causality applies most of all -- this is the read
+    /// whose answer interleaves networks, so it is the one from which
+    /// a consumer could most easily invent a relationship between
+    /// them.
+    async fn history_everywhere(&self, after: &Cursor) -> Result<History>;
+
+    /// One value for `network`'s configuration, at this position.
+    ///
+    /// Serves demand 4. A consumer holding a mirror compares this
+    /// instead of diffing everything, and a mismatch means "resync"
+    /// rather than "investigate" -- which is the direct replacement
+    /// for re-deriving what the daemon should have done and comparing
+    /// that with what it did.
+    ///
+    /// It covers what an operator configured and not the leases in the
+    /// network, and it is opaque. [`Digest`] says why for both, and
+    /// the property that matters is that a change in another network
+    /// cannot move it: a value derived from the store's position would
+    /// satisfy every other requirement here and fail that one.
+    ///
+    /// A network this view does not hold is refused rather than given
+    /// a digest of nothing, for the reason
+    /// [`ReadHandle::snapshot`] is: a consumer whose network has been
+    /// deleted has not been told that its mirror is still correct.
+    async fn digest(&self, network: &str) -> Result<Digest>;
 }

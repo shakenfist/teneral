@@ -73,6 +73,7 @@ use crate::cursor::Cursor;
 use crate::db::{self, Database};
 use crate::error::{Error, Result};
 use crate::guard::CrossNetworkGuard;
+use crate::history::{self, Digest, History, Retention, Snapshot};
 use crate::identity::Epoch;
 use crate::lease;
 use crate::model::{AddressRange, Attachment, Binding, Explanation, Lease, Network};
@@ -198,16 +199,36 @@ pub struct SqliteStore {
     /// hands out so that the count is the store's rather than one
     /// view's.
     guard: Arc<CrossNetworkGuard>,
+    /// How much of the history this store keeps. Copied into every
+    /// write rather than read from here by the writer thread, because
+    /// the truncation runs inside the write's own transaction.
+    retention: Retention,
 }
 
 impl SqliteStore {
     /// Open the store at `path`, creating and migrating the database
-    /// if it is not there, using the host's clock.
+    /// if it is not there, using the host's clock and the default
+    /// history window.
     pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::with_clock(path, Arc::new(SystemClock)).await
     }
 
-    /// Open the store at `path`, taking the time from `clock`.
+    /// Open the store at `path`, taking the time from `clock` and
+    /// keeping the default amount of history.
+    pub async fn with_clock(path: impl AsRef<Path>, clock: Arc<dyn Clock>) -> Result<Self> {
+        Self::with_clock_and_retention(path, clock, Retention::default()).await
+    }
+
+    /// Open the store at `path`, taking the time from `clock` and
+    /// keeping as much history as `retention` says.
+    ///
+    /// The window is a property of the deployment rather than of the
+    /// file -- the event rate between the two kinds of consumer this
+    /// store serves differs by orders of magnitude -- so it is chosen
+    /// here and not written into the database. What the database holds
+    /// is the consequence: how far the history has been truncated, so
+    /// that a restart does not forget which positions it can no longer
+    /// serve.
     ///
     /// Every open goes through here, including the one above. The
     /// whole of the open -- the file, the pragmas, the migrations and
@@ -215,7 +236,11 @@ impl SqliteStore {
     /// the caller's, so that the one blocking thing this crate does
     /// never happens anywhere but on a thread it owns. The caller
     /// awaits the answer.
-    pub async fn with_clock(path: impl AsRef<Path>, clock: Arc<dyn Clock>) -> Result<Self> {
+    pub async fn with_clock_and_retention(
+        path: impl AsRef<Path>,
+        clock: Arc<dyn Clock>,
+        retention: Retention,
+    ) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let census = Arc::new(ThreadCensus::default());
 
@@ -270,6 +295,7 @@ impl SqliteStore {
                 clock,
                 census,
                 guard: Arc::new(CrossNetworkGuard::default()),
+                retention,
             }),
             Ok(Err(refusal)) => {
                 let _ = writer.join();
@@ -363,11 +389,13 @@ impl SqliteStore {
         clock: &'a Arc<dyn Clock>,
         epoch: &'a Epoch,
         guard: &'a Arc<CrossNetworkGuard>,
+        retention: &'a Retention,
     ) -> Writing<'a> {
         Writing {
             clock: clock.as_ref(),
             epoch,
             guard: guard.as_ref(),
+            retention,
         }
     }
 }
@@ -455,11 +483,12 @@ impl BindingStore for SqliteStore {
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
+        let retention = self.retention;
 
         self.write("create a network", move |database| {
             ops::create_network(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard),
+                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
                 &network,
             )
         })
@@ -473,11 +502,12 @@ impl BindingStore for SqliteStore {
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
+        let retention = self.retention;
 
         self.write("remove a network", move |database| {
             ops::delete_network(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard),
+                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
                 &network,
                 &expected,
             )
@@ -498,11 +528,12 @@ impl BindingStore for SqliteStore {
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
+        let retention = self.retention;
 
         self.write("claim an interface", move |database| {
             ops::attach_interface(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard),
+                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
                 &network,
                 &namespace,
                 &ifname,
@@ -526,11 +557,12 @@ impl BindingStore for SqliteStore {
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
+        let retention = self.retention;
 
         self.write("release an interface", move |database| {
             ops::detach_interface(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard),
+                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
                 &network,
                 &namespace,
                 &ifname,
@@ -553,11 +585,12 @@ impl BindingStore for SqliteStore {
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
+        let retention = self.retention;
 
         self.write("create an address range", move |database| {
             ops::create_address_range(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard),
+                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
                 &network,
                 &name,
                 first,
@@ -582,11 +615,12 @@ impl BindingStore for SqliteStore {
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
+        let retention = self.retention;
 
         self.write("resize an address range", move |database| {
             ops::update_address_range(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard),
+                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
                 &network,
                 &name,
                 &expected,
@@ -610,11 +644,12 @@ impl BindingStore for SqliteStore {
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
+        let retention = self.retention;
 
         self.write("remove an address range", move |database| {
             ops::delete_address_range(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard),
+                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
                 &network,
                 &name,
                 &expected,
@@ -637,11 +672,12 @@ impl BindingStore for SqliteStore {
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
+        let retention = self.retention;
 
         self.write("configure a binding", move |database| {
             ops::create_binding(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard),
+                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
                 &network,
                 &selector,
                 address,
@@ -667,11 +703,12 @@ impl BindingStore for SqliteStore {
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
+        let retention = self.retention;
 
         self.write("change a binding", move |database| {
             ops::update_binding(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard),
+                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
                 &network,
                 &selector,
                 &expected,
@@ -695,11 +732,12 @@ impl BindingStore for SqliteStore {
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
+        let retention = self.retention;
 
         self.write("remove a binding", move |database| {
             ops::delete_binding(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard),
+                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
                 &network,
                 &selector,
                 &expected,
@@ -724,11 +762,12 @@ impl BindingStore for SqliteStore {
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
+        let retention = self.retention;
 
         self.write("configure a binding over a lease", move |database| {
             ops::create_binding_revoking_lease(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard),
+                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
                 &network,
                 &selector,
                 address,
@@ -752,11 +791,12 @@ impl BindingStore for SqliteStore {
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
+        let retention = self.retention;
 
         self.write("take a lease on an address", move |database| {
             lease::acquire_lease(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard),
+                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
                 &network,
                 &identity,
                 address,
@@ -779,11 +819,12 @@ impl BindingStore for SqliteStore {
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
+        let retention = self.retention;
 
         self.write("allocate an address", move |database| {
             lease::allocate_lease(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard),
+                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
                 &network,
                 &identity,
                 requested,
@@ -806,11 +847,12 @@ impl BindingStore for SqliteStore {
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
+        let retention = self.retention;
 
         self.write("renew a lease", move |database| {
             lease::renew_lease(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard),
+                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
                 &network,
                 address,
                 &identity,
@@ -832,11 +874,12 @@ impl BindingStore for SqliteStore {
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
+        let retention = self.retention;
 
         self.write("revoke a lease", move |database| {
             lease::revoke_lease(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard),
+                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
                 &network,
                 address,
                 &expected,
@@ -851,11 +894,12 @@ impl BindingStore for SqliteStore {
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
+        let retention = self.retention;
 
         self.write("sweep expired leases", move |database| {
             lease::sweep_expired_leases(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard),
+                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
                 &network,
             )
         })
@@ -1228,6 +1272,53 @@ impl ReadHandle for SnapshotView {
                 as_of,
                 &identity,
             )
+        })
+        .await
+    }
+
+    async fn snapshot(&self, network: &str) -> Result<Snapshot> {
+        let epoch = self.epoch();
+        let guard = self.guard();
+        let network = network.to_owned();
+        // The view's own position, which is the whole point of a
+        // snapshot: it is where every event in it was read, and so
+        // where a stream resumes without a gap or an overlap.
+        let at = self.cursor.clone();
+
+        self.query("read a network's whole state", move |connection| {
+            history::snapshot(connection, &reading(&epoch, &network, &guard), &at)
+        })
+        .await
+    }
+
+    async fn history(&self, network: &str, after: &Cursor) -> Result<History> {
+        let epoch = self.epoch();
+        let guard = self.guard();
+        let network = network.to_owned();
+        let at = self.cursor.clone();
+        let after = after.clone();
+
+        self.query("read a network's history", move |connection| {
+            history::history(connection, &reading(&epoch, &network, &guard), &at, &after)
+        })
+        .await
+    }
+
+    async fn history_everywhere(&self, after: &Cursor) -> Result<History> {
+        let at = self.cursor.clone();
+        let after = after.clone();
+
+        self.query("read the store's history", move |connection| {
+            history::history_everywhere(connection, &at, &after)
+        })
+        .await
+    }
+
+    async fn digest(&self, network: &str) -> Result<Digest> {
+        let network = network.to_owned();
+
+        self.query("read a network's digest", move |connection| {
+            history::digest(connection, &network)
         })
         .await
     }

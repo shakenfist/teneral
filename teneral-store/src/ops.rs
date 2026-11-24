@@ -1,19 +1,23 @@
 //! Every statement the store runs, and the events each write emits.
 //!
-//! All of the SQL in this crate is here, in `lease.rs`, or in a
-//! migration, which is deliberate: it is the part a reviewer reads
-//! most closely, and the rule that every operation is scoped to a
-//! network is only checkable if the statements can be read together.
-//! Nothing in this module is public, and no type from `rusqlite`
-//! appears in any signature that leaves the crate.
+//! All of the SQL in this crate is here, in `lease.rs`, in
+//! `history.rs`, or in a migration, which is deliberate: it is the
+//! part a reviewer reads most closely, and the rule that every
+//! operation is scoped to a network is only checkable if the
+//! statements can be read together. Nothing in this module is public,
+//! and no type from `rusqlite` appears in any signature that leaves
+//! the crate.
 //!
 //! The lease statements are in a module of their own because a lease
 //! is a state machine rather than a set of statements over a row, and
 //! because the order it chooses an address in is the one rule in this
 //! store that is cited to a published specification. Keeping that
 //! order beside its citation is worth more than keeping every
-//! statement in one file; both modules state the network-scoping rule
-//! and both pass every row they return through the same check.
+//! statement in one file. The history's are in one of their own
+//! because they are the reads a consumer resumes from, and what holds
+//! them together is a contract about gaps and overlaps rather than a
+//! table. All three modules state the network-scoping rule and all
+//! three pass every row they return through the same check.
 //!
 //! The functions come in two shapes. A read takes a connection and
 //! answers from whatever view that connection has -- which, for a
@@ -32,6 +36,11 @@
 //! it. The event is the write's result rather than its intention: a
 //! constraint that refuses the row rolls the event back with it, so
 //! there is no event for a write that did not happen.
+//!
+//! Appending is also where the history's bound is applied, in the same
+//! transaction again, which is why every append below goes through
+//! [`crate::history::appended`] rather than reading the engine's own
+//! last row id. See there for why the two are one operation.
 
 use std::net::Ipv4Addr;
 
@@ -41,41 +50,22 @@ use crate::clock::Clock;
 use crate::cursor::Cursor;
 use crate::error::{Error, Result};
 use crate::guard::CrossNetworkGuard;
+use crate::history::{self, EventKind, Retention};
 use crate::identity::Epoch;
 use crate::lease;
 use crate::model::{AddressRange, Attachment, Binding, Explanation, Network};
 use crate::selector::{ClientIdentity, Selector};
 
 /// What the store calls a network when it has to say so to a person.
-const NETWORK: &str = "network";
+pub(crate) const NETWORK: &str = "network";
 /// What it calls an attachment.
-const ATTACHMENT: &str = "attachment";
+pub(crate) const ATTACHMENT: &str = "attachment";
 /// What it calls an address range.
-const RANGE: &str = "address range";
+pub(crate) const RANGE: &str = "address range";
 /// What it calls a binding.
 pub(crate) const BINDING: &str = "binding";
 /// What it calls a lease.
 pub(crate) const LEASE: &str = "lease";
-
-/// The kinds an event carries, which are machine-readable and so are
-/// not the words above.
-///
-/// A kind is a string rather than a column per resource, which is
-/// what makes a resource this schema does not have yet a migration
-/// and a variant rather than a reshaping of the one table every
-/// consumer reads.
-pub(crate) mod kind {
-    /// A network was created or removed.
-    pub(super) const NETWORK: &str = "network";
-    /// An interface was claimed or released.
-    pub(super) const ATTACHMENT: &str = "attachment";
-    /// A range was created, resized or removed.
-    pub(super) const RANGE: &str = "address-range";
-    /// A binding was configured, changed or removed.
-    pub(super) const BINDING: &str = "binding";
-    /// A lease was taken, renewed, revoked or swept.
-    pub(crate) const LEASE: &str = "lease";
-}
 
 /// The identity an event reports a binding by: its selector, which is
 /// the whole of what makes it unique inside its network.
@@ -167,7 +157,7 @@ fn validate_name_part(what: &'static str, value: &str) -> Result<()> {
 }
 
 /// An attachment's identity, as an event reports it.
-fn attachment_id(namespace: &str, ifname: &str) -> String {
+pub(crate) fn attachment_id(namespace: &str, ifname: &str) -> String {
     format!("{namespace}{ATTACHMENT_SEPARATOR}{ifname}")
 }
 
@@ -724,21 +714,27 @@ pub(crate) fn explain(
 
 /// Append the event for a network that now exists, and return the
 /// sequence it was given.
-fn event_network_created(transaction: &Transaction<'_>, name: &str, now: i64) -> Result<i64> {
+fn event_network_created(
+    transaction: &Transaction<'_>,
+    bound: &Retention,
+    name: &str,
+    now: i64,
+) -> Result<i64> {
     transaction
         .execute(
             "INSERT INTO event_log (network, kind, resource_id, state, recorded_at)
              VALUES (?1, ?2, ?1, json_object('name', ?1), ?3)",
-            params![name, kind::NETWORK, now],
+            params![name, EventKind::Network.as_str(), now],
         )
         .map_err(storage("recording that a network was created"))?;
 
-    Ok(transaction.last_insert_rowid())
+    history::appended(transaction, bound, now)
 }
 
 /// Append the event for an attachment that now exists.
 fn event_attachment_written(
     transaction: &Transaction<'_>,
+    bound: &Retention,
     network: &str,
     namespace: &str,
     ifname: &str,
@@ -751,7 +747,7 @@ fn event_attachment_written(
                      json_object('network', ?1, 'namespace', ?4, 'ifname', ?5), ?6)",
             params![
                 network,
-                kind::ATTACHMENT,
+                EventKind::Attachment.as_str(),
                 attachment_id(namespace, ifname),
                 namespace,
                 ifname,
@@ -760,7 +756,7 @@ fn event_attachment_written(
         )
         .map_err(storage("recording that an interface was claimed"))?;
 
-    Ok(transaction.last_insert_rowid())
+    history::appended(transaction, bound, now)
 }
 
 /// Append the event for a range that now exists with these ends.
@@ -771,6 +767,7 @@ fn event_attachment_written(
 /// whatever is doing the reading.
 fn event_range_written(
     transaction: &Transaction<'_>,
+    bound: &Retention,
     network: &str,
     name: &str,
     first: Ipv4Addr,
@@ -784,7 +781,7 @@ fn event_range_written(
                      json_object('network', ?1, 'name', ?3, 'first', ?4, 'last', ?5), ?6)",
             params![
                 network,
-                kind::RANGE,
+                EventKind::AddressRange.as_str(),
                 name,
                 u32::from(first),
                 u32::from(last),
@@ -793,7 +790,7 @@ fn event_range_written(
         )
         .map_err(storage("recording an address range"))?;
 
-    Ok(transaction.last_insert_rowid())
+    history::appended(transaction, bound, now)
 }
 
 /// Append the event for a binding that now exists in this form.
@@ -805,6 +802,7 @@ fn event_range_written(
 /// identity back apart.
 fn event_binding_written(
     transaction: &Transaction<'_>,
+    bound: &Retention,
     network: &str,
     selector: &Selector,
     address: Ipv4Addr,
@@ -820,7 +818,7 @@ fn event_binding_written(
                                  'hostname', ?7), ?8)",
             params![
                 network,
-                kind::BINDING,
+                EventKind::Binding.as_str(),
                 binding_id(selector),
                 selector.kind().as_str(),
                 selector.value(),
@@ -831,7 +829,7 @@ fn event_binding_written(
         )
         .map_err(storage("recording a binding"))?;
 
-    Ok(transaction.last_insert_rowid())
+    history::appended(transaction, bound, now)
 }
 
 /// Append the event for a resource that no longer exists.
@@ -843,8 +841,9 @@ fn event_binding_written(
 /// twice does no harm.
 pub(crate) fn event_deleted(
     transaction: &Transaction<'_>,
+    bound: &Retention,
     network: &str,
-    kind: &str,
+    kind: EventKind,
     resource_id: &str,
     now: i64,
 ) -> Result<i64> {
@@ -852,11 +851,11 @@ pub(crate) fn event_deleted(
         .execute(
             "INSERT INTO event_log (network, kind, resource_id, state, recorded_at)
              VALUES (?1, ?2, ?3, NULL, ?4)",
-            params![network, kind, resource_id, now],
+            params![network, kind.as_str(), resource_id, now],
         )
         .map_err(storage("recording that a resource was removed"))?;
 
-    Ok(transaction.last_insert_rowid())
+    history::appended(transaction, bound, now)
 }
 
 // ---------------------------------------------------------------------
@@ -879,6 +878,11 @@ pub(crate) struct Writing<'a> {
     /// compare-and-set reads the resource it is about to change, and
     /// that read is scoped like any other.
     pub(crate) guard: &'a CrossNetworkGuard,
+    /// How much history the event this write appends is allowed to
+    /// leave behind it. Carried with the write rather than consulted
+    /// elsewhere because the truncation happens in the write's own
+    /// transaction.
+    pub(crate) retention: &'a Retention,
 }
 
 impl<'a> Writing<'a> {
@@ -930,7 +934,7 @@ pub(crate) fn create_network(
         .transaction()
         .map_err(storage("starting a transaction to create a network"))?;
 
-    let sequence = event_network_created(&transaction, name, now)?;
+    let sequence = event_network_created(&transaction, writing.retention, name, now)?;
 
     transaction
         .execute(
@@ -996,7 +1000,14 @@ pub(crate) fn delete_network(
         });
     }
 
-    let sequence = event_deleted(&transaction, name, kind::NETWORK, name, now)?;
+    let sequence = event_deleted(
+        &transaction,
+        writing.retention,
+        name,
+        EventKind::Network,
+        name,
+        now,
+    )?;
 
     transaction
         .execute("DELETE FROM network WHERE name = ?1", params![name])
@@ -1055,7 +1066,14 @@ pub(crate) fn attach_interface(
 
     require_network(&transaction, network)?;
 
-    let sequence = event_attachment_written(&transaction, network, namespace, ifname, now)?;
+    let sequence = event_attachment_written(
+        &transaction,
+        writing.retention,
+        network,
+        namespace,
+        ifname,
+        now,
+    )?;
 
     let claimed = transaction.execute(
         "INSERT INTO attachment (namespace, ifname, network, cursor_seq)
@@ -1131,7 +1149,14 @@ pub(crate) fn detach_interface(
         return Err(Error::changed(ATTACHMENT, id, expected, &current.cursor));
     }
 
-    let sequence = event_deleted(&transaction, network, kind::ATTACHMENT, &id, now)?;
+    let sequence = event_deleted(
+        &transaction,
+        writing.retention,
+        network,
+        EventKind::Attachment,
+        &id,
+        now,
+    )?;
 
     transaction
         .execute(
@@ -1217,7 +1242,15 @@ pub(crate) fn create_address_range(
     require_network(&transaction, network)?;
     check_span(&transaction, network, name, first, last)?;
 
-    let sequence = event_range_written(&transaction, network, name, first, last, now)?;
+    let sequence = event_range_written(
+        &transaction,
+        writing.retention,
+        network,
+        name,
+        first,
+        last,
+        now,
+    )?;
 
     transaction
         .execute(
@@ -1275,7 +1308,15 @@ pub(crate) fn update_address_range(
 
     check_span(&transaction, network, name, first, last)?;
 
-    let sequence = event_range_written(&transaction, network, name, first, last, now)?;
+    let sequence = event_range_written(
+        &transaction,
+        writing.retention,
+        network,
+        name,
+        first,
+        last,
+        now,
+    )?;
 
     transaction
         .execute(
@@ -1319,7 +1360,14 @@ pub(crate) fn delete_address_range(
         return Err(Error::changed(RANGE, name, expected, &current.cursor));
     }
 
-    let sequence = event_deleted(&transaction, network, kind::RANGE, name, now)?;
+    let sequence = event_deleted(
+        &transaction,
+        writing.retention,
+        network,
+        EventKind::AddressRange,
+        name,
+        now,
+    )?;
 
     transaction
         .execute(
@@ -1423,7 +1471,15 @@ pub(crate) fn create_binding(
     require_network(&transaction, network)?;
     lease::require_address_unleased(&transaction, writing, network, selector, address)?;
 
-    let sequence = event_binding_written(&transaction, network, selector, address, hostname, now)?;
+    let sequence = event_binding_written(
+        &transaction,
+        writing.retention,
+        network,
+        selector,
+        address,
+        hostname,
+        now,
+    )?;
 
     insert_binding(&transaction, network, selector, address, hostname, sequence)?;
 
@@ -1484,7 +1540,15 @@ pub(crate) fn create_binding_revoking_lease(
     require_network(&transaction, network)?;
     lease::revoke_for_binding(&transaction, writing, network, address, holder)?;
 
-    let sequence = event_binding_written(&transaction, network, selector, address, hostname, now)?;
+    let sequence = event_binding_written(
+        &transaction,
+        writing.retention,
+        network,
+        selector,
+        address,
+        hostname,
+        now,
+    )?;
 
     insert_binding(&transaction, network, selector, address, hostname, sequence)?;
 
@@ -1544,7 +1608,15 @@ pub(crate) fn update_binding(
     // check being on where it is going.
     lease::require_address_unleased(&transaction, writing, network, selector, address)?;
 
-    let sequence = event_binding_written(&transaction, network, selector, address, hostname, now)?;
+    let sequence = event_binding_written(
+        &transaction,
+        writing.retention,
+        network,
+        selector,
+        address,
+        hostname,
+        now,
+    )?;
 
     transaction
         .execute(
@@ -1601,8 +1673,9 @@ pub(crate) fn delete_binding(
 
     let sequence = event_deleted(
         &transaction,
+        writing.retention,
         network,
-        kind::BINDING,
+        EventKind::Binding,
         &binding_id(selector),
         now,
     )?;

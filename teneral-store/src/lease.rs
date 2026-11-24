@@ -94,9 +94,10 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::cursor::Cursor;
 use crate::error::{Error, Result};
+use crate::history::{self, EventKind, Retention};
 use crate::identity::Epoch;
 use crate::model::Lease;
-use crate::ops::{self, LEASE, Reading, Writing, kind};
+use crate::ops::{self, LEASE, Reading, Writing};
 use crate::selector::{ClientIdentity, Selector};
 
 /// Whether a lease expiring at `expires_at` is still held at `now`.
@@ -447,6 +448,7 @@ struct Appended {
 /// standing where an identity should be.
 fn event_lease_written(
     transaction: &Transaction<'_>,
+    bound: &Retention,
     network: &str,
     writable: &Writable,
     now: i64,
@@ -460,7 +462,7 @@ fn event_lease_written(
                                  'acquired_at', ?8, 'expires_at', ?9), ?10)",
             params![
                 network,
-                kind::LEASE,
+                EventKind::Lease.as_str(),
                 lease_id(writable.address),
                 u32::from(writable.address),
                 writable.holder.kind().as_str(),
@@ -473,7 +475,7 @@ fn event_lease_written(
         )
         .map_err(ops::storage("recording a lease"))?;
 
-    let sequence = transaction.last_insert_rowid();
+    let sequence = history::appended(transaction, bound, now)?;
 
     let lease_id = match writable.lease_id {
         Some(existing) => existing,
@@ -639,7 +641,7 @@ pub(crate) fn acquire_lease(
     let replacing = current.is_some();
     let writable = plan_acquisition(identity, &holder, current, address, now, expires_at)?;
 
-    let appended = event_lease_written(&transaction, network, &writable, now)?;
+    let appended = event_lease_written(&transaction, writing.retention, network, &writable, now)?;
     write_row(&transaction, network, &writable, &appended, replacing)?;
 
     transaction
@@ -759,7 +761,7 @@ pub(crate) fn renew_lease(
         expires_at,
     };
 
-    let appended = event_lease_written(&transaction, network, &writable, now)?;
+    let appended = event_lease_written(&transaction, writing.retention, network, &writable, now)?;
     write_row(&transaction, network, &writable, &appended, true)?;
 
     transaction
@@ -812,7 +814,7 @@ pub(crate) fn revoke_lease(
         ));
     }
 
-    let sequence = remove(&transaction, network, address, now)?;
+    let sequence = remove(&transaction, writing.retention, network, address, now)?;
 
     transaction
         .commit()
@@ -828,11 +830,19 @@ pub(crate) fn revoke_lease(
 /// transaction.
 fn remove(
     transaction: &Transaction<'_>,
+    bound: &Retention,
     network: &str,
     address: Ipv4Addr,
     now: i64,
 ) -> Result<i64> {
-    let sequence = ops::event_deleted(transaction, network, kind::LEASE, &lease_id(address), now)?;
+    let sequence = ops::event_deleted(
+        transaction,
+        bound,
+        network,
+        EventKind::Lease,
+        &lease_id(address),
+        now,
+    )?;
 
     transaction
         .execute(
@@ -904,7 +914,13 @@ pub(crate) fn sweep_expired_leases(
 
     let mut last = None;
     for lease in &expired {
-        last = Some(remove(&transaction, network, lease.address, now)?);
+        last = Some(remove(
+            &transaction,
+            writing.retention,
+            network,
+            lease.address,
+            now,
+        )?);
     }
 
     transaction
@@ -1020,7 +1036,7 @@ pub(crate) fn allocate_lease(
         }
     };
 
-    let appended = event_lease_written(&transaction, network, &writable, now)?;
+    let appended = event_lease_written(&transaction, writing.retention, network, &writable, now)?;
     write_row(&transaction, network, &writable, &appended, replacing)?;
 
     transaction
@@ -1373,7 +1389,7 @@ pub(crate) fn revoke_for_binding(
         ));
     }
 
-    remove(transaction, network, address, now)?;
+    remove(transaction, writing.retention, network, address, now)?;
 
     Ok(())
 }
