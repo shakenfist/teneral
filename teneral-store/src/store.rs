@@ -722,11 +722,14 @@ pub trait ReadHandle: Send {
     /// otherwise never see it end.
     ///
     /// A position that cannot be resumed from is answered with which
-    /// of the three reasons applies, as a value rather than as an
-    /// error with a sentence in it -- the layer above turns each into
-    /// its own `resync` reason, and a consumer that had to parse a
-    /// message to tell them apart would stop being able to the day the
-    /// message was reworded. [`History`] is where each is described.
+    /// of the three refusals applies -- the events after it have been
+    /// evicted, its epoch belongs to another store, or it is a
+    /// position this store has never issued. Each is a value rather
+    /// than an error with a sentence in it, because the layer above
+    /// turns each into its own `resync` reason, and a consumer that
+    /// had to parse a message to tell them apart would stop being
+    /// able to the day the message was reworded. [`History`] is where
+    /// each is described.
     ///
     /// The events run up to this handle's own position, which the
     /// answer carries, so reading a snapshot and then resuming from

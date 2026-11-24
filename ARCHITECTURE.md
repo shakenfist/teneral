@@ -1,8 +1,9 @@
 # Architecture
 
-**This describes the intended shape of the system. None of it is
-built.** The plan that builds it, and the research spikes that
-gate it, are in
+**This describes the intended shape of the system. The binding
+store at the middle of it is built; everything above and below it
+is not yet.** The plan that builds the rest, and the research
+spikes that gate it, are in
 [docs/plans/PLAN-teneral-implementation.md](docs/plans/PLAN-teneral-implementation.md).
 
 ## The idea
@@ -38,6 +39,13 @@ addresses, hostnames, lease state, protocol options, and arbitrary
 key-to-content blobs. Everything else in the system is a
 projection of this, which is why it is keyed by network from the
 first commit rather than acquiring that key later.
+
+It exists, as the `teneral-store` crate: SQLite behind an
+asynchronous trait, holding networks, attachments, address ranges,
+bindings and leases, with the event log that gives the control
+plane's cursor a total order. Zones and records, content blobs and
+tokens are deferred to the layers that will consume them. See
+[docs/binding-store.md](docs/binding-store.md).
 
 **The front-ends** each turn a wire request into a lookup and a
 lookup result back into a wire response. They share socket
@@ -117,6 +125,9 @@ language, not the reason for the project.
 
 ## Related documents
 
+- [docs/binding-store.md](docs/binding-store.md) -- layer zero as
+  built: the schema and its keys, the lease lifecycle and its
+  durability point, the history and its bound, and the diagnostics.
 - [docs/provenance.md](docs/provenance.md) -- where each behaviour
   came from, and the licence reason that matters.
 - [docs/differential-rig.md](docs/differential-rig.md) -- how a

@@ -89,8 +89,10 @@ The daemon has not been built. Phase 2 built everything around it
 -- the Cargo workspace and its panic lints, the Docker build image
 and the `Makefile` that is the only way `cargo` ever runs, the
 licence gate, two-tier CI and the differential rig skeleton -- and
-the binary itself still does nothing but print its version. What
-follows are the
+phase 3 built the layer under it, the binding store, as the
+`teneral-store` crate. The binary itself still does nothing but
+print its version: nothing in the tree speaks DHCP, DNS or an API.
+What follows are the
 measurements taken on 2026-11-21 that the plan rests on; a later
 phase that finds one of them wrong should say so here rather than
 quietly working around it.
@@ -334,7 +336,7 @@ by the time it was executed.
 |-------|------|--------|--------|
 | 1. Research spikes | [PLAN-teneral-implementation-phase-01-research-spikes.md](PLAN-teneral-implementation-phase-01-research-spikes.md) | Complete | `homelab-deployments-lfs 658caab (!12)`, teneral `fa77a8e..1337e79` |
 | 2. Repository foundations | [PLAN-teneral-implementation-phase-02-foundations.md](PLAN-teneral-implementation-phase-02-foundations.md) | Complete | teneral `482edf7..8fa1b4b` |
-| 3. The binding store | [PLAN-teneral-implementation-phase-03-binding-store.md](PLAN-teneral-implementation-phase-03-binding-store.md) | In progress | |
+| 3. The binding store | [PLAN-teneral-implementation-phase-03-binding-store.md](PLAN-teneral-implementation-phase-03-binding-store.md) | Complete | teneral `a6189fc..` |
 | 4. The control API | PLAN-teneral-implementation-phase-04-control-api.md | Proposed | |
 | 5. DHCPv4 front-end | PLAN-teneral-implementation-phase-05-dhcpv4.md | Proposed | |
 | 6. DNS front-end | PLAN-teneral-implementation-phase-06-dns.md | Proposed | |
@@ -344,19 +346,23 @@ by the time it was executed.
 | 10. Generic content front-ends | PLAN-teneral-implementation-phase-10-content.md | Proposed | |
 | 11. Push audit | - | Proposed | |
 
-Phases 1 to 3 are scheduled. The first two said that they were
-the only ones that would be, because the operator had other
+Phases 1 to 3 are complete. The first two said that they were the
+only ones that would be scheduled, because the operator had other
 projects in flight and had said this one should not proceed past
 the prototype until those were further along; he resumed it on
 2026-11-23. Phases 4 to 11 remain `Proposed` rather than
 `Not started`, which is the honest status and should not be
 promoted to make the table look busier.
 
-Both phases landed on `develop` without a pull request, because
-there is still no remote, so both `Merged` cells carry a
-`first..last` range rather than a pull request number. Neither had
-a review pass or a CI run; the management session's read of the
-diff was the only check.
+Phases 2 and 3 both landed on `develop` without a pull request,
+because there is still no remote, so their `Merged` cells carry a
+`first..last` range rather than a pull request number. Phase 3's
+range is left open-ended until the commit that closes it exists:
+the documentation step cannot name the commit it is itself about to
+become, so the hash after the dots is filled in by the next commit
+on the branch. Neither phase had a CI run; each step was reviewed
+by the management session reading its diff, which was the only
+check.
 
 ### Phase 1: Research spikes
 
@@ -431,6 +437,21 @@ redeploys it.
   numbered demands that this sketch does not mention and that are
   most of the phase's cost. The phase file is written against
   that document rather than against this paragraph.
+
+  Now complete, and its own file is the record. In summary: the
+  `teneral-store` crate, SQLite behind two asynchronous traits over
+  threads the store owns, holding networks, attachments, address
+  ranges, bindings and leases with the event log that gives the
+  cursor its total order; the lookup and its precedence; the lease
+  lifecycle with the commit before the acknowledgement; the
+  snapshot, the history and its bound; and the three diagnostics.
+  `docs/binding-store.md` describes it without a plan in hand. Two
+  things the sketch promised that it did not ship, each
+  deliberately: the arbitrary content blobs, deferred to phase 10
+  with the front-end that serves them, and zones and records,
+  deferred to phase 6 -- a resource whose requirements are known
+  only to its consumer is a migration waiting to happen. Tokens
+  wait for phase 4 for the same reason.
 - **Phase 4: The control API.** The transport chosen in 1e, CRUD
   over the store, watch/subscribe, authentication.
 - **Phase 5: DHCPv4 front-end.** The socket datapath without
@@ -1080,6 +1101,98 @@ chosen to defer to here, so that we do not forget them.
   workflow is a decision made by the wrong person. Phase 7 is where
   packaging is actually decided, and it should revisit the release
   artefact at the same time.
+* **The epoch does not cover a restore of the same database file,
+  and nothing can mint a new one.** A cursor's epoch is what tells
+  a returning consumer "carry on from here" apart from "that number
+  belongs to another store's history", and it is generated once, by
+  the engine, when the database is created. So it lives in the
+  file -- and a file-level restore from a backup brings it back
+  unchanged, together with a sequence counter wound back to
+  whenever the backup was taken. A consumer whose position is
+  *ahead* of the restore point is caught, because it presents a
+  position the store has never issued, and that is a distinct
+  answer rather than an eviction for exactly this reason. A
+  consumer whose position is at or below the restore point is
+  caught by nothing at all: its cursor is one the restored store
+  has issued, so it resumes, and it is then served different events
+  under numbers it has already seen. That is the project's
+  signature failure mode -- a silently wrong answer -- with a
+  known and ordinary trigger, which makes this the most serious
+  item in this section. The remedy is not a mechanism but an
+  operator action: after restoring a store from a backup, mint a
+  new epoch before any consumer reconnects, which makes the
+  restored store honestly a different store and turns every stale
+  cursor into an epoch mismatch. Nothing offers that operation
+  today. Whoever builds the control plane has to expose it, decide
+  whether the daemon should refuse to serve a restored file until
+  it has been run, and say in the operator documentation that
+  restoring a backup without it is how a consumer is quietly lied
+  to. The hole and its remedy are recorded in
+  `docs/binding-store.md` and in the migration that generates the
+  value, so that a reader meets them where they would otherwise
+  trust the epoch.
+* **The sweep interval is also an address-stickiness knob, and the
+  two cannot be set independently.** RFC 2131 section 4.3.1's
+  second selection step gives a client back the address it held
+  under a lapsed lease, and the store knows which address that was
+  only because the lapsed lease row is still there. The sweep
+  deletes that row. So however often a later phase sweeps is
+  exactly how long a client keeps getting its old address back
+  after its lease expires, and a sweep interval chosen purely as an
+  event-emission cadence will have silently chosen the stickiness
+  of every address in the deployment as well. Phase 5 is where the
+  interval gets chosen, and it should choose it knowing it is
+  choosing both things -- and record which of the two it optimised
+  for. It is documented in `docs/api-design.md` because that is
+  where phase 5 will be looking.
+* **A client that stops presenting its client identifier is not
+  recognised as its lease's holder.** A lease records one holder,
+  and the one recorded is the highest-precedence attribute the
+  client presented when it acquired the address. A client that
+  supplied a client identifier and later stops supplying one
+  therefore looks like a different client: nothing matches the
+  attribute its lease was recorded against, so it is not the
+  holder, and it will be given a second address while the first
+  stays held until it lapses. This is honest rather than broken --
+  the store cannot know that two identities are one machine, and
+  it is the protocol's own warning about keying on a hardware
+  address, in reverse -- but today it is asserted by a test and
+  explained only in that test's comment, which is not where a
+  front-end author will find it. Phase 5 should decide whether to
+  mitigate it, the obvious candidate being to consult every
+  attribute a client presents when asking what it holds rather
+  than only the recorded one, and record the decision either way:
+  declining to mitigate is a legitimate answer and is worth
+  writing down, because the next person to meet the behaviour will
+  otherwise read it as an oversight.
+* **There is no `update_binding_revoking_lease`.** The store offers
+  "configure this binding, taking the lease on the address away
+  from its holder in the same operation" and has no matching form
+  for changing a binding that already exists. The specification
+  names only the create form, so only that was built, and the gap
+  was documented rather than hidden. Whether it is needed is a
+  question for a consumer: changing an existing binding's address
+  onto an address something else is holding is the case it would
+  serve, and nothing yet does that. Fill it when a consumer needs
+  it, as one transaction like its sibling rather than as a revoke
+  followed by an update, because the two-step form has a state in
+  which the address was taken from a client and the binding that
+  justified taking it was never written.
+* **Nothing bounds how many read handles are live at once, and the
+  bound belongs to the control plane.** Each live view holds a read
+  transaction on a thread of its own for as long as it is held,
+  which is what makes a consistent view across a caller's awaits
+  possible at all, and it means the number alive at once wants
+  bounding. The store does the half that is genuinely its own:
+  `live_views()` reports the count, so a bound is enforceable from
+  above. The other half is not the store's to write. Refusing to
+  open a view needs a policy -- how many is too many -- and an
+  error a consumer expects and knows how to retry, and both of
+  those are the control plane's vocabulary rather than the store's;
+  phase 4 is also the layer that knows how many concurrent
+  consumers there are supposed to be. So phase 4 sets the bound,
+  names the refusal, and says what a consumer does when it is
+  refused.
 
 ### Bugs fixed during this work
 

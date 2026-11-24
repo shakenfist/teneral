@@ -13,9 +13,10 @@ rather than three services that each hold their own copy of who is
 who.
 
 **Status: early.** The repository carries its build, its lint and
-licence gates, its CI lanes and the differential rig; the daemon
-itself is still a skeleton that prints its version, and the binding
-store underneath it is being built now. See the
+licence gates, its CI lanes and the differential rig, and the
+binding store every front-end will read is built. The daemon itself
+is still a skeleton that prints its version: nothing yet speaks
+DHCP, DNS or an API. See the
 [implementation plan](https://github.com/shakenfist/teneral/blob/develop/docs/plans/PLAN-teneral-implementation.md).
 
 ## Why
@@ -52,6 +53,9 @@ as addresses, the same mechanism serves instance metadata.
 - [Implementation plan](https://github.com/shakenfist/teneral/blob/develop/docs/plans/PLAN-teneral-implementation.md)
   -- the phases, the research spikes, and what is deliberately out
   of scope.
+- [The binding store](https://github.com/shakenfist/teneral/blob/develop/docs/binding-store.md)
+  -- the layer every front-end reads: its schema, its lease
+  lifecycle, its history and its diagnostics.
 - [Provenance](https://github.com/shakenfist/teneral/blob/develop/docs/provenance.md)
   -- where each behaviour came from, and why that question matters
   in an Apache-2.0 project that reimplements GPL software.

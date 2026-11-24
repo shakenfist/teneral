@@ -5,10 +5,13 @@ client on a known interface with the content configured for that
 client. See `ARCHITECTURE.md` for the shape of the system and
 `docs/plans/` for what is being built and in what order.
 
-The daemon does not exist yet: the Cargo workspace holds one crate
-whose binary prints its version. The build, the lint suite and the
-CI lanes are all in place and do apply, except that no lane has
-ever run, because there is no remote. See `docs/development.md`.
+The daemon does not exist yet. The Cargo workspace holds two
+crates: `teneral-store`, which is the binding store and is built,
+and `teneral`, whose binary still only prints its version. The
+build, the lint suite and the CI lanes are all in place and do
+apply, except that no lane has ever run, because there is no
+remote. See `docs/development.md`, and
+`docs/binding-store.md` for the store.
 
 ## The invariants
 
@@ -47,6 +50,17 @@ and each of them has already been decided:
   networks holding the same address.** This is the project's
   central correctness property, and one network proves nothing
   about it.
+- **The store's interface is asynchronous, and the store owns the
+  threads its blocking happens on.** A caller that reaches for
+  `tokio::task::spawn_blocking` around a store call has misread the
+  interface: there is nothing left for such a helper to move, and
+  wrapping one would put the work on the runtime's shared blocking
+  pool, which is the arrangement the design exists to avoid. The
+  dependency's feature list is what enforces it rather than
+  anybody's vigilance: `spawn_blocking` does not exist without a
+  tokio runtime feature, and `teneral-store` has only `sync`. A
+  runtime feature appearing outside that crate's dev-dependencies
+  has broken the rule and should fail review.
 - **A panic is a cluster-wide outage.** One process serves every
   network, so `unwrap()`, `expect()`, slice indexing and
   unchecked arithmetic on anything derived from a packet are

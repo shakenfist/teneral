@@ -1263,3 +1263,45 @@ specification so that 3b adds no migration on its first day.
 injected clock stays the only clock. `teneral` does not yet
 depend on `teneral-store`, nothing in the binary having anything
 to call; that wiring is 3b's.
+
+**2026-11-25 (AEDT): step 3f. Documentation and fold-back.**
+`docs/binding-store.md` is written: the interface's shape and why
+it is asynchronous, the five demands against the methods that serve
+them, the schema table by table with the reasoning for each
+identity, the selector precedence and what of it is RFC-cited, the
+lease lifecycle with its state table and its durability point, the
+cursor and the epoch, the four answers a presented position can
+get, the retention bound with its defaults, the three diagnostics,
+the migrations and the pragmas, and a *Known gaps* section carrying
+the five deferrals. It cites no plan, phase or decision number:
+a reader who needs the store should not have to know this file
+exists.
+
+`ARCHITECTURE.md` changed in three places and no more -- the header
+no longer says none of it is built, the binding-store paragraph
+says the crate exists and what it defers, and the new page is in
+*Related documents*. `AGENTS.md` changed in two: the sentence
+saying the workspace holds one crate whose binary prints its
+version was simply false, and decision 3's rule in its final form
+is now an invariant, stated as the feature list that enforces it
+rather than as a prohibition somebody has to remember.
+`README.md`'s status paragraph said the store "is being built
+now", which it is not any more, and its documentation list gains
+the page; both are changes the pitch rule permits. `docs/development.md`
+gains a paragraph naming the two workspace members, having
+described a single-crate tree only by implication.
+
+The provenance check found nothing to add. Both rows this phase
+contributed carry a `Row id`, an RFC section and named tests, and
+all six named tests exist in the crate; `make test` reports the rig
+seeing 28 rows, which is the number of rows in the file, and
+`1 case(s) checked, none failed.` 113 tests pass. `make lint`,
+`make deny`, `pre-commit run --all-files` and
+`scripts/check-store-trait.sh` are all clean.
+
+**The `Merged` cell's range is open-ended on purpose.** The master
+plan records `teneral a6189fc..`, because the commit that closes
+the range is the one this step's own work becomes and no step can
+name that. Phase 2 hit exactly this: its range was opened by its
+last step and closed by a later commit. Fill in the end after the
+fold-back, as `a6189fc..<that commit>`.

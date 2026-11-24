@@ -10,6 +10,12 @@ sections say what is waiting on that. The
 [implementation plan](plans/PLAN-teneral-implementation.md) tracks
 the rest.
 
+The workspace has two members. `teneral-store` is the binding store,
+which is built; [binding-store.md](binding-store.md) describes what
+it holds and why. `teneral` is the binary, which so far prints its
+version and carries the differential rig. Every `make` target below
+acts on the whole workspace, so none of this is per-crate.
+
 ## Rust is built in Docker, not on the host
 
 A rustup-managed toolchain is deliberately not installed on the
