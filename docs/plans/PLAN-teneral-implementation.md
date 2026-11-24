@@ -336,7 +336,7 @@ by the time it was executed.
 |-------|------|--------|--------|
 | 1. Research spikes | [PLAN-teneral-implementation-phase-01-research-spikes.md](PLAN-teneral-implementation-phase-01-research-spikes.md) | Complete | `homelab-deployments-lfs 658caab (!12)`, teneral `fa77a8e..1337e79` |
 | 2. Repository foundations | [PLAN-teneral-implementation-phase-02-foundations.md](PLAN-teneral-implementation-phase-02-foundations.md) | Complete | teneral `482edf7..8fa1b4b` |
-| 3. The binding store | [PLAN-teneral-implementation-phase-03-binding-store.md](PLAN-teneral-implementation-phase-03-binding-store.md) | Complete | teneral `a6189fc..` |
+| 3. The binding store | [PLAN-teneral-implementation-phase-03-binding-store.md](PLAN-teneral-implementation-phase-03-binding-store.md) | Complete | teneral `a6189fc..190425f` |
 | 4. The control API | PLAN-teneral-implementation-phase-04-control-api.md | Proposed | |
 | 5. DHCPv4 front-end | PLAN-teneral-implementation-phase-05-dhcpv4.md | Proposed | |
 | 6. DNS front-end | PLAN-teneral-implementation-phase-06-dns.md | Proposed | |
@@ -357,10 +357,11 @@ promoted to make the table look busier.
 Phases 2 and 3 both landed on `develop` without a pull request,
 because there is still no remote, so their `Merged` cells carry a
 `first..last` range rather than a pull request number. Phase 3's
-range is left open-ended until the commit that closes it exists:
-the documentation step cannot name the commit it is itself about to
-become, so the hash after the dots is filled in by the next commit
-on the branch. Neither phase had a CI run; each step was reviewed
+range was left open-ended by its documentation step, which could not
+name the commit it was itself about to become, and is closed here at
+`190425f`. As in phases 1 and 2, the commit that closes a range sits
+outside the range it records: the range names the phase's content,
+and the bookkeeping that closes it cannot be inside itself. Neither phase had a CI run; each step was reviewed
 by the management session reading its diff, which was the only
 check.
 
