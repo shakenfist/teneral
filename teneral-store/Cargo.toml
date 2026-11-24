@@ -1,0 +1,69 @@
+[package]
+name = "teneral-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Teneral's binding store: the source of truth for networks, bindings and leases"
+
+# Inherit the workspace lint table rather than restating it. Without
+# this the workspace `[workspace.lints]` block applies to nothing at
+# all, which fails quietly: the lints look configured and are not.
+[lints]
+workspace = true
+
+[dependencies]
+# SQLite, compiled from the amalgamation the crate carries.
+#
+# `bundled` is the load-bearing choice. It pins the storage engine's
+# version in `Cargo.lock` exactly like any other dependency; linking
+# whatever `libsqlite3` the build image happens to carry would make
+# the engine's version a property of the container instead, and in a
+# project whose stated failure mode is a silently wrong answer, the
+# version of the thing that stores the answers is not something to
+# discover at runtime. The cost is a C compile, which has to work with
+# no network and a read-only cargo cache, because that is how every
+# compile target in the `Makefile` runs.
+#
+# `extra_check` makes rusqlite return an error when a row-returning
+# query is run through `execute()`, rather than silently discarding
+# the rows -- the same class of mistake as a pragma that was set and
+# never read back. `cache` is the prepared statement cache.
+#
+# Defaults are off deliberately, and not just for thrift: this crate's
+# `default` is `['cache', 'ffi-sqlite-wasm-rs']`, so leaving them on
+# pulls a WebAssembly FFI shim into a Linux daemon's dependency tree.
+# The native backend arrives separately, through a non-optional
+# `libsqlite3-sys` that is present on every non-wasm target, which is
+# why turning the defaults off still leaves a working build and why
+# `bundled` still reaches the C compile.
+rusqlite = { version = "0.43.0", default-features = false, features = ["bundled", "cache", "extra_check"] }
+
+# The store's interface is asynchronous, and `async_trait` is how the
+# trait is declared rather than a style preference. A native `async
+# fn` in a trait returns an opaque future that is not declared `Send`,
+# which generic code cannot bound without unstable syntax, and such a
+# trait is not dyn-compatible -- and a second backend behind this
+# trait is the reason the trait exists. The cost is one boxed future
+# per call, next to a channel round-trip and an `fsync`.
+async-trait = "0.1.92"
+
+# Tokio for its channels and nothing else. `sync` needs no runtime, so
+# this crate picks no runtime for the daemon that links it: the store
+# spawns `std::thread`s of its own for the work that blocks, rather
+# than borrowing a runtime's blocking pool, which is both what keeps
+# a writer thread from being crowded out by unrelated blocking calls
+# and what keeps the choice of runtime with the binary.
+#
+# A runtime feature appearing here rather than under
+# `[dev-dependencies]` undoes all of that, and is the one line of this
+# file worth checking in review.
+tokio = { version = "1.54.1", default-features = false, features = ["sync"] }
+
+[dev-dependencies]
+# The runtime, to drive the tests, and only the tests. `rt` is the
+# single-threaded runtime and `macros` is `#[tokio::test]`; the
+# multi-threaded one is not needed to await a channel.
+tokio = { version = "1.54.1", default-features = false, features = ["rt", "macros"] }

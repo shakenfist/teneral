@@ -1,9 +1,20 @@
 [workspace]
-# One member for now. The architecture names several components, but
-# which of them become crates is a question for the phases that build
-# the binding store and the API; an empty crate created ahead of that
-# has to be kept compiling, kept linted and justified in review.
-members = ["teneral"]
+# Two members. `teneral` is the daemon; `teneral-store` is the binding
+# store, and it is a crate rather than a module inside the daemon for
+# two reasons that are not tidiness.
+#
+# The first is that this repository is teneral's core libraries, so
+# the store's public surface is an interface another repository links
+# rather than an internal arrangement this one is free to reshape.
+#
+# The second is enforcement. The store's rule is that the network is a
+# parameter of every operation, not a column an implementation is
+# trusted to filter on, and that rule is only mechanical if a caller
+# cannot reach the SQL. Inside one crate it is a convention somebody
+# polices in review; across a crate boundary with the connection type
+# private, a front-end that wants to skip the network has to add a
+# public method to do it, which is a diff a reviewer sees.
+members = ["teneral", "teneral-store"]
 
 # The MSRV-aware resolver: it prefers the newest dependency version
 # whose own `rust-version` the floor declared below can still build,
@@ -43,19 +54,32 @@ version = "0.1.0"
 # and RPIT capture rules remove two classes of surprise from code
 # that will hold locks across awaits.
 edition = "2024"
-# 1.85 is the floor edition 2024 itself imposes, and nothing in the
-# tree needs more than that, so claiming more would be decoration.
+# Raised from the 1.85 that edition 2024 imposes, because `rusqlite`
+# needs more: every release of it from 0.41.0 onwards declares an MSRV
+# of 1.89.0, and the store takes the current one. The value is written
+# here and nowhere else -- both crates inherit it with
+# `rust-version.workspace = true`.
 # Deliberately not the build image's compiler version: the image tag
 # says which toolchain builds the project, this says which toolchains
 # the source is willing to be built by, and the two answer different
 # questions.
 #
+# Worth knowing how this one presented itself, because it was the
+# quiet variant rather than the loud one. The MSRV-aware resolver
+# above fails and names the crate only when *no* version of it
+# qualifies. `rusqlite` 0.40.2 and earlier declare no `rust-version`
+# at all, so at a 1.85 floor the resolver skipped 0.41.0 through
+# 0.43.0, selected a release three months old, and succeeded. The
+# floor had become a fiction and nothing said so; the lockfile was
+# the only place it showed.
+#
 # What raises it: a language or library feature stabilised later than
-# 1.85 that the code actually uses, or a dependency whose own
-# `rust-version` is higher -- which the resolver above turns into a
-# resolution failure naming the crate rather than a silent lie here.
-# Raise it in the same commit as the thing that needed it.
-rust-version = "1.85"
+# this that the code actually uses, or a dependency whose own
+# `rust-version` is higher. Raise it in the same commit as the thing
+# that needed it, and check the lockfile afterwards rather than only
+# the exit status -- raising the floor also unblocks newer versions of
+# everything else resolution had been holding back.
+rust-version = "1.89"
 license = "Apache-2.0"
 authors = ["Michael Still <mikal@stillhq.com>"]
 repository = "https://github.com/shakenfist/teneral"
