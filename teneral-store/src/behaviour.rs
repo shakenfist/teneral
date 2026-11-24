@@ -17,7 +17,7 @@ use std::net::Ipv4Addr;
 use rusqlite::{Connection, ErrorCode};
 
 use crate::error::Error;
-use crate::model::Binding;
+use crate::model::{Binding, Lease};
 use crate::selector::{ClientIdentity, Selector, SelectorKind};
 use crate::store::BindingStore;
 use crate::test_support::{
@@ -1235,6 +1235,41 @@ async fn the_ordinary_work_of_the_store_never_counts_a_cross_network_answer() {
             .delete_binding(network, &mac, &changed)
             .await
             .unwrap();
+
+        // The lease surfaces, over both networks, including the
+        // address selection that reads several tables to choose one
+        // address.
+        let (_, leased) = fixture
+            .store
+            .allocate_lease(network, &identity, None, 86_400)
+            .await
+            .unwrap();
+        fixture
+            .store
+            .renew_lease(network, leased.address, &identity, 86_400)
+            .await
+            .unwrap();
+
+        let view = fixture.store.read().await.unwrap();
+        assert_eq!(view.leases(network).await.unwrap().len(), 1);
+        assert!(view.lease(network, leased.address).await.unwrap().is_some());
+        assert_eq!(
+            view.leases_held_by(network, &identity).await.unwrap().len(),
+            1
+        );
+        let held = view
+            .lease(network, leased.address)
+            .await
+            .unwrap()
+            .expect("the lease");
+        drop(view);
+
+        fixture
+            .store
+            .revoke_lease(network, leased.address, &held.cursor)
+            .await
+            .unwrap();
+        fixture.store.sweep_expired_leases(network).await.unwrap();
     }
 
     let view = fixture.store.read().await.unwrap();
@@ -1528,4 +1563,1174 @@ async fn a_client_presenting_nothing_matches_nothing() {
     assert_eq!(explanation.network.as_deref(), Some(ALPHA));
     assert!(explanation.matched.is_none());
     assert!(explanation.considered.is_empty());
+}
+
+// ---------------------------------------------------------------------
+// Leases.
+// ---------------------------------------------------------------------
+
+/// A lease long enough that advancing the clock by less than it
+/// plainly leaves the lease inside its term.
+const DAY: i64 = 86_400;
+
+/// Four clients that are not each other.
+const MAC_ONE: &str = "52:54:00:00:00:01";
+/// The second.
+const MAC_TWO: &str = "52:54:00:00:00:02";
+/// The third.
+const MAC_THREE: &str = "52:54:00:00:00:03";
+/// The fourth.
+const MAC_FOUR: &str = "52:54:00:00:00:04";
+
+/// A client identified by its hardware address alone, which is the
+/// ordinary case and the one an operator writes reservations against.
+fn client(mac: &str) -> ClientIdentity {
+    presenting(SelectorKind::Mac, mac)
+}
+
+/// Resize both networks' pools, so that a test can enumerate what an
+/// allocation has to choose from.
+///
+/// Both of them, always. A test that shrank one network's pool and
+/// left the other alone would be a test whose two-network assertion
+/// had quietly become a comparison of two different configurations.
+async fn repool(fixture: &TwoNetworks, first: Ipv4Addr, last: Ipv4Addr) {
+    for network in [ALPHA, BETA] {
+        let view = fixture.store.read().await.unwrap();
+        let range = view
+            .address_range(network, POOL)
+            .await
+            .unwrap()
+            .expect("the pool");
+        drop(view);
+
+        fixture
+            .store
+            .update_address_range(network, POOL, &range.cursor, first, last)
+            .await
+            .expect("a resized pool");
+    }
+}
+
+/// Take a lease on a named address and return it.
+async fn take(
+    fixture: &TwoNetworks,
+    network: &str,
+    identity: &ClientIdentity,
+    address: Ipv4Addr,
+    duration: i64,
+) -> Lease {
+    let (at, lease) = fixture
+        .store
+        .acquire_lease(network, identity, address, duration)
+        .await
+        .expect("a lease");
+
+    // The position the write was assigned and the position the lease
+    // records are the same thing, which every caller of this helper
+    // is then free to stop checking.
+    assert_eq!(lease.cursor, at);
+
+    lease
+}
+
+/// Allocate an address and return the lease.
+async fn allocate(
+    fixture: &TwoNetworks,
+    network: &str,
+    identity: &ClientIdentity,
+    requested: Option<Ipv4Addr>,
+) -> Lease {
+    let (at, lease) = fixture
+        .store
+        .allocate_lease(network, identity, requested, DAY)
+        .await
+        .expect("an allocated address");
+
+    assert_eq!(lease.cursor, at);
+
+    lease
+}
+
+/// The lease the store holds for an address now, if it holds one.
+async fn read_lease(fixture: &TwoNetworks, network: &str, address: Ipv4Addr) -> Option<Lease> {
+    let view = fixture.store.read().await.unwrap();
+
+    view.lease(network, address).await.unwrap()
+}
+
+/// Every lease event in the log, as `(seq, network, resource_id,
+/// state)`.
+fn lease_events(connection: &Connection) -> Vec<(i64, String, String, Option<String>)> {
+    events(connection)
+        .into_iter()
+        .filter(|(_, _, kind, _, _, _)| kind == "lease")
+        .map(|(seq, network, _, id, state, _)| (seq, network, id, state))
+        .collect()
+}
+
+#[tokio::test]
+async fn two_networks_lease_the_same_address_to_different_clients_at_once() {
+    let fixture = TwoNetworks::new("lease-two-networks").await;
+    let one = client(MAC_ONE);
+    let two = client(MAC_TWO);
+
+    // One address, two networks, two unrelated clients. This is the
+    // project's central property expressed as a lease: a lease is
+    // keyed by the network and the address together, so the same
+    // address in two networks is two leases and never one.
+    let alpha = take(&fixture, ALPHA, &one, in_pool(50), DAY).await;
+    let beta = take(&fixture, BETA, &two, in_pool(50), DAY).await;
+
+    assert_eq!(alpha.address, beta.address);
+    assert_eq!(alpha.network, ALPHA);
+    assert_eq!(beta.network, BETA);
+    assert_ne!(alpha.lease_id, beta.lease_id);
+
+    let view = fixture.store.read().await.unwrap();
+    assert_eq!(
+        view.lease(ALPHA, in_pool(50))
+            .await
+            .unwrap()
+            .expect("the first network's lease")
+            .holder,
+        selector(SelectorKind::Mac, MAC_ONE)
+    );
+    assert_eq!(
+        view.lease(BETA, in_pool(50))
+            .await
+            .unwrap()
+            .expect("the second network's lease")
+            .holder,
+        selector(SelectorKind::Mac, MAC_TWO)
+    );
+
+    // And the query that answers the question by client is scoped the
+    // same way: the first network's client holds nothing in the
+    // second, even though the address it holds exists in both.
+    assert_eq!(view.leases_held_by(ALPHA, &one).await.unwrap().len(), 1);
+    assert!(view.leases_held_by(BETA, &one).await.unwrap().is_empty());
+    drop(view);
+
+    // Revoking one leaves the other where it was, which is the
+    // assertion a single-network test cannot make.
+    fixture
+        .store
+        .revoke_lease(ALPHA, in_pool(50), &alpha.cursor)
+        .await
+        .unwrap();
+
+    assert!(read_lease(&fixture, ALPHA, in_pool(50)).await.is_none());
+    assert_eq!(
+        read_lease(&fixture, BETA, in_pool(50))
+            .await
+            .expect("the second network's lease")
+            .lease_id,
+        beta.lease_id
+    );
+
+    assert_eq!(fixture.store.cross_network_answers(), 0);
+}
+
+#[tokio::test]
+async fn the_pool_offers_the_lowest_free_address_and_each_network_has_its_own() {
+    let fixture = TwoNetworks::new("lease-lowest-free").await;
+    repool(&fixture, in_pool(10), in_pool(12)).await;
+
+    // The tie-break within a pool is this project's own: nothing
+    // specifies which address a server offers, and the lowest free
+    // one is chosen because it is deterministic and reproducible in a
+    // test where a counter or a hash of the client's identity would
+    // be neither.
+    for network in [ALPHA, BETA] {
+        for (mac, expected) in [
+            (MAC_ONE, in_pool(10)),
+            (MAC_TWO, in_pool(11)),
+            (MAC_THREE, in_pool(12)),
+        ] {
+            let lease = allocate(&fixture, network, &client(mac), None).await;
+            assert_eq!(lease.address, expected, "in the network {network}");
+            assert_eq!(lease.network, network);
+        }
+
+        // Three addresses, three clients, and the fourth is told why
+        // rather than being given somebody else's.
+        let refusal = fixture
+            .store
+            .allocate_lease(network, &client(MAC_FOUR), None, DAY)
+            .await
+            .unwrap_err();
+
+        match &refusal {
+            Error::NoAddress {
+                network: named,
+                detail,
+            } => {
+                assert_eq!(named, network);
+                assert!(detail.contains("leased or reserved"), "{detail}");
+            }
+            other => panic!("expected a refusal naming the network, got {other:?}"),
+        }
+    }
+
+    // Each network handed out its own three, and the first network's
+    // clients hold nothing in the second.
+    let view = fixture.store.read().await.unwrap();
+    assert_eq!(view.leases(ALPHA).await.unwrap().len(), 3);
+    assert_eq!(view.leases(BETA).await.unwrap().len(), 3);
+    drop(view);
+
+    assert_eq!(fixture.store.cross_network_answers(), 0);
+}
+
+#[tokio::test]
+async fn the_address_a_client_already_holds_is_the_first_thing_considered() {
+    let fixture = TwoNetworks::new("lease-order-held").await;
+    let one = client(MAC_ONE);
+
+    // The first step of the specified order. The client holds .15,
+    // the pool's lowest free address is .10, and the client even asks
+    // for .11 -- and it keeps .15, with the lease id it already had,
+    // because an address a client holds outranks both the pool and
+    // what it asked for.
+    let held = take(&fixture, ALPHA, &one, in_pool(15), DAY).await;
+
+    let again = allocate(&fixture, ALPHA, &one, Some(in_pool(11))).await;
+
+    assert_eq!(again.address, in_pool(15));
+    assert_eq!(again.lease_id, held.lease_id);
+    assert!(again.cursor != held.cursor);
+    assert_eq!(again.acquired_at, held.acquired_at);
+}
+
+#[tokio::test]
+async fn the_address_a_client_held_until_it_lapsed_comes_back_before_the_pool_does() {
+    let fixture = TwoNetworks::new("lease-order-previous").await;
+    let one = client(MAC_ONE);
+
+    // The second step of the specified order, and the one this plan's
+    // own summary of it left out. The client held .15; the lease has
+    // lapsed; nothing has swept it; the pool's lowest free address is
+    // .10. The specification says it gets .15 back.
+    let first = take(&fixture, ALPHA, &one, in_pool(15), DAY).await;
+    fixture.clock.advance(DAY + 1);
+
+    let again = allocate(&fixture, ALPHA, &one, None).await;
+
+    assert_eq!(again.address, in_pool(15));
+
+    // A new lease id, because the address was free in the interim and
+    // the holding that ended is not the holding that begins. A
+    // consumer comparing ids is told that, where a kept id would have
+    // claimed a continuity the store cannot vouch for.
+    assert_ne!(again.lease_id, first.lease_id);
+    assert_eq!(again.acquired_at, FIXTURE_NOW + DAY + 1);
+
+    // And .10 really was free: somebody else gets it.
+    let other = allocate(&fixture, ALPHA, &client(MAC_TWO), None).await;
+    assert_eq!(other.address, in_pool(10));
+}
+
+#[tokio::test]
+async fn an_address_a_binding_has_since_reserved_does_not_come_back_to_its_old_client() {
+    let fixture = TwoNetworks::new("lease-previous-reserved").await;
+    let one = client(MAC_ONE);
+
+    // The client held .15 in both networks and let both lapse. While
+    // it was away an operator reserved .15 in the first network for a
+    // different machine, which is allowed precisely because nothing
+    // holds the address any more.
+    take(&fixture, ALPHA, &one, in_pool(15), DAY).await;
+    take(&fixture, BETA, &one, in_pool(15), DAY).await;
+    fixture.clock.advance(DAY + 1);
+    configure(
+        &fixture,
+        ALPHA,
+        &selector(SelectorKind::Mac, MAC_TWO),
+        in_pool(15),
+    )
+    .await;
+
+    // So the second step of the order no longer applies in the first
+    // network: the address the client used to have is not one the
+    // pool may hand out, and handing it back would be handing out
+    // somebody else's reservation. The pool answers instead.
+    assert_eq!(
+        allocate(&fixture, ALPHA, &one, None).await.address,
+        in_pool(10)
+    );
+
+    // Nothing was reserved in the second network, so there the same
+    // client does get its old address back -- which is what makes the
+    // assertion above about the reservation rather than about the
+    // step.
+    assert_eq!(
+        allocate(&fixture, BETA, &one, None).await.address,
+        in_pool(15)
+    );
+}
+
+#[tokio::test]
+async fn the_address_a_client_asks_for_is_given_only_if_nothing_holds_it() {
+    let fixture = TwoNetworks::new("lease-order-requested").await;
+
+    // The third step: .18 rather than the pool's .10, because the
+    // client asked.
+    let asked = allocate(&fixture, ALPHA, &client(MAC_ONE), Some(in_pool(18))).await;
+    assert_eq!(asked.address, in_pool(18));
+
+    // And the fourth step catches a client that asks for an address
+    // somebody else holds. The request is considered at its place in
+    // the order and no higher: asking is not a way past a lease.
+    let refused = allocate(&fixture, ALPHA, &client(MAC_TWO), Some(in_pool(18))).await;
+    assert_eq!(refused.address, in_pool(10));
+
+    // An address inside no range is not valid to ask for either, and
+    // falls through the same way.
+    let outside = allocate(
+        &fixture,
+        ALPHA,
+        &client(MAC_THREE),
+        Some(Ipv4Addr::new(10, 0, 9, 9)),
+    )
+    .await;
+    assert_eq!(outside.address, in_pool(11));
+}
+
+#[tokio::test]
+async fn the_pool_does_not_offer_an_address_a_binding_reserves() {
+    let fixture = TwoNetworks::new("lease-skips-bindings").await;
+    repool(&fixture, in_pool(10), in_pool(12)).await;
+
+    // Not in the specification, and this project's for a plain
+    // reason: an address reserved for a machine that happens to be
+    // switched off is an address the pool must not hand to somebody
+    // else, or the reservation becomes a conflict the moment the
+    // machine comes back.
+    configure(
+        &fixture,
+        ALPHA,
+        &selector(SelectorKind::Mac, MAC_THREE),
+        in_pool(10),
+    )
+    .await;
+
+    assert_eq!(
+        allocate(&fixture, ALPHA, &client(MAC_ONE), None)
+            .await
+            .address,
+        in_pool(11)
+    );
+
+    // The other network has no such reservation, so the same pool
+    // starts where it always did -- which is the assertion that the
+    // skip is scoped to the network that configured it.
+    assert_eq!(
+        allocate(&fixture, BETA, &client(MAC_ONE), None)
+            .await
+            .address,
+        in_pool(10)
+    );
+}
+
+#[tokio::test]
+async fn a_network_with_no_range_allocates_nothing_and_says_which_network() {
+    let fixture = TwoNetworks::new("lease-no-range").await;
+
+    for network in [ALPHA, BETA] {
+        let view = fixture.store.read().await.unwrap();
+        let range = view.address_range(network, POOL).await.unwrap().unwrap();
+        drop(view);
+
+        fixture
+            .store
+            .delete_address_range(network, POOL, &range.cursor)
+            .await
+            .unwrap();
+    }
+
+    let refusal = fixture
+        .store
+        .allocate_lease(ALPHA, &client(MAC_ONE), None, DAY)
+        .await
+        .unwrap_err();
+
+    match &refusal {
+        Error::NoAddress { network, detail } => {
+            assert_eq!(network, ALPHA);
+            assert!(detail.contains("no address range"), "{detail}");
+        }
+        other => panic!("expected a refusal naming the network, got {other:?}"),
+    }
+
+    // A network with no range is not broken, which is the point of
+    // the message saying which of the two causes it was: every
+    // address in it is one somebody else chose, and asserting one is
+    // how a client gets it.
+    let asserted = take(&fixture, ALPHA, &client(MAC_ONE), in_pool(50), DAY).await;
+    assert_eq!(asserted.address, in_pool(50));
+}
+
+#[tokio::test]
+async fn an_address_is_held_up_to_its_instant_and_allocatable_from_it_without_a_sweep() {
+    let fixture = TwoNetworks::new("lease-lazy-expiry").await;
+    repool(&fixture, in_pool(50), in_pool(50)).await;
+
+    // A pool of exactly one address, so that whether the second
+    // client gets an address at all is the whole of whether the first
+    // client's lease still holds it.
+    let first = take(&fixture, ALPHA, &client(MAC_ONE), in_pool(50), DAY).await;
+    assert_eq!(first.expires_at, FIXTURE_NOW + DAY);
+
+    // One second before the instant: still held, and the pool has
+    // nothing to offer.
+    fixture.clock.advance(DAY - 1);
+    assert!(
+        !read_lease(&fixture, ALPHA, in_pool(50))
+            .await
+            .unwrap()
+            .expired
+    );
+    assert!(
+        fixture
+            .store
+            .allocate_lease(ALPHA, &client(MAC_TWO), None, DAY)
+            .await
+            .is_err()
+    );
+
+    // The instant itself: expired. Read, not swept -- the row is
+    // still there, and nothing has run that could have removed it.
+    fixture.clock.advance(1);
+    let lapsed = read_lease(&fixture, ALPHA, in_pool(50))
+        .await
+        .expect("the row is still there, unswept");
+    assert!(lapsed.expired);
+    assert_eq!(lapsed.expires_at, FIXTURE_NOW + DAY);
+    assert_eq!(lapsed.lease_id, first.lease_id);
+
+    // And the history says so: one lease event, the acquisition, and
+    // nothing announcing an expiry. This is the assertion that makes
+    // the next one mean something.
+    let behind = fixture.behind_the_store();
+    assert_eq!(lease_events(&behind).len(), 1);
+    drop(behind);
+
+    // So the allocation below is not relying on a sweeper having run,
+    // because no sweeper has run and the store has not been asked to
+    // pretend one did.
+    let second = allocate(&fixture, ALPHA, &client(MAC_TWO), None).await;
+    assert_eq!(second.address, in_pool(50));
+    assert_ne!(second.lease_id, first.lease_id);
+    assert_eq!(
+        second.holder,
+        selector(SelectorKind::Mac, MAC_TWO),
+        "the address went to the client that asked for it"
+    );
+
+    // The other network's identical pool was never touched by any of
+    // this.
+    assert!(read_lease(&fixture, BETA, in_pool(50)).await.is_none());
+    assert_eq!(fixture.store.cross_network_answers(), 0);
+}
+
+#[tokio::test]
+async fn a_renewal_keeps_the_lease_id() {
+    let fixture = TwoNetworks::new("lease-renewal").await;
+    let one = client(MAC_ONE);
+
+    let first = take(&fixture, ALPHA, &one, in_pool(50), DAY).await;
+    assert_eq!(
+        first.lease_id, first.cursor,
+        "a lease just acquired was acquired at the position it was written at"
+    );
+
+    fixture.clock.advance(10);
+    let renewed = fixture
+        .store
+        .renew_lease(ALPHA, in_pool(50), &one, DAY)
+        .await
+        .unwrap();
+
+    let after = read_lease(&fixture, ALPHA, in_pool(50))
+        .await
+        .expect("the renewed lease");
+
+    // The holder has not changed, so neither has the lease id -- and
+    // that is the whole of what a consumer reads a lease id for.
+    assert_eq!(after.lease_id, first.lease_id);
+    assert_eq!(after.acquired_at, first.acquired_at);
+
+    // What did change: the term, and the position of the last write.
+    assert_eq!(after.expires_at, FIXTURE_NOW + 10 + DAY);
+    assert_eq!(after.cursor, renewed);
+    assert_ne!(after.cursor, after.lease_id);
+}
+
+#[tokio::test]
+async fn a_reassignment_changes_the_lease_id() {
+    let fixture = TwoNetworks::new("lease-reassignment").await;
+
+    let first = take(&fixture, ALPHA, &client(MAC_ONE), in_pool(50), DAY).await;
+
+    fixture
+        .store
+        .revoke_lease(ALPHA, in_pool(50), &first.cursor)
+        .await
+        .unwrap();
+    let second = take(&fixture, ALPHA, &client(MAC_TWO), in_pool(50), DAY).await;
+
+    // A different client, so a different lease id, which is how a
+    // consumer tells this from a renewal without comparing
+    // timestamps.
+    assert_ne!(second.lease_id, first.lease_id);
+    assert!(second.lease_id.sequence() > first.lease_id.sequence());
+
+    // The same client coming back after its own lease lapsed also
+    // gets a new id, and that is deliberate rather than incidental:
+    // the address was free in between, so the holding ended, and a
+    // kept id would claim a continuity the store cannot vouch for.
+    fixture.clock.advance(DAY + 1);
+    let again = take(&fixture, ALPHA, &client(MAC_TWO), in_pool(50), DAY).await;
+    assert_ne!(again.lease_id, second.lease_id);
+}
+
+#[tokio::test]
+async fn an_address_another_client_holds_is_refused_and_names_the_holder() {
+    let fixture = TwoNetworks::new("lease-conflict").await;
+
+    let held = take(&fixture, ALPHA, &client(MAC_ONE), in_pool(50), DAY).await;
+
+    let refusal = fixture
+        .store
+        .acquire_lease(ALPHA, &client(MAC_TWO), in_pool(50), DAY)
+        .await
+        .unwrap_err();
+
+    match &refusal {
+        Error::Conflict { kind, id, held_by } => {
+            assert_eq!(*kind, "lease");
+            assert_eq!(id, &in_pool(50).to_string());
+            assert!(held_by.contains(MAC_ONE), "{held_by}");
+            assert!(held_by.contains(&held.lease_id.to_string()), "{held_by}");
+        }
+        other => panic!("expected a refusal naming the holder, got {other:?}"),
+    }
+
+    // And nothing moved: the refusal is a refusal, not a race the
+    // second client might win on a retry.
+    assert_eq!(
+        read_lease(&fixture, ALPHA, in_pool(50)).await.unwrap(),
+        held
+    );
+
+    // The same address in the other network is nobody's, so the
+    // second client has it there.
+    take(&fixture, BETA, &client(MAC_TWO), in_pool(50), DAY).await;
+}
+
+#[tokio::test]
+async fn a_lease_stays_its_clients_own_when_the_client_presents_more_than_it_did() {
+    let fixture = TwoNetworks::new("lease-holder-grows").await;
+
+    // Acquired presenting a hardware address alone, which is what
+    // most clients do.
+    let first = take(&fixture, ALPHA, &client(MAC_ONE), in_pool(50), DAY).await;
+    assert_eq!(first.holder, selector(SelectorKind::Mac, MAC_ONE));
+
+    // The same client, now also presenting a client identifier. It is
+    // the same client, so its lease is still its own: the question is
+    // whether it still presents the attribute the lease was recorded
+    // against, not whether that attribute is still the
+    // highest-precedence thing it has.
+    let richer = client(MAC_ONE)
+        .with(SelectorKind::ClientId, "01:de:ad:be:ef")
+        .unwrap();
+    fixture
+        .store
+        .renew_lease(ALPHA, in_pool(50), &richer, DAY)
+        .await
+        .expect("the same client renewing its own lease");
+    assert_eq!(
+        read_lease(&fixture, ALPHA, in_pool(50))
+            .await
+            .unwrap()
+            .lease_id,
+        first.lease_id
+    );
+
+    // A client presenting a different hardware address is a different
+    // client and is refused.
+    assert!(matches!(
+        fixture
+            .store
+            .renew_lease(ALPHA, in_pool(50), &client(MAC_TWO), DAY)
+            .await,
+        Err(Error::Conflict { .. })
+    ));
+}
+
+#[tokio::test]
+async fn a_lease_is_recorded_against_the_highest_precedence_attribute_presented() {
+    let fixture = TwoNetworks::new("lease-holder-precedence").await;
+    let everything = presenting_everything();
+
+    let lease = take(&fixture, ALPHA, &everything, in_pool(50), DAY).await;
+
+    // The published order, applied to a lease rather than to a
+    // lookup, so that a client is identified the same way whether it
+    // is being matched against configuration or being given an
+    // address. The top of that order is not this project's choice: a
+    // client that supplies a client identifier must be identified by
+    // it.
+    assert_eq!(lease.holder.kind(), SelectorKind::ClientId);
+
+    let view = fixture.store.read().await.unwrap();
+    assert_eq!(
+        view.leases_held_by(ALPHA, &everything).await.unwrap().len(),
+        1
+    );
+
+    // The consequence, asserted rather than left to be discovered: a
+    // client that stops presenting its identifier is not recognised
+    // as the holder of this lease. That is the protocol's own
+    // warning about keying on a hardware address, in reverse, and it
+    // is the honest behaviour -- the store cannot know that two
+    // identities are one machine.
+    assert!(
+        view.leases_held_by(ALPHA, &client(PRESENTED[2].1))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn what_a_client_holds_is_a_list_answered_inside_one_network() {
+    let fixture = TwoNetworks::new("lease-held-by").await;
+    let one = client(MAC_ONE);
+
+    // A client holding two addresses at once is the case that makes
+    // the client the wrong key for a lease and the address the right
+    // one: during a renumber it legitimately has both.
+    take(&fixture, ALPHA, &one, in_pool(51), DAY).await;
+    take(&fixture, ALPHA, &one, in_pool(50), DAY).await;
+    take(&fixture, BETA, &one, in_pool(50), DAY).await;
+
+    let view = fixture.store.read().await.unwrap();
+
+    let held = view.leases_held_by(ALPHA, &one).await.unwrap();
+    assert_eq!(held.len(), 2);
+    assert_eq!(held[0].address, in_pool(50));
+    assert_eq!(held[1].address, in_pool(51));
+    for lease in &held {
+        assert_eq!(lease.network, ALPHA);
+    }
+
+    // The other network's lease on the same address, for the same
+    // client, is a different lease and is not in this answer.
+    let elsewhere = view.leases_held_by(BETA, &one).await.unwrap();
+    assert_eq!(elsewhere.len(), 1);
+    assert_ne!(elsewhere[0].lease_id, held[0].lease_id);
+
+    // A client that holds nothing holds nothing, which is an answer
+    // rather than a failure.
+    assert!(
+        view.leases_held_by(ALPHA, &client(MAC_TWO))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    drop(view);
+
+    assert_eq!(fixture.store.cross_network_answers(), 0);
+}
+
+#[tokio::test]
+async fn a_client_presenting_nothing_cannot_hold_a_lease() {
+    let fixture = TwoNetworks::new("lease-anonymous").await;
+
+    // A lookup for an identity presenting nothing is a legitimate
+    // question -- it asks what a completely unknown client would be
+    // answered. A lease is not: it would be held by nobody, and no
+    // query could ever find it again.
+    let refusal = fixture
+        .store
+        .allocate_lease(ALPHA, &ClientIdentity::new(), None, DAY)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(refusal, Error::Invalid { .. }), "{refusal:?}");
+}
+
+#[tokio::test]
+async fn a_lease_that_would_expire_as_it_was_taken_is_refused() {
+    let fixture = TwoNetworks::new("lease-zero-duration").await;
+
+    for duration in [0, -1] {
+        let refusal = fixture
+            .store
+            .acquire_lease(ALPHA, &client(MAC_ONE), in_pool(50), duration)
+            .await
+            .unwrap_err();
+        assert!(matches!(refusal, Error::Invalid { .. }), "{refusal:?}");
+    }
+
+    assert!(read_lease(&fixture, ALPHA, in_pool(50)).await.is_none());
+}
+
+#[tokio::test]
+async fn a_renewal_of_a_lapsed_lease_is_refused_rather_than_quietly_reacquiring() {
+    let fixture = TwoNetworks::new("lease-renew-lapsed").await;
+    let one = client(MAC_ONE);
+
+    let first = take(&fixture, ALPHA, &one, in_pool(50), DAY).await;
+    fixture.clock.advance(DAY);
+
+    let refusal = fixture
+        .store
+        .renew_lease(ALPHA, in_pool(50), &one, DAY)
+        .await
+        .unwrap_err();
+
+    match &refusal {
+        Error::NotFound { kind, id } => {
+            assert_eq!(*kind, "lease");
+            assert!(id.contains("a live lease"), "{id}");
+        }
+        other => panic!("expected a refusal that there is no live lease, got {other:?}"),
+    }
+
+    // The row is untouched, so the refusal cost nothing and the
+    // client's own address is still the one it used to have -- which
+    // is what the next allocation gives it back.
+    let unchanged = read_lease(&fixture, ALPHA, in_pool(50)).await.unwrap();
+    assert_eq!(unchanged.expires_at, first.expires_at);
+    assert_eq!(unchanged.cursor, first.cursor);
+
+    let again = allocate(&fixture, ALPHA, &one, None).await;
+    assert_eq!(again.address, in_pool(50));
+    assert_ne!(again.lease_id, first.lease_id);
+}
+
+#[tokio::test]
+async fn a_revocation_computed_from_a_stale_position_is_refused() {
+    let fixture = TwoNetworks::new("lease-revoke-stale").await;
+    let one = client(MAC_ONE);
+
+    let first = take(&fixture, ALPHA, &one, in_pool(50), DAY).await;
+    fixture.clock.advance(10);
+    fixture
+        .store
+        .renew_lease(ALPHA, in_pool(50), &one, DAY)
+        .await
+        .unwrap();
+
+    // The operator read the lease, the client renewed it, and the
+    // revocation was computed from a state the lease has left.
+    let refusal = fixture
+        .store
+        .revoke_lease(ALPHA, in_pool(50), &first.cursor)
+        .await
+        .unwrap_err();
+    assert!(matches!(refusal, Error::Changed { .. }), "{refusal:?}");
+
+    assert!(read_lease(&fixture, ALPHA, in_pool(50)).await.is_some());
+}
+
+#[tokio::test]
+async fn a_lapsed_lease_may_be_revoked_rather_than_waited_out() {
+    let fixture = TwoNetworks::new("lease-revoke-lapsed").await;
+
+    let first = take(&fixture, ALPHA, &client(MAC_ONE), in_pool(50), DAY).await;
+    fixture.clock.advance(DAY + 1);
+
+    // Nothing holds the address, but the row is still there. Removing
+    // it deliberately is a thing a caller can do rather than
+    // something only a sweep can.
+    fixture
+        .store
+        .revoke_lease(ALPHA, in_pool(50), &first.cursor)
+        .await
+        .unwrap();
+
+    assert!(read_lease(&fixture, ALPHA, in_pool(50)).await.is_none());
+
+    // And the client no longer has an address to come back to, so the
+    // pool answers instead.
+    let again = allocate(&fixture, ALPHA, &client(MAC_ONE), None).await;
+    assert_eq!(again.address, in_pool(10));
+}
+
+#[tokio::test]
+async fn a_binding_against_a_leased_address_is_refused_and_names_the_lease() {
+    let fixture = TwoNetworks::new("binding-over-lease").await;
+    let held = take(&fixture, ALPHA, &client(MAC_ONE), in_pool(50), DAY).await;
+    let two = selector(SelectorKind::Mac, MAC_TWO);
+
+    // "Create this binding only if no lease holds the address",
+    // which is a property of the write rather than a second method
+    // beside it: there is no unchecked create for a caller to reach
+    // for.
+    let refusal = fixture
+        .store
+        .create_binding(ALPHA, &two, in_pool(50), None)
+        .await
+        .unwrap_err();
+
+    match &refusal {
+        Error::Conflict { kind, held_by, .. } => {
+            assert_eq!(*kind, "binding");
+            assert!(held_by.contains(MAC_ONE), "{held_by}");
+            assert!(held_by.contains(&held.lease_id.to_string()), "{held_by}");
+        }
+        other => panic!("expected a conflict naming the lease, got {other:?}"),
+    }
+
+    // The same binding in the other network is not a conflict,
+    // because the lease that stands in the way is the first
+    // network's.
+    let elsewhere = configure(&fixture, BETA, &two, in_pool(50)).await;
+    assert_eq!(elsewhere.address, in_pool(50));
+
+    // A binding moved onto a leased address is refused for the same
+    // reason. The check is on where the binding is going, so moving
+    // one away from a leased address is not refused.
+    let moving = configure(&fixture, ALPHA, &two, in_pool(60)).await;
+    assert!(matches!(
+        fixture
+            .store
+            .update_binding(ALPHA, &two, &moving.cursor, in_pool(50), None)
+            .await,
+        Err(Error::Conflict { .. })
+    ));
+
+    // A lapsed lease does not stand in the way of either. Nothing
+    // holds the address, and refusing on the strength of a row no
+    // sweep has reached yet would make a binding's acceptance depend
+    // on a sweeper having run.
+    fixture.clock.advance(DAY + 1);
+    fixture
+        .store
+        .update_binding(ALPHA, &two, &moving.cursor, in_pool(50), None)
+        .await
+        .expect("a lapsed lease is not in the way");
+}
+
+#[tokio::test]
+async fn a_binding_may_revoke_the_lease_in_its_way_as_one_operation() {
+    let fixture = TwoNetworks::new("binding-revoking-lease").await;
+    let held = take(&fixture, ALPHA, &client(MAC_ONE), in_pool(50), DAY).await;
+    take(&fixture, BETA, &client(MAC_ONE), in_pool(50), DAY).await;
+    let two = selector(SelectorKind::Mac, MAC_TWO);
+
+    let at = fixture
+        .store
+        .create_binding_revoking_lease(ALPHA, &two, in_pool(50), Some("till-one"), &held.lease_id)
+        .await
+        .expect("the binding, and the lease taken for it");
+
+    // Both halves happened: the lease is gone and the binding is
+    // there, at the position the write reported.
+    assert!(read_lease(&fixture, ALPHA, in_pool(50)).await.is_none());
+    let view = fixture.store.read().await.unwrap();
+    let binding = view
+        .binding(ALPHA, &two)
+        .await
+        .unwrap()
+        .expect("the binding");
+    assert_eq!(binding.address, in_pool(50));
+    assert_eq!(binding.cursor, at);
+    drop(view);
+
+    // Two events, the revocation and then the binding, so the
+    // position this write reported is the later of the two and a
+    // consumer resuming from it has both.
+    let behind = fixture.behind_the_store();
+    let all = events(&behind);
+    let last_two = &all[all.len() - 2..];
+    assert_eq!(last_two[0].2, "lease");
+    assert_eq!(
+        last_two[0].4, None,
+        "a revocation is an event with no state"
+    );
+    assert_eq!(last_two[1].2, "binding");
+    assert_eq!(last_two[1].0, i64::try_from(at.sequence()).unwrap());
+    drop(behind);
+
+    // The other network's lease on the same address was not part of
+    // this operation and is still held.
+    assert!(read_lease(&fixture, BETA, in_pool(50)).await.is_some());
+}
+
+#[tokio::test]
+async fn a_binding_that_cannot_be_written_leaves_the_lease_it_was_to_revoke_in_place() {
+    let fixture = TwoNetworks::new("binding-revoking-rollback").await;
+    let held = take(&fixture, ALPHA, &client(MAC_ONE), in_pool(50), DAY).await;
+    let two = selector(SelectorKind::Mac, MAC_TWO);
+
+    // The selector already has a binding, so the create below is
+    // refused -- after the revocation in the same transaction has
+    // already run.
+    configure(&fixture, ALPHA, &two, in_pool(60)).await;
+
+    let refusal = fixture
+        .store
+        .create_binding_revoking_lease(ALPHA, &two, in_pool(50), None, &held.lease_id)
+        .await
+        .unwrap_err();
+    assert!(matches!(refusal, Error::Conflict { .. }), "{refusal:?}");
+
+    // This is what makes it one operation rather than two. The
+    // revocation rolled back with the binding that justified it, so
+    // there is no state in which an address was taken from a client
+    // and nothing was written in its place.
+    assert_eq!(
+        read_lease(&fixture, ALPHA, in_pool(50)).await.unwrap(),
+        held
+    );
+
+    // And no event claims otherwise.
+    let behind = fixture.behind_the_store();
+    assert_eq!(lease_events(&behind).len(), 1);
+}
+
+#[tokio::test]
+async fn a_binding_cannot_revoke_a_lease_that_has_changed_holder() {
+    let fixture = TwoNetworks::new("binding-revoking-stale").await;
+
+    let first = take(&fixture, ALPHA, &client(MAC_ONE), in_pool(50), DAY).await;
+    fixture
+        .store
+        .revoke_lease(ALPHA, in_pool(50), &first.cursor)
+        .await
+        .unwrap();
+    let second = take(&fixture, ALPHA, &client(MAC_TWO), in_pool(50), DAY).await;
+
+    // The caller was told about one lease and is asking for that one
+    // to be taken. A different client holds the address now, which is
+    // exactly the change the lease id exists to report.
+    let refusal = fixture
+        .store
+        .create_binding_revoking_lease(
+            ALPHA,
+            &selector(SelectorKind::Mac, MAC_THREE),
+            in_pool(50),
+            None,
+            &first.lease_id,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(refusal, Error::Changed { .. }), "{refusal:?}");
+
+    assert_eq!(
+        read_lease(&fixture, ALPHA, in_pool(50)).await.unwrap(),
+        second
+    );
+
+    // A renewal in between does not invalidate the instruction, the
+    // id being unchanged by one.
+    fixture.clock.advance(10);
+    fixture
+        .store
+        .renew_lease(ALPHA, in_pool(50), &client(MAC_TWO), DAY)
+        .await
+        .unwrap();
+    fixture
+        .store
+        .create_binding_revoking_lease(
+            ALPHA,
+            &selector(SelectorKind::Mac, MAC_THREE),
+            in_pool(50),
+            None,
+            &second.lease_id,
+        )
+        .await
+        .expect("a renewal is not a change of holder");
+}
+
+#[tokio::test]
+async fn a_sweep_announces_the_expiries_that_had_already_happened_and_nothing_else() {
+    let fixture = TwoNetworks::new("lease-sweep").await;
+
+    let lapsing = take(&fixture, ALPHA, &client(MAC_ONE), in_pool(50), DAY).await;
+    take(&fixture, ALPHA, &client(MAC_TWO), in_pool(51), DAY * 3).await;
+    take(&fixture, BETA, &client(MAC_ONE), in_pool(50), DAY).await;
+
+    fixture.clock.advance(DAY + 1);
+
+    let (at, swept) = fixture.store.sweep_expired_leases(ALPHA).await.unwrap();
+
+    // Exactly the leases whose instant had passed, in the network
+    // asked about. The second network's identical lease has lapsed
+    // too and is not this sweep's business: the sweep is scoped like
+    // every other operation here.
+    assert_eq!(swept.len(), 1);
+    assert_eq!(swept[0].address, in_pool(50));
+    assert_eq!(swept[0].lease_id, lapsing.lease_id);
+    assert!(swept[0].expired);
+
+    assert!(read_lease(&fixture, ALPHA, in_pool(50)).await.is_none());
+    assert!(read_lease(&fixture, ALPHA, in_pool(51)).await.is_some());
+    assert!(read_lease(&fixture, BETA, in_pool(50)).await.is_some());
+
+    // The point of the whole operation: an event saying the address
+    // was given up, which a consumer watching the history would
+    // otherwise have had to infer by comparing an instant against its
+    // own clock.
+    let behind = fixture.behind_the_store();
+    let announced: Vec<_> = lease_events(&behind)
+        .into_iter()
+        .filter(|(_, network, _, state)| network == ALPHA && state.is_none())
+        .collect();
+    assert_eq!(announced.len(), 1);
+    assert_eq!(announced[0].2, in_pool(50).to_string());
+    assert_eq!(
+        announced[0].0,
+        i64::try_from(at.expect("a position").sequence()).unwrap()
+    );
+    drop(behind);
+
+    // A second sweep has nothing to do, writes nothing, and reports
+    // no position -- because a sweep that removed nothing has no
+    // position to report and inventing one would be a lie.
+    let (nothing, empty) = fixture.store.sweep_expired_leases(ALPHA).await.unwrap();
+    assert!(nothing.is_none());
+    assert!(empty.is_empty());
+}
+
+#[tokio::test]
+async fn a_lease_is_committed_before_the_caller_is_told_about_it() {
+    let fixture = TwoNetworks::new("lease-durability").await;
+
+    let lease = allocate(&fixture, ALPHA, &client(MAC_ONE), None).await;
+
+    // The caller has the lease. Another connection to the same
+    // database can see only what has been committed, so finding the
+    // lease through one is the assertion that the commit had already
+    // happened when the value above was returned -- which is the
+    // order the whole design turns on, because the value above is
+    // what a front-end would acknowledge to a client.
+    let second = fixture.second_store().await;
+    let view = second.read().await.unwrap();
+    let durable = view
+        .lease(ALPHA, lease.address)
+        .await
+        .unwrap()
+        .expect("the lease, through a connection that only sees commits");
+
+    assert_eq!(durable, lease);
+    drop(view);
+    drop(second);
+}
+
+#[tokio::test]
+async fn every_lease_write_leaves_one_event_carrying_its_whole_post_state() {
+    let fixture = TwoNetworks::new("lease-events").await;
+    let one = client(MAC_ONE);
+
+    let lease = take(&fixture, ALPHA, &one, in_pool(50), DAY).await;
+
+    let behind = fixture.behind_the_store();
+    let written = lease_events(&behind);
+    assert_eq!(written.len(), 1);
+
+    let (seq, network, id, state) = &written[0];
+    assert_eq!(network, ALPHA);
+    assert_eq!(id, &in_pool(50).to_string());
+    assert_eq!(*seq, i64::try_from(lease.cursor.sequence()).unwrap());
+
+    // The whole post-state, including the lease id -- which for an
+    // acquisition is this event's own position, and is in the payload
+    // anyway because it is the field a consumer reads the state for.
+    let state = state.as_ref().expect("a post-state");
+    assert!(state.contains(&format!("\"lease_id\":{seq}")), "{state}");
+    assert!(
+        state.contains(&format!("\"address\":{}", u32::from(in_pool(50)))),
+        "{state}"
+    );
+    assert!(state.contains("\"holder_kind\":\"mac\""), "{state}");
+    assert!(
+        state.contains(&format!("\"holder_value\":\"{MAC_ONE}\"")),
+        "{state}"
+    );
+    assert!(
+        state.contains(&format!("\"expires_at\":{}", FIXTURE_NOW + DAY)),
+        "{state}"
+    );
+    drop(behind);
+
+    // A renewal's event carries the id it kept, which is an earlier
+    // position than its own.
+    fixture.clock.advance(10);
+    let renewed = fixture
+        .store
+        .renew_lease(ALPHA, in_pool(50), &one, DAY)
+        .await
+        .unwrap();
+
+    let behind = fixture.behind_the_store();
+    let written = lease_events(&behind);
+    assert_eq!(written.len(), 2);
+    assert_eq!(written[1].0, i64::try_from(renewed.sequence()).unwrap());
+    let state = written[1].3.as_ref().expect("a post-state");
+    assert!(
+        state.contains(&format!("\"lease_id\":{}", lease.lease_id.sequence())),
+        "{state}"
+    );
+}
+
+#[tokio::test]
+async fn a_network_with_a_lease_on_it_will_not_be_removed() {
+    let fixture = TwoNetworks::new("lease-blocks-delete").await;
+    let lease = take(&fixture, ALPHA, &client(MAC_ONE), in_pool(50), DAY).await;
+
+    let view = fixture.store.read().await.unwrap();
+    let network = view.network(ALPHA).await.unwrap().expect("the network");
+    let range = view.address_range(ALPHA, POOL).await.unwrap().unwrap();
+    let attachment = view
+        .attachment(ALPHA, ALPHA_NAMESPACE, IFNAME)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(view);
+
+    fixture
+        .store
+        .detach_interface(ALPHA, ALPHA_NAMESPACE, IFNAME, &attachment.cursor)
+        .await
+        .unwrap();
+    fixture
+        .store
+        .delete_address_range(ALPHA, POOL, &range.cursor)
+        .await
+        .unwrap();
+
+    // A lease is a child like any other, and a network that still has
+    // one refuses to be deleted rather than quietly discarding an
+    // address somebody is using.
+    let refusal = fixture
+        .store
+        .delete_network(ALPHA, &network.cursor)
+        .await
+        .unwrap_err();
+    match &refusal {
+        Error::Conflict { held_by, .. } => assert!(held_by.contains("lease"), "{held_by}"),
+        other => panic!("expected a conflict naming what is in the way, got {other:?}"),
+    }
+
+    fixture
+        .store
+        .revoke_lease(ALPHA, in_pool(50), &lease.cursor)
+        .await
+        .unwrap();
+    fixture
+        .store
+        .delete_network(ALPHA, &network.cursor)
+        .await
+        .unwrap();
+
+    let view = fixture.store.read().await.unwrap();
+    assert!(view.network(ALPHA).await.unwrap().is_none());
+    assert!(view.network(BETA).await.unwrap().is_some());
 }

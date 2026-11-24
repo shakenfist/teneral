@@ -27,17 +27,20 @@
 //! holds the rule rather than anybody's vigilance.
 //!
 //! What exists so far is the foundation, the configured resources a
-//! lookup is scoped by, and the lookup itself: a database that opens,
-//! migrates itself forward, refuses to open one a newer build wrote,
-//! carries an identity of its own, keeps an event log whose sequence
-//! numbers are never issued twice, and holds networks, the interfaces
-//! attached to them, the address ranges they own and the bindings
-//! configured in them. Over those sits the question the whole store
-//! exists to answer -- given what a client presents, in this network,
-//! which binding applies -- together with the explain operation that
-//! asks it with no packet involved, and the check that refuses and
-//! counts any answer that came from the wrong network. Leases and the
-//! reads over the history come next.
+//! lookup is scoped by, the lookup itself, and the leases over it: a
+//! database that opens, migrates itself forward, refuses to open one
+//! a newer build wrote, carries an identity of its own, keeps an
+//! event log whose sequence numbers are never issued twice, and holds
+//! networks, the interfaces attached to them, the address ranges they
+//! own and the bindings configured in them. Over those sits the
+//! question the whole store exists to answer -- given what a client
+//! presents, in this network, which binding applies -- together with
+//! the explain operation that asks it with no packet involved, and
+//! the check that refuses and counts any answer that came from the
+//! wrong network. Over those again are the leases: who is using which
+//! address right now, how an address is chosen for a client that has
+//! none, and the two operations that settle a binding against a lease
+//! in one step rather than two. The reads over the history come next.
 
 mod clock;
 mod cursor;
@@ -45,6 +48,7 @@ mod db;
 mod error;
 mod guard;
 mod identity;
+mod lease;
 mod model;
 mod ops;
 mod schema;
@@ -61,7 +65,7 @@ pub use clock::{Clock, SystemClock};
 pub use cursor::Cursor;
 pub use error::{Error, Result};
 pub use identity::Epoch;
-pub use model::{AddressRange, Attachment, Binding, Explanation, Network};
+pub use model::{AddressRange, Attachment, Binding, Explanation, Lease, Network};
 pub use schema::SCHEMA_VERSION;
 pub use selector::{ClientIdentity, Selector, SelectorKind};
 pub use sqlite::{SnapshotView, SqliteStore};

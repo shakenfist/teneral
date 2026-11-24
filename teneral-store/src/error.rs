@@ -164,6 +164,22 @@ pub enum Error {
         detail: String,
     },
 
+    /// A network had no address to allocate.
+    ///
+    /// Distinct from a conflict, because nothing is in the way: the
+    /// caller asked the store to choose an address and there was none
+    /// to choose. The detail separates the two causes, which have
+    /// different fixes -- a network with no range allocates nothing
+    /// by design, and the caller probably meant to assert an address
+    /// rather than ask for one, where a network whose range is full
+    /// is an operational problem with an operational fix.
+    NoAddress {
+        /// The network that was asked.
+        network: String,
+        /// Why it had nothing, as a sentence an operator can act on.
+        detail: String,
+    },
+
     /// The store could not start a thread it needs.
     ///
     /// The database is confined to threads the store owns, so one it
@@ -308,6 +324,10 @@ impl fmt::Display for Error {
                  another"
             ),
             Error::Invalid { what, detail } => write!(f, "that {what} will not do: {detail}"),
+            Error::NoAddress { network, detail } => write!(
+                f,
+                "there is no address available in the network {network}: {detail}"
+            ),
             Error::Threads { context, source } => {
                 write!(
                     f,

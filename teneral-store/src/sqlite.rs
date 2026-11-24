@@ -74,7 +74,8 @@ use crate::db::{self, Database};
 use crate::error::{Error, Result};
 use crate::guard::CrossNetworkGuard;
 use crate::identity::Epoch;
-use crate::model::{AddressRange, Attachment, Binding, Explanation, Network};
+use crate::lease;
+use crate::model::{AddressRange, Attachment, Binding, Explanation, Lease, Network};
 use crate::ops::{self, Reading, Writing};
 use crate::selector::{ClientIdentity, Selector};
 use crate::store::{BindingStore, ReadHandle};
@@ -422,6 +423,13 @@ impl BindingStore for SqliteStore {
         let view = SnapshotView::open(
             self.path.clone(),
             self.epoch.clone(),
+            // The instant the view reads at, taken here beside the
+            // position it reads at. A lease's expiry is a fact about
+            // the clock rather than about the store's order, so a
+            // view needs both to answer consistently -- see
+            // `Lease::expired` for why it is fixed rather than read
+            // again per question.
+            self.clock.unix_seconds(),
             Arc::clone(&self.census),
             Arc::clone(&self.guard),
         )
@@ -699,6 +707,160 @@ impl BindingStore for SqliteStore {
         })
         .await
     }
+
+    async fn create_binding_revoking_lease(
+        &self,
+        network: &str,
+        selector: &Selector,
+        address: std::net::Ipv4Addr,
+        hostname: Option<&str>,
+        holder: &Cursor,
+    ) -> Result<Cursor> {
+        let network = network.to_owned();
+        let selector = selector.clone();
+        let hostname = hostname.map(str::to_owned);
+        let holder = holder.clone();
+
+        let clock = Arc::clone(&self.clock);
+        let epoch = self.epoch.clone();
+        let guard = Arc::clone(&self.guard);
+
+        self.write("configure a binding over a lease", move |database| {
+            ops::create_binding_revoking_lease(
+                database.connection_mut(),
+                &SqliteStore::writing(&clock, &epoch, &guard),
+                &network,
+                &selector,
+                address,
+                hostname.as_deref(),
+                &holder,
+            )
+        })
+        .await
+    }
+
+    async fn acquire_lease(
+        &self,
+        network: &str,
+        identity: &ClientIdentity,
+        address: std::net::Ipv4Addr,
+        duration: i64,
+    ) -> Result<(Cursor, Lease)> {
+        let network = network.to_owned();
+        let identity = identity.clone();
+
+        let clock = Arc::clone(&self.clock);
+        let epoch = self.epoch.clone();
+        let guard = Arc::clone(&self.guard);
+
+        self.write("take a lease on an address", move |database| {
+            lease::acquire_lease(
+                database.connection_mut(),
+                &SqliteStore::writing(&clock, &epoch, &guard),
+                &network,
+                &identity,
+                address,
+                duration,
+            )
+        })
+        .await
+    }
+
+    async fn allocate_lease(
+        &self,
+        network: &str,
+        identity: &ClientIdentity,
+        requested: Option<std::net::Ipv4Addr>,
+        duration: i64,
+    ) -> Result<(Cursor, Lease)> {
+        let network = network.to_owned();
+        let identity = identity.clone();
+
+        let clock = Arc::clone(&self.clock);
+        let epoch = self.epoch.clone();
+        let guard = Arc::clone(&self.guard);
+
+        self.write("allocate an address", move |database| {
+            lease::allocate_lease(
+                database.connection_mut(),
+                &SqliteStore::writing(&clock, &epoch, &guard),
+                &network,
+                &identity,
+                requested,
+                duration,
+            )
+        })
+        .await
+    }
+
+    async fn renew_lease(
+        &self,
+        network: &str,
+        address: std::net::Ipv4Addr,
+        identity: &ClientIdentity,
+        duration: i64,
+    ) -> Result<Cursor> {
+        let network = network.to_owned();
+        let identity = identity.clone();
+
+        let clock = Arc::clone(&self.clock);
+        let epoch = self.epoch.clone();
+        let guard = Arc::clone(&self.guard);
+
+        self.write("renew a lease", move |database| {
+            lease::renew_lease(
+                database.connection_mut(),
+                &SqliteStore::writing(&clock, &epoch, &guard),
+                &network,
+                address,
+                &identity,
+                duration,
+            )
+        })
+        .await
+    }
+
+    async fn revoke_lease(
+        &self,
+        network: &str,
+        address: std::net::Ipv4Addr,
+        expected: &Cursor,
+    ) -> Result<Cursor> {
+        let network = network.to_owned();
+        let expected = expected.clone();
+
+        let clock = Arc::clone(&self.clock);
+        let epoch = self.epoch.clone();
+        let guard = Arc::clone(&self.guard);
+
+        self.write("revoke a lease", move |database| {
+            lease::revoke_lease(
+                database.connection_mut(),
+                &SqliteStore::writing(&clock, &epoch, &guard),
+                &network,
+                address,
+                &expected,
+            )
+        })
+        .await
+    }
+
+    async fn sweep_expired_leases(&self, network: &str) -> Result<(Option<Cursor>, Vec<Lease>)> {
+        let network = network.to_owned();
+
+        let clock = Arc::clone(&self.clock);
+        let epoch = self.epoch.clone();
+        let guard = Arc::clone(&self.guard);
+
+        self.write("sweep expired leases", move |database| {
+            lease::sweep_expired_leases(
+                database.connection_mut(),
+                &SqliteStore::writing(&clock, &epoch, &guard),
+                &network,
+            )
+        })
+        .await
+    }
 }
 
 /// The scope for one network-named read, assembled on the thread
@@ -736,6 +898,9 @@ pub struct SnapshotView {
     thread: Option<JoinHandle<()>>,
     /// The position every answer from this view is consistent with.
     cursor: Cursor,
+    /// The instant every answer from this view evaluates an expiry
+    /// at, taken when the view opened. See `Lease::expired`.
+    as_of: i64,
     /// The store's cross-network check, shared rather than this
     /// view's own: the count is a property of the store, and a view
     /// is a short-lived thing nobody would read a counter off.
@@ -754,6 +919,7 @@ impl SnapshotView {
     async fn open(
         path: PathBuf,
         epoch: Epoch,
+        as_of: i64,
         census: Arc<ThreadCensus>,
         guard: Arc<CrossNetworkGuard>,
     ) -> Result<Self> {
@@ -805,6 +971,7 @@ impl SnapshotView {
                 queries: Some(queries),
                 thread: Some(thread),
                 cursor: Cursor::new(epoch, position),
+                as_of,
                 guard,
             }),
             Ok(Err(refusal)) => {
@@ -1012,6 +1179,53 @@ impl ReadHandle for SnapshotView {
                 &reading(&epoch, &network, &guard),
                 &namespace,
                 &ifname,
+                &identity,
+            )
+        })
+        .await
+    }
+
+    async fn leases(&self, network: &str) -> Result<Vec<Lease>> {
+        let epoch = self.epoch();
+        let guard = self.guard();
+        let network = network.to_owned();
+        let as_of = self.as_of;
+
+        self.query("list a network's leases", move |connection| {
+            lease::leases(connection, &reading(&epoch, &network, &guard), as_of)
+        })
+        .await
+    }
+
+    async fn lease(&self, network: &str, address: std::net::Ipv4Addr) -> Result<Option<Lease>> {
+        let epoch = self.epoch();
+        let guard = self.guard();
+        let network = network.to_owned();
+        let as_of = self.as_of;
+
+        self.query("read a lease", move |connection| {
+            lease::lease(
+                connection,
+                &reading(&epoch, &network, &guard),
+                as_of,
+                address,
+            )
+        })
+        .await
+    }
+
+    async fn leases_held_by(&self, network: &str, identity: &ClientIdentity) -> Result<Vec<Lease>> {
+        let epoch = self.epoch();
+        let guard = self.guard();
+        let network = network.to_owned();
+        let identity = identity.clone();
+        let as_of = self.as_of;
+
+        self.query("read what a client holds", move |connection| {
+            lease::leases_held_by(
+                connection,
+                &reading(&epoch, &network, &guard),
+                as_of,
                 &identity,
             )
         })

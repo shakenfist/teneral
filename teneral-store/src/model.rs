@@ -106,6 +106,84 @@ pub struct Binding {
     pub cursor: Cursor,
 }
 
+/// An address a client is using in a network, as against one an
+/// operator configured for it.
+///
+/// Keyed by `(network, address)` rather than by the client, because
+/// within one network an address has at most one holder at a time
+/// while a client may hold two addresses at once as it moves between
+/// them. So this type names a client in a field rather than in its
+/// identity, and "what does this client hold" has a list for an
+/// answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Lease {
+    /// The network the address was leased in.
+    pub network: String,
+    /// The address, which with the network is the lease's identity.
+    pub address: Ipv4Addr,
+    /// The attribute the holder was identified by when it acquired
+    /// the address.
+    ///
+    /// One selector rather than everything the client presented,
+    /// because a holder has to be a single comparable value. It is
+    /// the highest-precedence attribute the client presented at the
+    /// time, by the same published order a binding lookup walks -- so
+    /// a client is identified the same way whether it is being
+    /// matched against configuration or given an address.
+    pub holder: Selector,
+    /// Where in the store's order the current holder acquired this
+    /// address.
+    ///
+    /// This is the opaque lease id the API promises changes whenever
+    /// the address changes holder, and it is a position rather than a
+    /// random value: derived from the store's own order it is
+    /// deterministic in a test, needs no generator, and is already
+    /// something a consumer can compare against its stream. A
+    /// renewal keeps it, because the holder has not changed; an
+    /// acquisition issues a new one, because acquiring is what issues
+    /// it.
+    ///
+    /// It is a cursor rather than a bare number for the reason any
+    /// position here is: a sequence number from a restored backup
+    /// means nothing without the epoch that says whose it is. It
+    /// equals [`Lease::cursor`] for a lease that has not been renewed
+    /// since it was acquired, and the two part company at the first
+    /// renewal.
+    pub lease_id: Cursor,
+    /// When the current holder acquired the address, as seconds since
+    /// the Unix epoch.
+    pub acquired_at: i64,
+    /// The instant the lease runs out, as seconds since the Unix
+    /// epoch.
+    ///
+    /// Absolute rather than a duration and a start, so that expiry is
+    /// a comparison against the clock rather than an arithmetic every
+    /// reader repeats. This is the fact; the field below is the fact
+    /// evaluated.
+    pub expires_at: i64,
+    /// Whether the instant above had passed when this answer was
+    /// produced.
+    ///
+    /// The store evaluates expiry rather than leaving each caller to,
+    /// because the rule -- held before the instant, expired from it
+    /// -- is one every caller would otherwise write again, and a
+    /// caller that wrote the comparison the other way round would
+    /// hand out an address somebody is using.
+    ///
+    /// The instant it was evaluated at is the instant the answer was
+    /// produced: for a write, the one the write itself used, and for
+    /// a read through a view, the one the view opened at. A view
+    /// whose answers moved with the clock would not be a view --
+    /// assembling a list of leases from it could report two whose
+    /// states were never true together -- and a view is a thing to
+    /// open, use and drop rather than to keep by. A caller holding
+    /// one for longer has [`Lease::expires_at`], which is the fact
+    /// rather than a reading of it.
+    pub expired: bool,
+    /// Where the lease's last write sits in the store's order.
+    pub cursor: Cursor,
+}
+
 /// What the store would answer a client, and how it got there, with
 /// no packet involved.
 ///

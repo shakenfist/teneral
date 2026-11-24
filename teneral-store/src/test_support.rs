@@ -215,3 +215,23 @@ impl TwoNetworks {
         connection
     }
 }
+
+impl TwoNetworks {
+    /// A second store over the same database, for a test that has to
+    /// ask whether a write survived the connection that made it.
+    ///
+    /// A separate store rather than a reopen of this one, because the
+    /// fixture owns the directory and dropping the store would mean
+    /// giving that up. What it buys is the assertion that matters:
+    /// another connection sees only what has been committed, so a
+    /// value readable through this one is a value that was durable
+    /// before the caller was told about it.
+    pub(crate) async fn second_store(&self) -> SqliteStore {
+        SqliteStore::with_clock(
+            self.directory.path(),
+            Arc::clone(&self.clock) as Arc<dyn Clock>,
+        )
+        .await
+        .expect("a second store over the same database")
+    }
+}

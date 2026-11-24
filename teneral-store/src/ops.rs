@@ -1,11 +1,19 @@
 //! Every statement the store runs, and the events each write emits.
 //!
-//! All of the SQL in this crate is here or in a migration, which is
-//! deliberate: it is the part a reviewer reads most closely, and the
-//! rule that every operation is scoped to a network is only checkable
-//! if the statements are in one place. Nothing in this module is
-//! public, and no type from `rusqlite` appears in any signature that
-//! leaves the crate.
+//! All of the SQL in this crate is here, in `lease.rs`, or in a
+//! migration, which is deliberate: it is the part a reviewer reads
+//! most closely, and the rule that every operation is scoped to a
+//! network is only checkable if the statements can be read together.
+//! Nothing in this module is public, and no type from `rusqlite`
+//! appears in any signature that leaves the crate.
+//!
+//! The lease statements are in a module of their own because a lease
+//! is a state machine rather than a set of statements over a row, and
+//! because the order it chooses an address in is the one rule in this
+//! store that is cited to a published specification. Keeping that
+//! order beside its citation is worth more than keeping every
+//! statement in one file; both modules state the network-scoping rule
+//! and both pass every row they return through the same check.
 //!
 //! The functions come in two shapes. A read takes a connection and
 //! answers from whatever view that connection has -- which, for a
@@ -34,6 +42,7 @@ use crate::cursor::Cursor;
 use crate::error::{Error, Result};
 use crate::guard::CrossNetworkGuard;
 use crate::identity::Epoch;
+use crate::lease;
 use crate::model::{AddressRange, Attachment, Binding, Explanation, Network};
 use crate::selector::{ClientIdentity, Selector};
 
@@ -44,7 +53,9 @@ const ATTACHMENT: &str = "attachment";
 /// What it calls an address range.
 const RANGE: &str = "address range";
 /// What it calls a binding.
-const BINDING: &str = "binding";
+pub(crate) const BINDING: &str = "binding";
+/// What it calls a lease.
+pub(crate) const LEASE: &str = "lease";
 
 /// The kinds an event carries, which are machine-readable and so are
 /// not the words above.
@@ -53,7 +64,7 @@ const BINDING: &str = "binding";
 /// what makes a resource this schema does not have yet a migration
 /// and a variant rather than a reshaping of the one table every
 /// consumer reads.
-mod kind {
+pub(crate) mod kind {
     /// A network was created or removed.
     pub(super) const NETWORK: &str = "network";
     /// An interface was claimed or released.
@@ -62,6 +73,8 @@ mod kind {
     pub(super) const RANGE: &str = "address-range";
     /// A binding was configured, changed or removed.
     pub(super) const BINDING: &str = "binding";
+    /// A lease was taken, renewed, revoked or swept.
+    pub(crate) const LEASE: &str = "lease";
 }
 
 /// The identity an event reports a binding by: its selector, which is
@@ -75,7 +88,7 @@ mod kind {
 /// value. The attachment identity above needs a refusal instead of
 /// this reasoning because both of *its* halves are operator-supplied
 /// names.
-fn binding_id(selector: &Selector) -> String {
+pub(crate) fn binding_id(selector: &Selector) -> String {
     format!("{}:{}", selector.kind().as_str(), selector.value())
 }
 
@@ -166,7 +179,7 @@ fn attachment_id(namespace: &str, ifname: &str) -> String {
 /// other than this code has been writing the table, and guessing
 /// which address was meant is exactly the silently wrong answer the
 /// store is built to avoid.
-fn address_from_row(stored: i64) -> Result<Ipv4Addr> {
+pub(crate) fn address_from_row(stored: i64) -> Result<Ipv4Addr> {
     let value = u32::try_from(stored).map_err(|_| Error::Malformed {
         detail: format!("it holds {stored} in an address column, which is not an IPv4 address"),
     })?;
@@ -175,7 +188,7 @@ fn address_from_row(stored: i64) -> Result<Ipv4Addr> {
 }
 
 /// Wrap an engine error with what was being done.
-fn storage(context: &'static str) -> impl FnOnce(rusqlite::Error) -> Error {
+pub(crate) fn storage(context: &'static str) -> impl FnOnce(rusqlite::Error) -> Error {
     move |error| Error::storage(context, error)
 }
 
@@ -214,7 +227,7 @@ pub(crate) struct Reading<'a> {
 impl<'a> Reading<'a> {
     /// Refuse a row that came from a network other than the one asked
     /// about.
-    fn guard<F>(&self, found: &str, kind: &'static str, id: F) -> Result<()>
+    pub(crate) fn guard<F>(&self, found: &str, kind: &'static str, id: F) -> Result<()>
     where
         F: FnOnce() -> String,
     {
@@ -828,7 +841,7 @@ fn event_binding_written(
 /// post-state of something deleted is its absence. A consumer
 /// applying events therefore needs no second rule, and applying one
 /// twice does no harm.
-fn event_deleted(
+pub(crate) fn event_deleted(
     transaction: &Transaction<'_>,
     network: &str,
     kind: &str,
@@ -870,7 +883,7 @@ pub(crate) struct Writing<'a> {
 
 impl<'a> Writing<'a> {
     /// The scope for a read this write makes inside `network`.
-    fn reading<'b>(&'b self, network: &'b str) -> Reading<'b> {
+    pub(crate) fn reading<'b>(&'b self, network: &'b str) -> Reading<'b> {
         Reading {
             epoch: self.epoch,
             network,
@@ -885,7 +898,7 @@ impl<'a> Writing<'a> {
 /// anyway, which is the structural guarantee and stays. This runs
 /// first so that the caller is told which network was wrong rather
 /// than being handed a constraint violation that names a column.
-fn require_network(transaction: &Transaction<'_>, network: &str) -> Result<()> {
+pub(crate) fn require_network(transaction: &Transaction<'_>, network: &str) -> Result<()> {
     let exists: Option<i64> = transaction
         .query_row(
             "SELECT 1 FROM network WHERE name = ?1",
@@ -977,8 +990,8 @@ pub(crate) fn delete_network(
             kind: NETWORK,
             id: name.to_owned(),
             held_by: format!(
-                "it still has {children} attachment(s), range(s) and binding(s); remove those \
-                 first"
+                "it still has {children} attachment(s), range(s), binding(s) and lease(s); \
+                 remove those first"
             ),
         });
     }
@@ -1015,7 +1028,8 @@ fn count_children(transaction: &Transaction<'_>, network: &str) -> Result<i64> {
         .query_row(
             "SELECT (SELECT count(*) FROM attachment WHERE network = ?1)
                   + (SELECT count(*) FROM address_range WHERE network = ?1)
-                  + (SELECT count(*) FROM binding WHERE network = ?1)",
+                  + (SELECT count(*) FROM binding WHERE network = ?1)
+                  + (SELECT count(*) FROM lease WHERE network = ?1)",
             params![network],
             |row| row.get(0),
         )
@@ -1339,27 +1353,19 @@ fn validate_hostname(hostname: Option<&str>) -> Result<()> {
     }
 }
 
-/// Configure a binding, refusing a selector the network already has
-/// one for.
-pub(crate) fn create_binding(
-    conn: &mut Connection,
-    writing: &Writing<'_>,
+/// Insert the binding row, turning the key conflict into a refusal
+/// that says what to do about it.
+///
+/// Shared by the two creates, so that the operation which also
+/// revokes a lease cannot drift from the one which refuses to.
+fn insert_binding(
+    transaction: &Transaction<'_>,
     network: &str,
     selector: &Selector,
     address: Ipv4Addr,
     hostname: Option<&str>,
-) -> Result<Cursor> {
-    validate_hostname(hostname)?;
-
-    let now = writing.clock.unix_seconds();
-    let transaction = conn
-        .transaction()
-        .map_err(storage("starting a transaction to configure a binding"))?;
-
-    require_network(&transaction, network)?;
-
-    let sequence = event_binding_written(&transaction, network, selector, address, hostname, now)?;
-
+    sequence: i64,
+) -> Result<()> {
     transaction
         .execute(
             "INSERT INTO binding
@@ -1389,9 +1395,102 @@ pub(crate) fn create_binding(
             }
         })?;
 
+    Ok(())
+}
+
+/// Configure a binding, refusing a selector the network already has
+/// one for.
+///
+/// The address is refused if a lease holds it, which is the first of
+/// the two compare-and-set operations the specification names --
+/// "create this binding only if no lease holds the address" -- made a
+/// property of this write rather than a second method beside it.
+pub(crate) fn create_binding(
+    conn: &mut Connection,
+    writing: &Writing<'_>,
+    network: &str,
+    selector: &Selector,
+    address: Ipv4Addr,
+    hostname: Option<&str>,
+) -> Result<Cursor> {
+    validate_hostname(hostname)?;
+
+    let now = writing.clock.unix_seconds();
+    let transaction = conn
+        .transaction()
+        .map_err(storage("starting a transaction to configure a binding"))?;
+
+    require_network(&transaction, network)?;
+    lease::require_address_unleased(&transaction, writing, network, selector, address)?;
+
+    let sequence = event_binding_written(&transaction, network, selector, address, hostname, now)?;
+
+    insert_binding(&transaction, network, selector, address, hostname, sequence)?;
+
     transaction
         .commit()
         .map_err(storage("committing a binding"))?;
+
+    Ok(Cursor::new(
+        writing.epoch.clone(),
+        sequence_as_position(sequence)?,
+    ))
+}
+
+/// Configure a binding and revoke the lease standing in its way, as
+/// one operation.
+///
+/// This is the second compare-and-set operation the specification
+/// names, and the only thing that makes it one operation rather than
+/// two is that both writes are in the transaction below. A refused
+/// binding rolls the revocation back with it, so there is no state in
+/// which an address was taken from a client and the binding that
+/// justified taking it was not written -- and no window in which
+/// something else could be given the address in between.
+///
+/// `holder` is the lease id, which is what the plain create's refusal
+/// told the caller about. The reasoning for the id rather than the
+/// position of the lease's last write is in
+/// [`crate::lease::revoke_for_binding`].
+///
+/// Two events are appended, the revocation and then the binding, so
+/// the position this returns is the later of the two and a consumer
+/// resuming from it has both.
+///
+/// There is deliberately no matching form of the *change* operation.
+/// A binding moved onto a leased address is refused, and the caller's
+/// recourse is to revoke the lease and then change the binding, which
+/// is two operations with a window between them. That gap is left
+/// open rather than filled in advance: the specification names the
+/// create, the consumer this store is built for asserts bindings
+/// rather than editing them, and the day something needs the other
+/// form it is these same two statements in one transaction.
+pub(crate) fn create_binding_revoking_lease(
+    conn: &mut Connection,
+    writing: &Writing<'_>,
+    network: &str,
+    selector: &Selector,
+    address: Ipv4Addr,
+    hostname: Option<&str>,
+    holder: &Cursor,
+) -> Result<Cursor> {
+    validate_hostname(hostname)?;
+
+    let now = writing.clock.unix_seconds();
+    let transaction = conn.transaction().map_err(storage(
+        "starting a transaction to configure a binding over a lease",
+    ))?;
+
+    require_network(&transaction, network)?;
+    lease::revoke_for_binding(&transaction, writing, network, address, holder)?;
+
+    let sequence = event_binding_written(&transaction, network, selector, address, hostname, now)?;
+
+    insert_binding(&transaction, network, selector, address, hostname, sequence)?;
+
+    transaction
+        .commit()
+        .map_err(storage("committing a binding over a revoked lease"))?;
 
     Ok(Cursor::new(
         writing.epoch.clone(),
@@ -1436,6 +1535,14 @@ pub(crate) fn update_binding(
             &current.cursor,
         ));
     }
+
+    // The same refusal a create gets, and for the same reason: an
+    // address a lease holds has one answer already, and a binding
+    // arriving at it by a change rather than by a create would be the
+    // same two answers reached by a longer route. Note that moving a
+    // binding *away* from an address is never refused by this, the
+    // check being on where it is going.
+    lease::require_address_unleased(&transaction, writing, network, selector, address)?;
 
     let sequence = event_binding_written(&transaction, network, selector, address, hostname, now)?;
 
@@ -1544,7 +1651,7 @@ pub(crate) fn snapshot_position(conn: &Connection) -> Result<u64> {
 }
 
 /// Turn a sequence number the engine issued into a position.
-fn sequence_as_position(sequence: i64) -> Result<u64> {
+pub(crate) fn sequence_as_position(sequence: i64) -> Result<u64> {
     u64::try_from(sequence).map_err(|_| Error::Malformed {
         detail: format!("it issued the sequence number {sequence}, which is not a position"),
     })

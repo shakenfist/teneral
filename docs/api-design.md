@@ -447,6 +447,57 @@ without a restart. Watch alone would not have fixed that, which
 is why the first path above exists and why the digest in the
 detection section does too.
 
+### Which address the daemon chooses, when it chooses
+
+The third path above is the one where the daemon picks. Unlike
+the selector precedence, most of this order is **not** this
+project's invention: RFC 2131 section 4.3.1 specifies it, and
+teneral implements what it specifies. The four steps, tried in
+turn:
+
+1. The address the client already holds under its current lease.
+2. The address it held under a lease that has since lapsed, if
+   that address is in the pool and nothing holds it.
+3. The address it asked for, if that address is valid and
+   nothing holds it.
+4. An address from the pool.
+
+The specification's keyword there is SHOULD rather than MUST, and
+it is worth saying so: this is the order a server ought to
+consider, not one a client may rely on. `provenance.md`'s
+`lease-address-selection-order` row carries the citation.
+
+Three things in teneral's implementation of that order are
+**teneral's own** and are published here for the same reason the
+selector precedence is -- a consumer that cannot tell a specified
+rule from an invented one cannot tell a bug from a disagreement:
+
+- **The pool offers the lowest free address.** The specification
+  says nothing whatever about which address the fourth step
+  picks; its only remark nearby is that a server *may*, for
+  example, choose the least recently used, and an example is not
+  a rule. The lowest free address is chosen because it is
+  deterministic, reproducible in a test, and expressible as a
+  statement over an integer column, where a counter or a hash of
+  the client's identity would be none of those.
+- **"Valid" means inside one of the network's configured
+  ranges.** There is nothing else in this daemon for a requested
+  address to be valid against, a network here not being a subnet.
+- **The pool never offers an address a binding reserves.** An
+  address held for a machine that happens to be switched off must
+  not go to somebody else, or the reservation becomes a conflict
+  the moment the machine comes back.
+
+Two consequences of the order are worth having in view. The
+second step means a client keeps getting its old address back
+after a lapse, for as long as the lapsed lease is still recorded
+-- so whatever interval eventually sweeps expired leases is also
+how long that stickiness lasts, and the two cannot be set
+independently. And the first step means a renewal and an
+allocation are the same request to this API: a client that
+already holds an address is given it again, with the lease id it
+already had, which is how a consumer tells that nothing changed.
+
 ## The watch primitive
 
 Everything about this is about what happens when a client has

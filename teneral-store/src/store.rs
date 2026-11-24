@@ -24,6 +24,16 @@
 //!    remove an existing resource take the cursor the caller read it
 //!    at and refuse if the resource has moved on. A read followed by
 //!    a write would be correct only until something got in between.
+//!    The two the specification names by hand are both here and both
+//!    are one method: [`BindingStore::create_binding`] refuses an
+//!    address a lease holds, and
+//!    [`BindingStore::create_binding_revoking_lease`] takes the lease
+//!    and writes the binding in one transaction. Note that two of
+//!    these methods compare an identity rather than a position --
+//!    [`BindingStore::renew_lease`] compares the client, and
+//!    [`BindingStore::create_binding_revoking_lease`] compares the
+//!    lease id -- because those are the tokens their callers have.
+//!    Each says so where it is declared.
 //! 4. **The network is a parameter of every method**, not a column
 //!    an implementation is trusted to filter on. The exceptions are
 //!    enumerated in each trait's doc comment below, because a reader
@@ -40,7 +50,7 @@ use async_trait::async_trait;
 use crate::cursor::Cursor;
 use crate::error::Result;
 use crate::identity::Epoch;
-use crate::model::{AddressRange, Attachment, Binding, Explanation, Network};
+use crate::model::{AddressRange, Attachment, Binding, Explanation, Lease, Network};
 use crate::selector::{ClientIdentity, Selector};
 
 /// The binding store: everything that changes it, and the two reads
@@ -284,6 +294,156 @@ pub trait BindingStore: Send + Sync {
         selector: &Selector,
         expected: &Cursor,
     ) -> Result<Cursor>;
+
+    /// Configure `network`'s answer for `selector`, taking the lease
+    /// that holds `address` away from its holder in the same
+    /// operation.
+    ///
+    /// Serves demands 1, 3 and 4, and it is the second of the two
+    /// operations the specification names as single ones. It is one
+    /// operation because both writes are in one transaction: a
+    /// refused binding rolls the revocation back with it, so there is
+    /// no state in which an address was taken from a client and the
+    /// binding that justified taking it was not written.
+    ///
+    /// `holder` is the lease id, which is the identity
+    /// [`BindingStore::create_binding`]'s refusal named. The lease id
+    /// changes when and only when the address changes holder, so a
+    /// renewal in between does not invalidate the instruction and a
+    /// reassignment does -- which is the distinction an operator
+    /// taking an address from a named client cares about, and the
+    /// reason the token is the id rather than the position of the
+    /// lease's last write.
+    async fn create_binding_revoking_lease(
+        &self,
+        network: &str,
+        selector: &Selector,
+        address: std::net::Ipv4Addr,
+        hostname: Option<&str>,
+        holder: &Cursor,
+    ) -> Result<Cursor>;
+
+    /// Record a client presenting `identity` as holding `address` in
+    /// `network` for `duration` seconds.
+    ///
+    /// Serves demands 1, 3 and 4. This is the path for an address
+    /// something else chose -- a reservation an operator configured,
+    /// or an address a consumer allocates elsewhere and wants the
+    /// store to agree with -- so the address does not have to fall
+    /// inside any of the network's ranges. A network with no range at
+    /// all is an ordinary configuration here, and a reservation
+    /// outside a pool is how an operator holds an address the pool
+    /// can never hand out.
+    ///
+    /// The compare-and-set is on the holder. An address this client
+    /// already holds is renewed and keeps its lease id; one whose
+    /// lease has lapsed is taken afresh with a new id, the holding
+    /// that ended not being the one that begins; one another client
+    /// holds is refused, naming the holder, because moving an address
+    /// between clients is something a caller has to ask for.
+    ///
+    /// Returns the position the write was assigned and the lease as
+    /// it now stands. The lease carries that same position, and both
+    /// are returned because each answers a different question: the
+    /// position orders the write against a stream the caller may be
+    /// watching, and the lease says which identity and which lease id
+    /// the address was recorded under without a second read at a
+    /// later position.
+    async fn acquire_lease(
+        &self,
+        network: &str,
+        identity: &ClientIdentity,
+        address: std::net::Ipv4Addr,
+        duration: i64,
+    ) -> Result<(Cursor, Lease)>;
+
+    /// Give a client presenting `identity` an address this store
+    /// chooses in `network`, for `duration` seconds.
+    ///
+    /// Serves demands 1, 3 and 4. The order the candidates are
+    /// considered in is specified -- the address the client already
+    /// holds, then the one it held until its lease lapsed, then the
+    /// one it asked for, then one from the pool -- and the choice of
+    /// the *lowest free* address within the pool is this project's,
+    /// the specification saying nothing about which address a pool
+    /// offers. [`crate::Lease`] and the store's own documentation
+    /// carry the citation and the reasoning.
+    ///
+    /// `requested` is what the client asked for, if it asked. It is
+    /// honoured only at its place in that order and only if the
+    /// address is allocatable, so a client cannot talk its way past a
+    /// lease or a reservation by asking.
+    ///
+    /// Returns the position and the lease, for the reason given on
+    /// [`BindingStore::acquire_lease`].
+    async fn allocate_lease(
+        &self,
+        network: &str,
+        identity: &ClientIdentity,
+        requested: Option<std::net::Ipv4Addr>,
+        duration: i64,
+    ) -> Result<(Cursor, Lease)>;
+
+    /// Extend the lease on `address` in `network` by `duration`
+    /// seconds, keeping its lease id.
+    ///
+    /// Serves demands 1, 3 and 4, and its compare-and-set is on
+    /// identity rather than on a position -- which is the form demand
+    /// 3 asks for and the only one this caller can satisfy. A renewal
+    /// arrives as a client's request on the wire, carrying what the
+    /// client presents and no position in the store's order. So the
+    /// refusals are the two an identity can decide: an address held
+    /// by another client is refused and names it, and an address
+    /// whose lease has lapsed is refused as having no live lease,
+    /// because the address was free in the interim and may have been
+    /// given away. A client in that position acquires again, and
+    /// acquiring is what issues a new lease id.
+    async fn renew_lease(
+        &self,
+        network: &str,
+        address: std::net::Ipv4Addr,
+        identity: &ClientIdentity,
+        duration: i64,
+    ) -> Result<Cursor>;
+
+    /// Take the lease on `address` in `network` away, which must
+    /// still be at `expected`.
+    ///
+    /// Serves demands 1, 3 and 4. One method for two callers, because
+    /// they are the same write: an operator taking an address back,
+    /// and a front-end handling a client that has given one up. Both
+    /// have the position, having read the lease in order to decide.
+    ///
+    /// A lapsed lease may be revoked. Nothing holds the address, but
+    /// the row is still there, and removing it is how a caller says
+    /// so deliberately rather than waiting for a sweep.
+    async fn revoke_lease(
+        &self,
+        network: &str,
+        address: std::net::Ipv4Addr,
+        expected: &Cursor,
+    ) -> Result<Cursor>;
+
+    /// Record the expiry of every lease in `network` whose instant has
+    /// passed, and remove the rows.
+    ///
+    /// Serves demands 1, 4 and 5, and it is worth being plain about
+    /// what it is *not*. Nothing in this store waits for it. Every
+    /// read evaluates expiry itself and every allocation refuses an
+    /// address a live lease holds, so a sweeper that never runs
+    /// leaves the store's answers correct and only its history quiet
+    /// -- which is the point: a sweeper that dies cannot cause a
+    /// double allocation. Its one job is to turn expiries into events
+    /// so that a consumer watching the history is told an address was
+    /// given up rather than left to compare an instant against its
+    /// own clock. Nothing written later should come to depend on this
+    /// having run.
+    ///
+    /// Returns the position of the last event it wrote and the leases
+    /// it removed. The position is `None` when nothing had expired: a
+    /// sweep that removed nothing wrote nothing, and reporting a
+    /// position for it would invent one.
+    async fn sweep_expired_leases(&self, network: &str) -> Result<(Option<Cursor>, Vec<Lease>)>;
 }
 
 /// A view of the store frozen at one position in its order.
@@ -465,4 +625,45 @@ pub trait ReadHandle: Send {
         ifname: &str,
         identity: &ClientIdentity,
     ) -> Result<Explanation>;
+
+    /// Every lease in `network`, lowest address first.
+    ///
+    /// Serves demand 4. Expired leases are included, each saying so,
+    /// because an address that is free and still remembered is the
+    /// thing an operator most needs to see and because hiding them
+    /// would make a sweep's effect invisible.
+    async fn leases(&self, network: &str) -> Result<Vec<Lease>>;
+
+    /// The lease on `address` in `network`, or `None` if there has
+    /// never been one or it has been revoked or swept.
+    ///
+    /// Serves demand 4. A lease whose instant has passed is returned,
+    /// marked expired, rather than treated as absent: nothing holds
+    /// the address, and that is a different fact from nothing having
+    /// held it.
+    async fn lease(&self, network: &str, address: std::net::Ipv4Addr) -> Result<Option<Lease>>;
+
+    /// Every lease in `network` held by a client presenting
+    /// `identity`.
+    ///
+    /// Serves demand 4, and it is the query the resource model asks
+    /// for by name -- "answering 'what does this client hold' is the
+    /// thing the existing consumer cannot do today". It is a store
+    /// operation rather than a filter a caller applies to a list of
+    /// everything, which is the difference between an indexed read
+    /// inside one network and a listing a caller could accidentally
+    /// take across two.
+    ///
+    /// The answer is a list because a lease is keyed by address: a
+    /// client moving from one address to another holds both for a
+    /// moment, and that is the case the key exists to allow. It is
+    /// ordered by the precedence of the attribute each lease was
+    /// recorded against and then by address, so a caller that wants
+    /// one lease may take the first and get the same one every time.
+    ///
+    /// Expired leases are included, flagged. A lapsed lease is how
+    /// the store remembers which address a client used to have, which
+    /// is a step of the address selection order, so hiding it would
+    /// hide the input to that step.
+    async fn leases_held_by(&self, network: &str, identity: &ClientIdentity) -> Result<Vec<Lease>>;
 }

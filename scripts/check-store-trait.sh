@@ -19,6 +19,14 @@
 #      silently misses a change is the project's signature failure
 #      mode, in the layer meant to prevent it.
 #
+# A mutating method is recognised by the verb its name begins with, so
+# a write whose verb is not in that list below gets only the weaker
+# check that it returns something. Adding a write means adding its verb
+# in the same commit; the list is deliberately a list of verbs rather
+# than a guess from the signature, because `fn lease(...)` reads a
+# lease and `fn renew_lease(...)` writes one, and nothing about their
+# types says which.
+#
 # The enumerated exceptions are read out of the trait's doc comment, so
 # the list a reader sees and the list this script trusts cannot drift
 # apart: there is only one. A name enumerated that is not a method of
@@ -144,7 +152,7 @@ function check(signature,    name, returns, scope, mutating, verdict, at) {
     }
 
     scope = (signature ~ /[,(] ?network ?:/) ? "network" : "global"
-    mutating = (name ~ /^(create|delete|update|set|attach|detach|claim|release|revoke|renew|allocate|truncate|evict)([_A-Z]|$)/)
+    mutating = (name ~ /^(create|delete|update|set|attach|detach|claim|release|acquire|revoke|renew|allocate|sweep|truncate|evict)([_A-Z]|$)/)
 
     verdict = "ok"
     if (scope == "global" && !(name in global)) {
