@@ -89,6 +89,19 @@ started. Each is gated on the files it has an opinion about: starting
 a container costs seconds, and a hook that does it on every unrelated
 commit is a hook people learn to skip.
 
+One check is run by hand rather than hooked.
+`scripts/check-store-trait.sh` reads the binding store's traits and
+asserts the two things about their shape that fail silently when they
+are broken: that every method names the network it applies to unless
+the trait's own doc comment enumerates it as store-global, and that
+every mutating method returns the position it was assigned rather than
+nothing. It reads the enumerated exceptions out of the doc comment
+itself, so the list a reader sees and the list the script trusts
+cannot drift apart, and it reports an enumerated name that is no
+longer a method there. It parses Rust with `awk`, which is adequate
+for a trait of declarations and is not a thing to put in front of
+every commit in the repository; run it when the traits change.
+
 `cargo deny`'s advisory check is deliberately not a hook. Its answer
 changes when somebody publishes to the RustSec database, so as a
 commit hook it would fail a commit touching no Rust at all, for a

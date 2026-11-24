@@ -14,6 +14,8 @@ use std::error::Error as StdError;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::cursor::Cursor;
+
 /// The result of a store operation.
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -70,6 +72,103 @@ pub enum Error {
         /// What was wrong with it.
         detail: String,
     },
+
+    /// An operation named a network the store does not have.
+    ///
+    /// Distinct from a resource inside a network being absent,
+    /// because the two have different causes and different fixes: a
+    /// caller that has the network wrong is misconfigured, where one
+    /// that has the resource wrong is usually racing something.
+    UnknownNetwork {
+        /// The network that was named.
+        network: String,
+    },
+
+    /// The resource the operation was to act on is not there.
+    NotFound {
+        /// What kind of resource was being looked for.
+        kind: &'static str,
+        /// Which one, within the network that was asked about.
+        id: String,
+    },
+
+    /// The operation would have collided with something already
+    /// configured, and the thing it collided with is named.
+    ///
+    /// Naming it is the point of the variant. "An interface belongs
+    /// to exactly one network" is the single most important refusal
+    /// the store makes, and an operator who is told only that the
+    /// claim failed has to go looking for which network holds it --
+    /// which is the moment they are most likely to guess.
+    Conflict {
+        /// What kind of resource was being written.
+        kind: &'static str,
+        /// The one that was asked for.
+        id: String,
+        /// What is in the way, in a form an operator can act on.
+        held_by: String,
+    },
+
+    /// The resource moved on between the caller reading it and asking
+    /// for it to be changed.
+    ///
+    /// The store offers compare-and-set rather than a read followed
+    /// by a write because the latter is correct only until something
+    /// gets in between. This is that refusal: both positions are
+    /// reported, so a caller can tell a change it raced from a cursor
+    /// it never held, and so that an epoch from a restored backup is
+    /// visible rather than merely unequal.
+    Changed {
+        /// What kind of resource it is.
+        kind: &'static str,
+        /// Which one.
+        id: String,
+        /// The position the caller expected it to be at.
+        expected: String,
+        /// The position it is actually at.
+        found: String,
+    },
+
+    /// A name or a value the store will not store.
+    ///
+    /// The store validates the few things it would otherwise have to
+    /// encode or compare later: a name it renders into an event's
+    /// identity cannot contain the separator used to render it, and
+    /// an empty or control-laden name is one that will be unreadable
+    /// in every log that reports it.
+    Invalid {
+        /// What was being named or set.
+        what: &'static str,
+        /// Why it was refused.
+        detail: String,
+    },
+
+    /// The store could not start a thread it needs.
+    ///
+    /// The database is confined to threads the store owns, so one it
+    /// cannot start is a store it cannot open or a view it cannot
+    /// hand out. Distinct from a storage failure because the medium
+    /// is fine and the host is not: the fix is a limit somewhere in
+    /// the process, not a disk.
+    Threads {
+        /// What the thread was to have done.
+        context: &'static str,
+        /// The operating system's complaint.
+        source: Box<dyn StdError + Send + Sync>,
+    },
+
+    /// The store cannot do any more work: the thread that owns the
+    /// database has stopped.
+    ///
+    /// A variant of its own because the alternative is worse than an
+    /// error. The store confines the database to threads it owns and
+    /// speaks to them over channels, so a thread that has gone leaves
+    /// a channel that no longer answers -- and a caller told nothing
+    /// would be a caller that believes a write it never got happened.
+    Unavailable {
+        /// What the caller was trying to do.
+        context: String,
+    },
 }
 
 impl Error {
@@ -81,6 +180,43 @@ impl Error {
     pub(crate) fn storage(context: impl Into<String>, source: rusqlite::Error) -> Self {
         Error::Storage {
             context: context.into(),
+            source: Box::new(source),
+        }
+    }
+
+    /// The refusal of a compare-and-set whose expected position is
+    /// not where the resource is.
+    ///
+    /// Both cursors are rendered here rather than carried as values,
+    /// so that the error type does not grow a field whose only
+    /// purpose is to be printed, and so that the epoch travels with
+    /// the sequence number in the message an operator reads.
+    pub(crate) fn changed(
+        kind: &'static str,
+        id: impl Into<String>,
+        expected: &Cursor,
+        found: &Cursor,
+    ) -> Self {
+        Error::Changed {
+            kind,
+            id: id.into(),
+            expected: expected.to_string(),
+            found: found.to_string(),
+        }
+    }
+
+    /// The refusal that follows a thread owning the database having
+    /// stopped.
+    pub(crate) fn unavailable(context: impl Into<String>) -> Self {
+        Error::Unavailable {
+            context: context.into(),
+        }
+    }
+
+    /// The refusal that follows the host declining to start a thread.
+    pub(crate) fn threads(context: &'static str, source: std::io::Error) -> Self {
+        Error::Threads {
+            context,
             source: Box::new(source),
         }
     }
@@ -122,6 +258,35 @@ impl fmt::Display for Error {
             Error::Malformed { detail } => {
                 write!(f, "the database is not a teneral store: {detail}")
             }
+            Error::UnknownNetwork { network } => {
+                write!(f, "there is no network called {network}")
+            }
+            Error::NotFound { kind, id } => write!(f, "there is no {kind} {id}"),
+            Error::Conflict { kind, id, held_by } => {
+                write!(f, "the {kind} {id} cannot be written: {held_by}")
+            }
+            Error::Changed {
+                kind,
+                id,
+                expected,
+                found,
+            } => write!(
+                f,
+                "the {kind} {id} was at {expected} when it was read and is at {found} now, so the \
+                 change was computed from a state it has left"
+            ),
+            Error::Invalid { what, detail } => write!(f, "that {what} will not do: {detail}"),
+            Error::Threads { context, source } => {
+                write!(
+                    f,
+                    "the store could not start a thread to {context}: {source}"
+                )
+            }
+            Error::Unavailable { context } => write!(
+                f,
+                "the store has stopped and cannot {context}; the thread owning its database is \
+                 gone"
+            ),
         }
     }
 }
@@ -129,8 +294,11 @@ impl fmt::Display for Error {
 impl StdError for Error {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
-            Error::Storage { source, .. } => Some(source.as_ref()),
-            Error::SchemaAhead { .. } | Error::Pragma { .. } | Error::Malformed { .. } => None,
+            Error::Storage { source, .. } | Error::Threads { source, .. } => Some(source.as_ref()),
+            // Every other variant is the store's own refusal rather
+            // than a failure underneath it, so there is nothing below
+            // it to report.
+            _ => None,
         }
     }
 }

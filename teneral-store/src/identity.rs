@@ -31,6 +31,17 @@ impl Epoch {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// An epoch with a value a test chose.
+    ///
+    /// Only a test may make one. Every other epoch comes from the
+    /// engine when the database is created, which is what makes "two
+    /// stores do not share an epoch" true by construction rather than
+    /// by nobody having written the constructor that breaks it.
+    #[cfg(test)]
+    pub(crate) fn for_test(value: &str) -> Self {
+        Self(value.to_owned())
+    }
 }
 
 impl fmt::Display for Epoch {

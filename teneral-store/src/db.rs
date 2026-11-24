@@ -77,6 +77,65 @@ impl Database {
     pub fn schema_version(&self) -> Result<u32> {
         schema::user_version(&self.writer)
     }
+
+    /// The write connection, for a statement that only reads.
+    ///
+    /// Crate-private, and the only way anything reaches the
+    /// connection at all. Nothing outside this crate can obtain one,
+    /// which is what makes "every operation names the network it
+    /// applies to" a property of the published surface rather than a
+    /// convention somebody polices in review.
+    pub(crate) fn connection(&self) -> &Connection {
+        &self.writer
+    }
+
+    /// The write connection, for a statement that writes.
+    ///
+    /// Mutable because a transaction borrows the connection
+    /// exclusively, and every write here runs in one.
+    pub(crate) fn connection_mut(&mut self) -> &mut Connection {
+        &mut self.writer
+    }
+}
+
+/// Open a connection for a view of the store, which only ever reads.
+///
+/// Three differences from the write connection, each worth its line.
+///
+/// The create flag is left out, so the file has to be there already:
+/// a view of a database that does not exist is a mistake, and an
+/// empty one created here would answer every question with "nothing"
+/// rather than saying so.
+///
+/// `query_only` is what stops anything writing through this
+/// connection -- the engine refuses the statement rather than
+/// allowing a write that nothing serialises against the writer
+/// thread. Note that the *read-only* open flag is deliberately not
+/// how that is done: under the write-ahead log a reader has to write
+/// to the shared-memory index beside the database, and a connection
+/// opened read-only has to fall back to a mode that works only while
+/// the log is empty. `query_only` refuses writes to the data without
+/// taking away the bookkeeping a reader needs.
+///
+/// No journal mode is asked for, because the journal is a property of
+/// the file rather than of a connection, and a reader that set it
+/// would be changing something it does not own.
+pub(crate) fn open_read_connection(path: &Path) -> Result<Connection> {
+    let connection = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(|error| {
+            Error::storage(
+                format!("opening a view of the store at {}", path.display()),
+                error,
+            )
+        })?;
+
+    apply_connection_pragmas(&connection)?;
+
+    connection
+        .execute_batch("PRAGMA query_only = ON;")
+        .map_err(|error| Error::storage("making a view of the store read-only", error))?;
+
+    Ok(connection)
 }
 
 /// The pragmas every connection the store opens carries, read or

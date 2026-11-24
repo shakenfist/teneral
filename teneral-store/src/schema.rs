@@ -23,7 +23,7 @@ use crate::error::{Error, Result};
 /// above it is refused. Adding a migration raises this, in the same
 /// commit, and the test at the foot of this file is what notices if
 /// only one of the two happened.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// One step from the version below it to its own.
 struct Migration {
@@ -39,10 +39,16 @@ struct Migration {
 /// here. It is the part of this crate a reviewer reads most closely,
 /// and a `.sql` file is the form in which an identity or a constraint
 /// can be read without a Rust compiler in the way.
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    sql: include_str!("migrations/0001_foundations.sql"),
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        sql: include_str!("migrations/0001_foundations.sql"),
+    },
+    Migration {
+        version: 2,
+        sql: include_str!("migrations/0002_resources.sql"),
+    },
+];
 
 /// Bring a database up to [`SCHEMA_VERSION`], or refuse it.
 ///
