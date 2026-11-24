@@ -30,8 +30,8 @@ below were all taken before any code existed, in a lab that was
 deliberately not kept: a measurement recorded only in a running
 lab is a measurement that disappears with it.
 
-Every row below is an observed behaviour rather than an RFC
-citation, measured on 2026-11-21 in the Linux-bridge lab whose
+All but one of the rows below are observed behaviour rather than
+an RFC citation, measured on 2026-11-21 in the Linux-bridge lab whose
 write-up is `docs/linux-bridge-lab.md` in the private
 `homelab-deployments-lfs` repository -- dnsmasq 2.91 on Debian 13,
 kernel `6.12.117+deb13-amd64`, CPython 3.13.5. The `Citation`
@@ -39,8 +39,16 @@ column names that document's experiment and the heading within it
 that holds the command and its verbatim output. None of these rows
 is a reading of anybody's source, and none of them should be
 restated as "what dnsmasq does" without the measurement behind it.
-RFC rows arrive with the first front-end that implements a
-specified algorithm.
+
+The exception is `selector-client-id-over-chaddr`, which is this
+file's first RFC-cited row and arrived with the binding store
+rather than with a front-end. That order was expected: the
+sentence here used to say RFC rows would arrive with the first
+front-end implementing a specified algorithm, and it was wrong
+because the store's lookup is where client identification is
+decided, several phases before anything parses a packet. An RFC
+row is owed by whichever layer implements the specified rule,
+which is not always the layer that puts bytes on a wire.
 
 The `Row id` column is a stable name for the row, and it exists so
 that something other than a human can check the citation. A case in
@@ -85,3 +93,4 @@ same commit as the cases.
 | `dhcp-broadcast-flag-not-permission` | **A client that sent `broadcast=false` in its BOOTP flags accepted a reply broadcast to `255.255.255.255`** in every one of seven successful transactions, so a clear BROADCAST flag is not permission to unicast. | Observed, Linux 6.12 / CPython 3.13 | `linux-bridge-lab.md`, experiment 5 -> *3.*, *4.* and *6.* |
 | `netns-capability-set` | **The capability set for serving many namespaces from one process**: `CAP_SYS_ADMIN` for `setns(CLONE_NEWNET)`, `CAP_NET_BIND_SERVICE` for port 67, `CAP_NET_RAW` for `AF_PACKET` and nothing else -- measured as a six-row matrix at uid 1000, with the two-network exchange then running unprivileged holding the first two. Opening `/var/run/netns/<ns>` needs no privilege at all. | Observed, Linux 6.12 / CPython 3.13 | `linux-bridge-lab.md`, experiment 5 -> *7. The capability set, and it is not root* |
 | `netns-held-fd-keeps-namespace` | **A held file descriptor keeps a deleted network namespace alive, with its interfaces**, after `ip netns del` has removed the name and the mount and the descriptor no longer resolves to a path. | Observed, Linux 6.12 / CPython 3.13 | `linux-bridge-lab.md`, experiment 5 -> *8. A held descriptor keeps a deleted namespace alive* |
+| `selector-client-id-over-chaddr` | **A client identifier outranks the hardware address when identifying a client.** Where a client supplies a client identifier, a server MUST use that identifier to identify the client; the contents of `chaddr` are the MUST-use fallback only where no client identifier was supplied. This fixes the top two places of teneral's selector precedence, whose remaining steps are unspecified and are documented as this project's own in `api-design.md` rather than given a row here. | RFC 2131 section 4.2 | RFC 2131 s4.2; the order is asserted by `the_precedence_is_the_published_one` and `the_highest_precedence_selector_a_client_presents_is_the_one_that_matches` |

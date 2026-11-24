@@ -186,11 +186,22 @@ one. This is what keeps the store the single source of truth
 rather than one of two.
 
 **A conflict is reported, never resolved.** Two writers
-asserting the same address in one network, an interface claimed
-by a second network, a binding whose address falls outside every
-range in its network: each is refused with the conflicting party
-named. Nothing is silently merged, because the whole failure
-mode here is a silently wrong answer.
+asserting the same address in one network, or an interface
+claimed by a second network: each is refused with the
+conflicting party named. Nothing is silently merged, because the
+whole failure mode here is a silently wrong answer.
+
+This rule used to name a third conflict -- a binding whose
+address falls outside every range in its network -- and that was
+wrong, so it is struck rather than quietly left out. A
+static-only network has no range at all, which this document
+describes a few paragraphs below as Shaken Fist's ordinary case,
+and under the struck rule every binding in such a network would
+have been refused. Even where a network does have a pool, a
+reservation outside it is the usual way to hold an address the
+pool can never hand out. Range containment is therefore not a
+conflict, and the decidable conflict in this area is a binding
+against an address a lease currently holds.
 
 ## The resource model
 
@@ -340,17 +351,39 @@ here, which did the operator most likely mean for *this*
 client", and the answer is the narrowest, because the broad ones
 are there to catch the clients the narrow ones do not name.
 
-Nothing is written about this in `docs/provenance.md`, and the
-absence is deliberate. That file admits two kinds of source, an
-RFC section or a named observed-behaviour test, and this order
-has neither: no standard fixes an order among these five
-attributes, and measuring another implementation would record
-that implementation's choice rather than a fact about the
-protocol. A row citing nothing would make the file's rule
-meaningless, and that rule is the only thing keeping this
-project able to say where its behaviour came from. The order's
-source is this document, which is why the API publishes it and
-why every lookup reports which selector it applied.
+One step of this order is not teneral's to choose, and saying so
+matters more than the tidiness of claiming the whole of it.
+**RFC 2131 section 4.2 is normative on the client identifier
+outranking the hardware address**: where a client supplies a
+client identifier the server MUST use that identifier to
+identify the client, and the contents of `chaddr` are the
+MUST-use fallback only where no client identifier was supplied.
+That is a specified rule rather than a preference, it is cited
+in `docs/provenance.md` as the `selector-client-id-over-chaddr`
+row, and it is why the first two individual identities here sit
+where they do rather than where an operator's habits would put
+them. RFC 2131 section 4.3.1 is weaker and points the same way
+for the class attributes: it requires that configuration
+parameters be selected by applying its rules in the order it
+gives, and the client-specific rule precedes the vendor-class
+rule -- but it stops short of saying that a later rule overrides
+an earlier one, so it supports individual-before-class without
+settling it.
+
+The rest is this project's own and gets no provenance row, and
+that half of the arrangement is deliberate. Where the DUID and
+IAID sit relative to the client identifier, whether the user
+class outranks the vendor class, and the override semantics that
+make this a precedence at all rather than a list of rules to
+apply in turn, are all unspecified. That file admits two kinds
+of source, an RFC section or a named observed-behaviour test,
+and measuring another implementation would record that
+implementation's choice rather than a fact about the protocol. A
+row citing nothing would make the file's rule meaningless, and
+that rule is the only thing keeping this project able to say
+where its behaviour came from. For those parts the source is
+this document, which is why the API publishes the order and why
+every lookup reports which selector it applied.
 
 **Content blobs are scoped tightest.** A blob is keyed by
 network, by selector or the explicit word for "any client in
