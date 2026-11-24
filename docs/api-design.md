@@ -564,6 +564,26 @@ as eviction. The epoch still does the job it is load-bearing
 for, which is telling two stores' orders apart; noticing that
 one store's order has been rewound is the third answer's.
 
+That leaves a hole, and it is named here rather than left for a
+consumer to find. The third answer catches a consumer whose
+position is *ahead* of the restore point. A consumer whose
+position is at or below it is not caught by anything: its cursor
+is one the restored store has issued, so it resumes, and the
+events it is given are different events under numbers it has
+already seen. That is precisely the failure the epoch is named
+for, and against a restore of the same file the epoch cannot
+prevent it, because the restore brings the epoch back too.
+
+The remedy is an operator action rather than a mechanism, and it
+belongs in the restore procedure: after restoring a store from a
+backup, mint a new epoch before any consumer reconnects. That
+makes the restored store honestly a different store, which from
+a consumer's point of view is what it is -- it has a different
+history under the same name. Nothing offers that operation yet;
+until something does, a restore is a resync for every consumer
+by convention rather than by construction, and a daemon that
+skips the convention is serving the project's signature failure.
+
 Truncation does not change the epoch either, and that is
 deliberate rather than an omission. Retention is per daemon
 rather than per client, so a history truncated past what one

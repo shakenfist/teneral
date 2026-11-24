@@ -18,11 +18,29 @@
 -- The epoch is the half of a cursor that says whose sequence numbers
 -- these are. A consumer that has been away presents a cursor, and the
 -- epoch is what separates "carry on from here" from "that number
--- belongs to a history that no longer exists" -- a restore from a
--- backup, or a log truncated past what the consumer still holds.
--- Without it, a restored daemon issues sequence numbers a consumer
--- has already seen, attached to different events, and nothing about
--- the stream looks wrong.
+-- belongs to another store's history". Without it, a consumer pointed
+-- at a different store -- a fresh file at the same path, a second
+-- daemon, a database recreated after being deleted -- is handed
+-- sequence numbers it recognises attached to somebody else's events,
+-- and nothing about the stream looks wrong.
+--
+-- Be precise about what it does NOT cover, because this comment used
+-- to claim more. It does not detect this same store restored from a
+-- backup. The epoch lives in this table, so a file-level restore
+-- brings it back unchanged, together with a sequence counter wound
+-- back to the backup. A consumer whose position is ahead of the
+-- restore point is caught, by presenting a position the store never
+-- issued; a consumer whose position is at or below the restore point
+-- is not caught at all, and is served different events under numbers
+-- it has already seen. That is the failure this value is named for,
+-- and against a restore it does not prevent it.
+--
+-- The remedy is an operator action rather than a mechanism here:
+-- after restoring a store from a backup, mint a new epoch before any
+-- consumer reconnects, which makes the restored store honestly a
+-- different store. Nothing in this crate offers that yet, and the
+-- gap is recorded in the plan's future work rather than left to be
+-- discovered by a consumer holding a stale cursor.
 --
 -- The value is generated here, by the engine, at the instant the
 -- store is created: sixteen random bytes as lower-case hex. Doing it

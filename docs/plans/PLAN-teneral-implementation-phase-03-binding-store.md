@@ -284,9 +284,23 @@ the crates.io API the same day.
      an async object whose methods are channel round-trips; the
      cursor it reports is the one captured when its transaction
      opened, and dropping the handle ends the transaction and the
-     thread. Because a handle costs a thread, the number alive at
-     once is bounded and the bound is the store's to enforce --
-     3e names it.
+     thread.
+
+     Because a handle costs a thread, the number alive at once
+     wants bounding. This sentence first said the bound was the
+     store's to enforce and that step 3e would name it, which was
+     an error in writing this decision: 3e's row says nothing
+     about it, so the promise was made to a step that was never
+     told to keep it, and 3e correctly reported the
+     inconsistency rather than inventing a policy. **Settled as
+     phase 4's**, with the store doing the half that is
+     genuinely its own: `live_views()` reports the count, so the
+     bound is enforceable from above. Refusing to open a view
+     needs a policy and an error a consumer expects, and both of
+     those are the control plane's vocabulary rather than the
+     store's -- phase 4 is also the layer that knows how many
+     concurrent consumers there are. Recorded in the master
+     plan's *Future work* so it cannot be lost between the two.
 
    Note what this preserves from the decision it replaces, since
    that reasoning was sound and only its conclusion was wrong.
@@ -924,6 +938,108 @@ so it is usable as a gate; 39 tests pass; the attachment
 constraint is refused by the database with `UNIQUE constraint
 failed: attachment.namespace, attachment.ifname`; and the three
 `unused dependency` warnings from 3a have cleared.
+
+**2026-11-25 (AEDT): step 3e. The history's read semantics, the
+retention bound, and the digest.** Four answers to a presented
+cursor rather than the three the row asked for, and the fourth
+is a finding rather than scope creep. `docs/api-design.md` said
+the epoch changes when a store is restored from a backup or when
+its history is truncated. Neither is implementable here and the
+second would be actively wrong: the epoch lives in the database
+file, so a file-level restore brings it back with a rewound
+sequence counter, and changing it on truncation would resync
+every *present* consumer because one absent one fell behind --
+against that document's own rule that retention is per daemon
+and not per client. So a restore is visible only as a consumer
+presenting a position the store never issued, which is a fourth
+answer (`NeverIssued`) rather than eviction; reporting it as
+eviction would claim something was discarded when nothing was
+there, which is the distinction the low-water mark exists for.
+Corrected at source in `docs/api-design.md`.
+
+**The review took that finding one step further, and it is the
+uncomfortable one.** `NeverIssued` catches a consumer whose
+position is ahead of the restore point. A consumer at or below
+it is caught by nothing: its cursor is one the restored store
+has issued, so it resumes, and it is served different events
+under numbers it has already seen. That is exactly the failure
+the epoch is named for -- migration `0001`'s own comment claimed
+the epoch prevents it -- and against a restore of the same file
+it does not, because the restore brings the epoch back. Verified
+by reading the code: the epoch is generated once, in that
+migration, and only ever read. The comment is corrected to say
+what the value does and does not cover, and
+`docs/api-design.md` now carries the hole and its remedy, which
+is an operator action: after a restore, mint a new epoch before
+any consumer reconnects. Nothing offers that operation yet, so
+it goes to *Future work* as the fourth item below.
+
+Retention is 50,000 events and seven days, count operative,
+parameterised at open with that default. The count leads because
+the event rate between a home network and a hypervisor fleet
+differs by orders of magnitude: 50,000 is hours at a fleet's
+rate and months at a home network's, and 50,000 rows of this
+shape is tens of megabytes. The week is a ceiling on a quiet
+store's log rather than a resume promise. Truncation is a
+sequence floor only, so the retained log is always a suffix and
+one number describes what is gone; it runs inside the appending
+write's transaction, and a write cannot learn its cursor without
+it having run. Parameterising it was a judgement call and the
+right one -- otherwise the bound is testable only by writing
+50,000 events, and the window is genuinely a property of a
+deployment.
+
+The digest is the highest cursor sequence among a network's
+*configured* rows plus a count of them, which cannot move when
+another network changes because every statement behind it is
+scoped by network. Leases are excluded deliberately: the digest
+is for comparing configuration a consumer wrote, and a lease
+changing on its own would make it change for a consumer that
+had written nothing. Returning a configuration to a previous
+state returns the digest to its previous value, which is
+tested, and two networks' digests are not comparable with each
+other, which is documented.
+
+Definition-of-done item 18 is met and better than it asked.
+`a_snapshot_is_a_consistent_view_and_a_resume_joins_it_exactly_once`
+proves the snapshot does not move while a writer commits, that
+the view's own history after its own position is empty, that a
+resume from the snapshot's cursor delivers the write exactly
+once, that there is no gap (the delivered event's sequence is
+the snapshot's plus one), and that resuming again delivers
+nothing. Re-run in review against the mutant that matters:
+changing the history's `seq > ?` to `seq >= ?` fails it, along
+with the single-network scoping test.
+
+**A promise this plan made to a step that was never told to keep
+it.** Decision 3, as rewritten after the back brief, said a
+bound on concurrently live read handles was the store's to
+enforce and that 3e would name it. 3e's row says no such thing.
+The step reported the inconsistency instead of inventing a
+policy, which was right. Settled in decision 3: the bound is
+phase 4's, the store keeps the half that is its own in
+`live_views()`, and refusing to open a view needs an error a
+consumer expects, which is the control plane's vocabulary. In
+*Future work* as the fifth item.
+
+**Departures.** SQL now lives in a third module, `history.rs`,
+with `ops.rs`'s rule amended as 3d amended it. `ops::kind` is
+replaced by a public `EventKind`, so the log's kind strings are
+written and parsed from one list rather than two. Snapshot
+states are built by `json_object` a second time, so that a
+snapshot event and a live event are interchangeable to a
+consumer; that duplication is held by a test comparing them
+across all five kinds rather than by construction, which the
+step named as the one place here where that is true. `snapshot`
+and `digest` refuse an unknown network rather than answering
+empty, because a complete snapshot is what a consumer deletes
+local state against. The brief's line numbers into
+`docs/api-design.md` were stale by then, 3c and 3d having grown
+the file -- worth remembering when writing 3f's.
+
+Verified in review rather than taken on report: 113 tests, 40
+trait methods with `history_everywhere` correctly enumerated as
+store-global, 28 provenance rows, and every gate clean.
 
 **2026-11-25 (AEDT): step 3d. Leases, and a second plan premise
 corrected -- this time by the step, before it could become a
