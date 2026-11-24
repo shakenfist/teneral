@@ -269,11 +269,24 @@ pool can be resized under a lease that is already held, and
 cascading that into a revocation would take an address away from a
 client still using it.
 
-Every index in the schema leads with the network. An index on an
-address or a holder alone would answer a question nothing should be
-asking -- which networks hold this MAC -- and a lookup that can be
-answered without naming a network is the shape that serves one
-network's answer to another.
+Every index over a network's own rows leads with the network. An
+index on an address or a holder alone would answer a question
+nothing should be asking -- which networks hold this MAC -- and a
+lookup that can be answered without naming a network is the shape
+that serves one network's answer to another.
+
+There is exactly one index that does not, and it is worth knowing
+which so that it is not mistaken for an oversight:
+`event_log_by_time`, on the recorded time and the sequence, which
+serves the age half of the retention bound. That bound is
+store-global by construction, because the event log is one order
+over every network together and truncating it is a single floor
+rather than a floor per network. An index leading with the network
+could not answer "what is older than this" without visiting every
+network in turn. Nothing routes a read of a network's data through
+it: it exists for the sweep of the log itself, which is the one
+operation in the store that is legitimately not scoped to a
+network.
 
 ## Client identity and selector precedence
 

@@ -939,6 +939,32 @@ constraint is refused by the database with `UNIQUE constraint
 failed: attachment.namespace, attachment.ifname`; and the three
 `unused dependency` warnings from 3a have cleared.
 
+**2026-11-25 (AEDT): step 3f reviewed.** The documentation is
+disciplined -- `AGENTS.md` gained one convention and lost one
+false sentence, `ARCHITECTURE.md` changed only where the shape
+did, and `README.md`'s two changes are both ones its rule
+permits. The step also corrected a stale doc comment on
+`ReadHandle::history`, which still spoke of "the three reasons"
+after 3e made four answers; that was ambiguous rather than
+wrong, there being three *refusals*, and naming them is an
+improvement.
+
+One claim in `docs/binding-store.md` was false and is corrected:
+"every index in the schema leads with the network". Five of the
+six do; `event_log_by_time`, on the recorded time and the
+sequence, does not. That one is legitimate -- it serves the age
+half of the retention bound, which is store-global by
+construction because the log is one order over every network and
+its truncation is a single floor -- but a blanket claim that the
+schema breaks is worse than no claim, in a page whose whole
+value is being trustworthy about this. Verified before
+rewriting: the only query filtering on `recorded_at` is the one
+computing the age bound's sequence floor, and the network-scoped
+history read is served by `event_log_by_network`. The page now
+names the exception and says why it is one, which matters
+because an index not scoped by network is exactly the shape
+`AGENTS.md` warns about.
+
 **2026-11-25 (AEDT): step 3e. The history's read semantics, the
 retention bound, and the digest.** Four answers to a presented
 cursor rather than the three the row asked for, and the fourth
