@@ -157,6 +157,16 @@ mod tests {
     /// 2 `FULL` and 3 `EXTRA`.
     const SYNCHRONOUS_FULL: i64 = 2;
 
+    /// `NORMAL`, which is what the guard test below turns a
+    /// connection down to so that the pragma has something to change.
+    const SYNCHRONOUS_NORMAL: i64 = 1;
+
+    /// What `PRAGMA synchronous` reads back as on `conn`.
+    fn synchronous(conn: &Connection) -> i64 {
+        conn.query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap()
+    }
+
     /// Append one event with the engine directly.
     ///
     /// There is no write path through the store yet, and this test
@@ -256,12 +266,48 @@ mod tests {
         let store = TempStore::new("synchronous");
         let database = Database::open(store.path()).unwrap();
 
-        let synchronous: i64 = database
-            .writer
-            .query_row("PRAGMA synchronous", [], |row| row.get(0))
-            .unwrap();
+        // As with foreign keys, this asserts the property and does
+        // not guard the line that provides it: the engine this crate
+        // compiles would read FULL here with the pragma deleted,
+        // because it moves neither SQLITE_DEFAULT_SYNCHRONOUS nor
+        // SQLITE_DEFAULT_WAL_SYNCHRONOUS off 2. The test below is the
+        // guard.
+        assert_eq!(synchronous(&database.writer), SYNCHRONOUS_FULL);
+    }
 
-        assert_eq!(synchronous, SYNCHRONOUS_FULL);
+    #[test]
+    fn the_pragma_set_turns_durable_commits_on() {
+        // The guard for the `synchronous = FULL` line. Its
+        // precondition has to be built in a particular order to be
+        // worth anything.
+        //
+        // Entering WAL sets synchronous to the compile-time WAL
+        // default, so turning it down *before* the journal mode
+        // changes would be undone by the change, and this test would
+        // pass with the line deleted -- the exact failure it exists
+        // to catch. So: enter WAL first, turn synchronous down
+        // afterwards, and only then run the pragma set. Asking for
+        // WAL when WAL is already on is a no-op, which is what leaves
+        // the turned-down value there for the function under test to
+        // find.
+        let store = TempStore::new("synchronous-guard");
+        let conn = Connection::open(store.path()).unwrap();
+
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal", "the precondition needs a WAL database");
+
+        conn.execute_batch("PRAGMA synchronous = NORMAL;").unwrap();
+        assert_eq!(
+            synchronous(&conn),
+            SYNCHRONOUS_NORMAL,
+            "the connection should start less durable than it ends"
+        );
+
+        super::apply_writer_pragmas(&conn).unwrap();
+
+        assert_eq!(synchronous(&conn), SYNCHRONOUS_FULL);
     }
 
     #[test]

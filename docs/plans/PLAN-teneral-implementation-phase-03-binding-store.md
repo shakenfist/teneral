@@ -339,7 +339,24 @@ the crates.io API the same day.
    `FULL` rather than `NORMAL` because under WAL, `NORMAL` does
    not fsync at commit: it is durable against a process crash and
    not against losing power, and losing power is the case that
-   produces the duplicate. The cost is one fsync per lease
+   produces the duplicate.
+
+   One thing step 3a established that this decision assumed the
+   other way. The bundled engine already defaults to `FULL`,
+   under WAL as well as under rollback, because
+   `libsqlite3-sys` 0.40.0 moves neither
+   `SQLITE_DEFAULT_SYNCHRONOUS` nor
+   `SQLITE_DEFAULT_WAL_SYNCHRONOUS` off 2. That makes the pragma
+   line defensive rather than corrective, and it makes the
+   obvious test of it worthless: it passes with the line deleted.
+   The line stays, because the alternative is an invariant
+   resting on a compile flag inside a dependency's build script
+   that nobody reads and that `bundled` is what pins -- and
+   decision 2's own risk row contemplates dropping `bundled`,
+   which is the day this would go quiet. The guard is a test that
+   turns a WAL connection's `synchronous` down and asserts the
+   pragma set brings it back; the ordering that makes it a real
+   guard is in the test's own comment. The cost is one fsync per lease
    transaction, which the phase does not try to optimise; if it
    proves too expensive for Shaken Fist's rate, phase 8 is where
    that is measured, and the honest fix is batching ACKs rather
@@ -487,7 +504,7 @@ operator rather than working around it.
 
 | Step | Effort | Model | Isolation | Brief for sub-agent |
 |------|--------|-------|-----------|---------------------|
-| 3a | high | opus | none | The crate, the dependency and the schema's foundations. Read decisions 1, 2, 5, 7 and 13 and survey findings 4, 5 and 6 first. **Do the dependency gate before anything else:** add `teneral-store` as a second workspace member, raise `[workspace.package] rust-version` to `1.89` with a comment saying rusqlite 0.41.0+ is what needed it, add `rusqlite = { version = "0.43.0", default-features = false, features = ["bundled", "cache", "extra_check"] }`, and per decision 3 add `async-trait` and `tokio = { default-features = false, features = ["sync"] }` as dependencies plus a `tokio` dev-dependency carrying `["rt", "macros"]` to drive tests -- pick the current released version of each and say in the report what resolved. Then run `make lock` then `make build` and `make deny`, and confirm from `Cargo.lock` that the resolved rusqlite is 0.43.x rather than 0.40.2 -- the MSRV raise is the only reason it can be, so a 0.40.x in the lockfile means the raise did not take. The build must succeed through the `Makefile`, which compiles `--network none` against a read-only cargo cache, so the bundled SQLite's C compile has to work offline with no network and no writable cache; if it cannot, **stop and report** rather than switching to the system `libsqlite3`, because that choice is decision 2's and belongs to the operator. Then build the schema's foundations and nothing above them: `PRAGMA user_version` holding a schema version with forward-only migrations applied at open and a refusal (naming both versions) when the database is ahead of the code; a per-connection pragma set that includes `foreign_keys = ON` -- off by default in SQLite, per connection, and a test must assert it so that removing the line fails -- plus `journal_mode = WAL` and `synchronous = FULL` on the writer per decision 4; a single-row store identity table whose epoch is `lower(hex(randomblob(16)))`, stable across reopen; and the event log table as `seq INTEGER PRIMARY KEY AUTOINCREMENT` with a test that writes rows, deletes them, writes again, and asserts the new sequence exceeds every sequence ever issued. No trait, no resources, no lookup: 3b owns the trait. Verify with `make build`, `make test`, `make lint`, `make deny` and `pre-commit run --all-files`, and paste the rusqlite line from `Cargo.lock` into the report. |
+| 3a | high | opus | none | The crate, the dependency and the schema's foundations. Read decisions 1, 2, 5, 7 and 13 and survey findings 4, 5 and 6 first. **Do the dependency gate before anything else:** add `teneral-store` as a second workspace member, raise `[workspace.package] rust-version` to `1.89` with a comment saying rusqlite 0.41.0+ is what needed it, add `rusqlite = { version = "0.43.0", default-features = false, features = ["bundled", "cache", "extra_check"] }`, and per decision 3 add `async-trait` and `tokio = { default-features = false, features = ["sync"] }` as dependencies plus a `tokio` dev-dependency carrying `["rt", "macros"]` to drive tests -- pick the current released version of each and say in the report what resolved. Then run `make lock` then `make build` and `make deny`, and confirm from `Cargo.lock` that the resolved rusqlite is 0.43.x rather than 0.40.2 -- the MSRV raise is the only reason it can be, so a 0.40.x in the lockfile means the raise did not take. The build must succeed through the `Makefile`, which compiles `--network none` against a read-only cargo cache, so the bundled SQLite's C compile has to work offline with no network and no writable cache; if it cannot, **stop and report** rather than switching to the system `libsqlite3`, because that choice is decision 2's and belongs to the operator. Then build the schema's foundations and nothing above them: `PRAGMA user_version` holding a schema version with forward-only migrations applied at open and a refusal (naming both versions) when the database is ahead of the code; a per-connection pragma set that includes `foreign_keys = ON` -- per connection rather than a property of the file, and a test must assert it so that removing the line fails -- plus `journal_mode = WAL` and `synchronous = FULL` on the writer per decision 4. **Note what the step found about the last two**, because the brief originally said `foreign_keys` was "off by default in SQLite" and that is not true of this engine: `libsqlite3-sys` 0.40.0's `build.rs:171` compiles the bundled amalgamation with `-DSQLITE_DEFAULT_FOREIGN_KEYS=1`, and it moves neither `SQLITE_DEFAULT_SYNCHRONOUS` nor `SQLITE_DEFAULT_WAL_SYNCHRONOUS` off 2. So both pragmas are already in force before the store asks, a behavioural test of either passes with its pragma line deleted, and each needs a second test that builds a connection with the setting *off* and asserts the pragma set turns it on. `journal_mode` is the exception and is genuinely guarded, WAL not being a default; a single-row store identity table whose epoch is `lower(hex(randomblob(16)))`, stable across reopen; and the event log table as `seq INTEGER PRIMARY KEY AUTOINCREMENT` with a test that writes rows, deletes them, writes again, and asserts the new sequence exceeds every sequence ever issued. No trait, no resources, no lookup: 3b owns the trait. Verify with `make build`, `make test`, `make lint`, `make deny` and `pre-commit run --all-files`, and paste the rusqlite line from `Cargo.lock` into the report. |
 | 3b | high | opus | none | The storage trait, and the first three resources over it. Read decisions 1, 3, 6 and 10 and `docs/api-design.md:776-820`, whose five numbered demands are the specification this step is written against -- the trait's doc comment should say, per method group, which demand it serves, so that phase 8 can tell a deliberate shape from an accident. The trait is **asynchronous** (decision 3, which the operator overturned at the back brief -- read it in full, because it is not merely `async fn` on the signatures: the writer is a thread the store owns and fed by a channel, each live read handle holds its transaction on a thread of its own, and the trait is declared with `#[async_trait]` rather than native `async fn` so that it stays dyn-compatible for phase 8). No `spawn_blocking` anywhere, and `tokio` is used for its channels only. It must give: write operations that return the cursor they were assigned, never a bare `Ok(())`; a read handle that can be held across the caller's awaits, that reports the cursor it reads at, and that gives a consistent view across several reads rather than independent getters -- that handle is the hardest thing in this step, and decision 3 says why the obvious implementation of it does not compile; compare-and-set forms for the operations the API says are single operations; and **a network parameter on every method**, with the deliberately store-global ones (the epoch, the schema version, history reads across a scope) enumerated in the trait's doc comment, because a reader needs to tell those from an oversight. Then implement networks, attachments and address ranges over it, including decision 6's primary key on `(namespace, ifname)` -- and prove the constraint rather than asserting it, with a test that bypasses the trait and inserts the conflicting attachment with raw SQL so the database is what refuses. Every resource write emits an event into 3a's log in the same transaction as the write, never after it. Two networks sharing a subnet is the fixture every test uses from here on; write it once, in a test support module, and use it in this step's tests rather than deferring it to 3c. Keep the connection type and all SQL private to the crate (decision 1). |
 | 3c | high | opus | none | Bindings, selector matching, and the two diagnostics that belong to lookup. Read decisions 10 and 12, `docs/api-design.md:195-296` for the resource model and `docs/api-design.md:499-556` for what a consumer needs in order to notice a wrong answer. A selector is a `(kind, value)` pair meaningful only inside a network and is **not** independently addressable, so a binding's identity is `(network, selector kind, selector value)` and there is no table a selector exists in on its own. Client identity is the union of MAC, client-id, DUID/IAID, user-class and vendor-class. Implement the lookup that answers "given these presented attributes in this network, which binding applies", decide the precedence order between kinds, and **return which selector matched** on every lookup result -- that return value is not a nicety, it is the only way a consumer can check that its understanding of a precedence teneral invented matches the daemon's. Document the order in `docs/api-design.md`, in the section that already says the precedence is the API's own, and write no `docs/provenance.md` row for it (decision 12 says why; a row citing nothing would break the file's rule). Also build the explain operation -- given a synthetic identity and an attachment, what would be answered, which selector matched, and in which network, with no packet involved -- because `docs/api-design.md:505-515` calls it the single most valuable diagnostic the API can offer and the front-ends need the same code path anyway. And build decision 10's guard: compare every returned row's network with the one asked for, error, and count. Test it by planting a mismatched row with raw SQL and asserting both the error and the counter; assert the counter is zero after the rest of the suite. Two networks with the same MAC bound to different addresses, each resolving to its own, is the test that matters most here. |
 | 3d | high | opus | none | Leases: the lifecycle, allocation, and the durability point. The hardest step in the phase and the one where a defect is both silent and cross-network, so read decisions 4, 8, 9 and 12 in full first. A lease is keyed by `(network, address)` because within one network an address has at most one holder, and a client may legitimately hold two addresses during a renumber -- so do not key it by client, and make "what does this client hold" a first-class query within a network rather than a filter a caller applies to a list, because that query is the thing the existing consumer cannot do today (`docs/api-design.md:261-273`). Implement the state machine with its transitions and the compare-and-set forms the API names as single operations: "create this binding only if no lease holds the address" and "revoke that lease and create this binding" are each one operation, because a read followed by a write is correct only on a single-writer store. Expiry is absolute and lazy (decision 9): a lease past its expiry is expired when read, with no sweeper having run, and allocation must not hand out an address whose lease has expired but not been swept -- write the test that proves it by advancing the injected `Clock` and allocating without sweeping. Address selection follows RFC 2131 section 4.3.1's order -- the address the client already holds, then the address it requested if free and in range, then one from the pool -- with the lowest free address as the pool tie-break; add the provenance rows for the RFC-cited part and name the tie-break as teneral's own (decision 12). The lease id is the sequence at which the holder acquired the address (decision 8), so a renewal keeps it and a reassignment changes it; test both. The durability point is decision 4: the commit happens before anything could ACK, and the store must offer no API that lets a caller get a lease back before it is committed. Finally, run the `mutation-check` skill over the lease module: break each guard in turn, confirm a test fails and that it is the right test, restore from a copy rather than with `git checkout`, run each mutant under `timeout`, and count a timeout as killed. Report the helper's output and the script's path. |
@@ -528,9 +545,19 @@ named.
    definition-of-done item to satisfy.
 5. `PRAGMA foreign_keys` is on for every connection the store
    hands out, asserted by a test that fails when the pragma line
-   is removed. Demonstrate the failure and restore.
+   is removed. Demonstrate the failure and restore. Note that
+   the test which merely observes enforcement cannot be that
+   test -- the bundled engine enforces by default -- so the
+   guard is one that starts from a connection with enforcement
+   off.
 6. `PRAGMA journal_mode` is `wal` and `synchronous` is `FULL` on
-   the write connection, both asserted by tests.
+   the write connection, both asserted by tests, and each of the
+   three settings has a test that **fails when its pragma line
+   is removed**. `journal_mode` is guarded by the obvious test;
+   `foreign_keys` and `synchronous` are not, for the reason in
+   item 5 and decision 4, and each needs the guard that
+   constructs the precondition the engine's defaults hide.
+   Demonstrate all three failures and restore from a copy.
 7. Opening a database whose `user_version` exceeds the code's
    schema version refuses to open and names both versions.
 8. The event sequence is never reused: a test writes events,
@@ -681,3 +708,70 @@ syntax. It is restated in the new decision and in the risk
 table, and definition-of-done item 24 is what now holds the line
 it drew: threads the store owns, `tokio` with `features =
 ["sync"]`, and no `spawn_blocking` in the crate.
+
+**2026-11-25 (AEDT): step 3a. The dependency gate passed.** The
+bundled SQLite's C compile works in the offline container --
+`--network none`, read-only cargo cache, rustc 1.100.0 -- so
+decision 2 stands as written and no fallback was needed. The
+lockfile resolves `rusqlite` 0.43.0 and `libsqlite3-sys` 0.40.0,
+which is the MSRV raise having taken effect, and the diff is
+purely additive at 148 insertions and no deletions: nothing
+already in the tree moved, which is the answer to the risk that
+raising the floor would quietly unblock newer versions of
+everything else. `async-trait` resolved to 0.1.92 and `tokio` to
+1.54.1, both tightened in the manifest to what resolved.
+
+**Two of the engine's defaults are not what this plan assumed,
+and the second one was found in review rather than by the
+step.** `libsqlite3-sys` 0.40.0 compiles the amalgamation with
+`-DSQLITE_DEFAULT_FOREIGN_KEYS=1` (`build.rs:171`), so
+enforcement is on before the store asks for it. The step found
+that, reported it, and added a guard test that starts from a
+connection with enforcement off -- the right fix, because a test
+that merely observes enforcement passes with the pragma line
+deleted.
+
+What the step did not do was ask the same question of the other
+two pragmas, so the management session did. `journal_mode` is
+genuinely guarded, WAL not being any build's default.
+`synchronous` is not: the same build moves neither
+`SQLITE_DEFAULT_SYNCHRONOUS` nor
+`SQLITE_DEFAULT_WAL_SYNCHRONOUS` off 2, and removing the
+`PRAGMA synchronous = FULL` line leaves all eleven tests
+passing. That is the durability point of decision 4 -- the thing
+standing between an acknowledged lease and a duplicated address
+after a power cut -- resting on an undefended line. Fixed in
+this commit with `the_pragma_set_turns_durable_commits_on`,
+which turns a WAL connection's `synchronous` down and asserts
+the pragma set brings it back; with the line removed it fails
+`left: 1, right: 2` while the observing test still passes, which
+is the asymmetry that shows which of the two is the guard.
+Decision 4, 3a's brief and definition-of-done items 5 and 6 are
+corrected at source. The lesson generalises and is worth
+carrying into later steps: a pragma this engine already sets is
+a line whose test proves nothing unless the test builds the
+precondition the default hides.
+
+**Three `unused dependency` warnings are expected until 3b.**
+Cargo 1.100 warns that `async-trait` and `tokio` are declared
+and unused, because 3a adds them and 3b is what writes the trait
+that uses them. They are left unsilenced deliberately: the only
+way to quiet them is `[lints.cargo]` across the workspace, which
+would hide a real signal permanently to tidy a two-step
+transient. `make build` and `make lint` still exit 0, the
+warnings being cargo manifest lints that `-D warnings` does not
+reach. 3b's review checks they have cleared.
+
+**Extras kept, with the reasoning for each.** `STRICT` on both
+tables, which was not asked for and should have been: without it
+an INTEGER column stores the text `10.0.0.5` happily and every
+comparison against it answers something other than what the
+query meant, which matters directly to decision 5. And
+`event_log` carrying `network`, `kind`, `resource_id`, `state`
+and `recorded_at` with a `(network, seq)` index, rather than the
+bare sequence the brief asked for -- taken from the watch
+specification so that 3b adds no migration on its first day.
+`recorded_at` deliberately has no `DEFAULT`, so that the
+injected clock stays the only clock. `teneral` does not yet
+depend on `teneral-store`, nothing in the binary having anything
+to call; that wiring is 3b's.
