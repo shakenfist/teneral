@@ -40,7 +40,8 @@ use async_trait::async_trait;
 use crate::cursor::Cursor;
 use crate::error::Result;
 use crate::identity::Epoch;
-use crate::model::{AddressRange, Attachment, Network};
+use crate::model::{AddressRange, Attachment, Binding, Explanation, Network};
+use crate::selector::{ClientIdentity, Selector};
 
 /// The binding store: everything that changes it, and the two reads
 /// that cannot be answered from inside one network.
@@ -65,7 +66,7 @@ use crate::model::{AddressRange, Attachment, Network};
 ///
 /// Store-global methods, enumerated so that a reader can tell them
 /// from an oversight: `epoch`, `schema_version`, `read`,
-/// `interface_owner`.
+/// `interface_owner`, `cross_network_answers`.
 ///
 /// - `epoch` and `schema_version` describe the file. An epoch per
 ///   network would qualify nothing, because the sequence numbers it
@@ -82,6 +83,12 @@ use crate::model::{AddressRange, Attachment, Network};
 ///   and lets the implementation scope by network. This one takes no
 ///   network and returns the one it found, so a caller cannot ask it
 ///   about a network and be given another's answer.
+/// - `cross_network_answers` counts the answers this store refused
+///   for naming the wrong network. The quantity belongs to the store
+///   rather than to a network in it, because each reading *is* a
+///   disagreement between two networks and attributing it to one of
+///   them would hide which pair it was. The error names both, which
+///   is where that detail belongs.
 #[async_trait]
 pub trait BindingStore: Send + Sync {
     /// The epoch a consumer's remembered position has to match for
@@ -97,6 +104,20 @@ pub trait BindingStore: Send + Sync {
     /// diagnosing a refusal to open, or a consumer deciding whether a
     /// feature exists, has no other way to ask.
     fn schema_version(&self) -> u32;
+
+    /// How many answers this store has refused because the row it
+    /// read belonged to a network other than the one asked about.
+    ///
+    /// Not part of any demand, and the most useful number the store
+    /// exports. In a correct store it is zero for the life of the
+    /// process, which makes a single non-zero reading unambiguous and
+    /// in need of no baseline to interpret -- a better alarm than any
+    /// rate. It is a count of answers *refused*, not of wrong answers
+    /// served: the store returns an error and increments this rather
+    /// than handing over a row from the wrong network, because a
+    /// mechanism that noticed a cross-network leak and served it
+    /// anyway would have converted a bug into a metric.
+    fn cross_network_answers(&self) -> u64;
 
     /// Open a view of the store at a single position in its order.
     ///
@@ -213,6 +234,56 @@ pub trait BindingStore: Send + Sync {
         name: &str,
         expected: &Cursor,
     ) -> Result<Cursor>;
+
+    /// Configure `network`'s answer for the client identified by
+    /// `selector`.
+    ///
+    /// Serves demands 1, 3 and 4. The create is a compare-and-set
+    /// against the binding not existing: a selector this network
+    /// already has a binding for is refused rather than overwritten,
+    /// because two configured answers for one client is a question
+    /// with two answers and the operator has to say which they meant.
+    ///
+    /// The same selector in another network is not a conflict and
+    /// never was. A selector means nothing outside a network -- the
+    /// same hardware address in two networks is two unrelated clients
+    /// -- which is why it is a parameter beside the network here and
+    /// not a resource with an identity of its own.
+    async fn create_binding(
+        &self,
+        network: &str,
+        selector: &Selector,
+        address: std::net::Ipv4Addr,
+        hostname: Option<&str>,
+    ) -> Result<Cursor>;
+
+    /// Change what `network` answers the client identified by
+    /// `selector`, which must still be at `expected`.
+    ///
+    /// Serves demands 1, 3 and 4. The selector itself cannot be
+    /// changed: it is the binding's identity, so a binding whose
+    /// selector moved is a different binding, and a consumer watching
+    /// the history has to be told that one resource went away and
+    /// another arrived rather than that one changed shape.
+    async fn update_binding(
+        &self,
+        network: &str,
+        selector: &Selector,
+        expected: &Cursor,
+        address: std::net::Ipv4Addr,
+        hostname: Option<&str>,
+    ) -> Result<Cursor>;
+
+    /// Remove `network`'s binding for `selector`, which must still be
+    /// at `expected`.
+    ///
+    /// Serves demands 1, 3 and 4.
+    async fn delete_binding(
+        &self,
+        network: &str,
+        selector: &Selector,
+        expected: &Cursor,
+    ) -> Result<Cursor>;
 }
 
 /// A view of the store frozen at one position in its order.
@@ -231,13 +302,21 @@ pub trait BindingStore: Send + Sync {
 /// is not something to keep open between requests.
 ///
 /// Store-global methods, enumerated so that a reader can tell them
-/// from an oversight: `cursor`, `networks`.
+/// from an oversight: `cursor`, `networks`, `explain`.
 ///
 /// - `cursor` is the position this view reads at, which spans every
 ///   network because the order does.
 /// - `networks` lists the networks themselves. Its answer *is* the
 ///   set of networks, so there is no network it could be scoped by;
 ///   every other read here names one.
+/// - `explain` starts where a packet starts, with the interface it
+///   arrived on, and resolving that to a network is the first thing
+///   it does. Its answer therefore contains a network rather than
+///   taking one, for the same reason
+///   [`BindingStore::interface_owner`] does -- and reporting which
+///   network an interface resolved to is half of what makes it a
+///   diagnostic, because an interface attached to the wrong network
+///   looks exactly like a binding that does not match.
 #[async_trait]
 pub trait ReadHandle: Send {
     /// The position in the store's order that every answer from this
@@ -288,4 +367,102 @@ pub trait ReadHandle: Send {
 
     /// `network`'s range called `name`, or `None`.
     async fn address_range(&self, network: &str, name: &str) -> Result<Option<AddressRange>>;
+
+    /// Every binding `network` has configured, by selector.
+    ///
+    /// Serves demand 4, and in the order of the key rather than of
+    /// the precedence between selector kinds: precedence decides a
+    /// lookup, where a listing is what an operator reads to see what
+    /// is configured.
+    async fn bindings(&self, network: &str) -> Result<Vec<Binding>>;
+
+    /// `network`'s binding for `selector`, or `None`.
+    ///
+    /// The same selector in another network is a different binding
+    /// and is not returned here, which is the whole of why a selector
+    /// is a parameter beside a network and not an identity on its
+    /// own.
+    async fn binding(&self, network: &str, selector: &Selector) -> Result<Option<Binding>>;
+
+    /// Which of `network`'s bindings applies to a client presenting
+    /// `identity`.
+    ///
+    /// This is the lookup the whole store is shaped around. The
+    /// client's attributes are consulted in a precedence order this
+    /// project fixed and published -- no standard specifies one --
+    /// and the first that has a binding configured in this network
+    /// wins.
+    ///
+    /// The binding that comes back carries the selector it was found
+    /// under, which is how a consumer is told *which* selector
+    /// matched. That is not a nicety. Because the order is this
+    /// project's own invention, a consumer has no way to check that
+    /// its understanding of the order agrees with the daemon's except
+    /// by being told which rule was applied -- so an operator who
+    /// configured a reservation against a hardware address and is
+    /// told that a vendor class matched has found a precedence
+    /// problem before a user does.
+    ///
+    /// `None` means this network has no binding for anything the
+    /// client presented, which is a complete answer and not a
+    /// failure: a network may legitimately configure nothing for a
+    /// client it has never seen.
+    async fn lookup_binding(
+        &self,
+        network: &str,
+        identity: &ClientIdentity,
+    ) -> Result<Option<Binding>>;
+
+    /// Which of `network`'s bindings applies to a client presenting
+    /// `identity` on an interface the caller asserts belongs to
+    /// `network`.
+    ///
+    /// Serves demand 4, and it is the one read in the store where the
+    /// cross-network check can fire on data rather than on a defect.
+    /// The network comes from the caller -- a path that names it, a
+    /// request's context -- while the interface's network comes from
+    /// the store, so the two can disagree. A request whose arrival
+    /// interface resolved to one network while the answer would have
+    /// come from another is exactly the thing
+    /// [`BindingStore::cross_network_answers`] counts, and it is
+    /// refused rather than answered.
+    ///
+    /// An interface no network has claimed is reported as not found,
+    /// because nothing crossed between networks and the fault is a
+    /// different one. Note the contrast with
+    /// [`ReadHandle::attachment`], which answers `None` for an
+    /// interface another network holds: that read asks whether a
+    /// network has an interface, and no is a legitimate answer, where
+    /// this one asserts that it does in order to be answered for a
+    /// client on it.
+    async fn lookup_binding_on_interface(
+        &self,
+        network: &str,
+        namespace: &str,
+        ifname: &str,
+        identity: &ClientIdentity,
+    ) -> Result<Option<Binding>>;
+
+    /// What the store would answer a client presenting `identity` on
+    /// this interface, with no packet involved.
+    ///
+    /// Store-global, for the reason in this trait's doc comment. The
+    /// answer says which network the interface resolved to, which
+    /// binding would be returned, which selector matched it, and
+    /// which selectors would have been consulted in what order -- so
+    /// an operator or a test can ask the question the project's
+    /// failure mode otherwise only answers hours later inside
+    /// somebody's guest.
+    ///
+    /// It is the same code path as the lookup above with the packet
+    /// replaced by its parameters, and deliberately so: a diagnostic
+    /// that reimplemented the matching could agree with the
+    /// documentation while the datapath did something else, which
+    /// would make it worse than having none.
+    async fn explain(
+        &self,
+        namespace: &str,
+        ifname: &str,
+        identity: &ClientIdentity,
+    ) -> Result<Explanation>;
 }

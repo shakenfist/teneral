@@ -285,6 +285,73 @@ observed elsewhere, and the API's documentation is its only
 source -- which is exactly why a consumer must be told which
 selector matched rather than inferring it.
 
+The order, highest first, is the client identifier, then the
+DUID and IAID, then the hardware address, then the user class,
+then the vendor class. One principle generates it: an attribute
+that names a single client outranks one that names a class of
+clients; among those that name a single client, the identity the
+client asserts *as a client* outranks the identity of the
+hardware it happens to be in today; and among those that name a
+class, the class the operator's own deployment sets outranks the
+class the vendor shipped.
+
+Taking the five in turn. The **client identifier** exists only
+because somebody set it, and the reason the protocol carries it
+at all is that a client's identity should survive the
+replacement of its network card -- so it is both the most
+deliberate and the most stable thing a v4 client can present.
+The **DUID and IAID** are the same statement in v6: one client,
+and one address association on it. It sits immediately below the
+client identifier rather than beside it because the two cannot
+collide in one request -- a v4 request carries no DUID and a v6
+request no hardware address -- so the order between them is a
+formality, fixed anyway because a published precedence with a
+gap in it is one every consumer has to guess at. The **hardware
+address** names an interface rather than a client: it changes
+when a card is replaced and it is duplicated the moment a
+virtual machine template is cloned, which makes it the weakest
+of the three individual identities, and it is nonetheless the
+one nearly every reservation is written against because it is
+the one every client presents without being asked. The **user
+class** is a label the client was configured with, naming a role
+that many clients share. The **vendor class** names a product or
+a firmware family that every device of that model presents, so
+it is the broadest of the five and the one whose match is most
+often an accident rather than an intention.
+
+The one argument for a different order is worth recording,
+because it is the one an operator will make: nearly all
+reservations are written against hardware addresses, so putting
+the hardware address first would match what people actually
+configure. It is rejected because it inverts the reason client
+identifiers exist. A deliberate per-client identity would lose
+to the card the client happens to have in it this month, and an
+operator who set an identifier precisely so that a replaced card
+would keep its address would find that the replacement silently
+got a different one.
+
+What keeps the order safe is how narrow a question it answers.
+Precedence only ever chooses between bindings an operator
+configured in one network: nothing a client presents can take it
+out of a binding, and the most a client can do is be moved from
+one configured binding to another configured binding in the same
+network. So the question is only ever "of the bindings written
+here, which did the operator most likely mean for *this*
+client", and the answer is the narrowest, because the broad ones
+are there to catch the clients the narrow ones do not name.
+
+Nothing is written about this in `docs/provenance.md`, and the
+absence is deliberate. That file admits two kinds of source, an
+RFC section or a named observed-behaviour test, and this order
+has neither: no standard fixes an order among these five
+attributes, and measuring another implementation would record
+that implementation's choice rather than a fact about the
+protocol. A row citing nothing would make the file's rule
+meaningless, and that rule is the only thing keeping this
+project able to say where its behaviour came from. The order's
+source is this document, which is why the API publishes it and
+why every lookup reports which selector it applied.
+
 **Content blobs are scoped tightest.** A blob is keyed by
 network, by selector or the explicit word for "any client in
 this network", and by a path-like key. The eventual metadata

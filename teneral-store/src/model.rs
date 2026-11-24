@@ -15,6 +15,7 @@
 use std::net::Ipv4Addr;
 
 use crate::cursor::Cursor;
+use crate::selector::Selector;
 
 /// A network: the scope everything else in the store lives inside.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,6 +77,78 @@ impl AddressRange {
 
         u32::from(self.first) <= address && address <= u32::from(self.last)
     }
+}
+
+/// What an operator configured for one client identity in one
+/// network.
+///
+/// The selector is the binding's identity within its network, and it
+/// is therefore also the answer to "which selector matched" on every
+/// lookup that returned this binding. That is not a coincidence to be
+/// relied on quietly: the precedence between selector kinds is this
+/// project's own invention, so a consumer can only check that its
+/// understanding of the order matches the daemon's by being told
+/// which rule was applied. Because the matched selector *is* the
+/// binding's identity, a lookup cannot answer without saying.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Binding {
+    /// The network the binding was configured in.
+    pub network: String,
+    /// The selector it is configured against, which is its identity
+    /// inside that network and the selector a lookup matched on.
+    pub selector: Selector,
+    /// The address this client is to be answered with.
+    pub address: Ipv4Addr,
+    /// The name the binding contributes to its network's zones, if
+    /// the operator gave it one.
+    pub hostname: Option<String>,
+    /// Where the binding's last write sits in the store's order.
+    pub cursor: Cursor,
+}
+
+/// What the store would answer a client, and how it got there, with
+/// no packet involved.
+///
+/// This is the diagnostic the whole project is shaped around. The
+/// failure being guarded against is a silently wrong answer, observed
+/// hours later inside somebody's guest; an operator or a test that
+/// can ask "what *would* you say to this client on this interface"
+/// converts that into a question with an immediate answer. It is
+/// cheap because it is not a second implementation of anything: the
+/// front-ends resolve an interface to a network and match an identity
+/// against the bindings in it, and this is that same path with the
+/// packet replaced by its parameters.
+///
+/// Every field is here because its absence is a distinct diagnosis. A
+/// network of `None` means no network has claimed the interface at
+/// all, which is a different fault from a network that has claimed it
+/// and configured nothing. A `matched` of `None` under a network that
+/// is present means the client would fall through to whatever the
+/// front-end does with an unknown client. And `considered` is what
+/// the lookup would have looked for, in the order it would have
+/// looked: it turns "this selector matched" into "these lost, in this
+/// order", which is the only complete check of an invented
+/// precedence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Explanation {
+    /// The namespace of the interface the client was presented as
+    /// arriving on.
+    pub namespace: String,
+    /// The interface itself.
+    pub ifname: String,
+    /// The network that interface resolved to, or `None` if no
+    /// network has claimed it.
+    pub network: Option<String>,
+    /// The binding that would answer, if any. Its selector is the one
+    /// that matched.
+    pub matched: Option<Binding>,
+    /// The selectors the lookup would consult, highest precedence
+    /// first, whether or not each had a binding.
+    pub considered: Vec<Selector>,
+    /// The position in the store's order this explanation was
+    /// computed at, so that it can be ordered against a watch stream
+    /// like any other answer.
+    pub cursor: Cursor,
 }
 
 #[cfg(test)]

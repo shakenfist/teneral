@@ -32,8 +32,10 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use crate::clock::Clock;
 use crate::cursor::Cursor;
 use crate::error::{Error, Result};
+use crate::guard::CrossNetworkGuard;
 use crate::identity::Epoch;
-use crate::model::{AddressRange, Attachment, Network};
+use crate::model::{AddressRange, Attachment, Binding, Explanation, Network};
+use crate::selector::{ClientIdentity, Selector};
 
 /// What the store calls a network when it has to say so to a person.
 const NETWORK: &str = "network";
@@ -41,6 +43,8 @@ const NETWORK: &str = "network";
 const ATTACHMENT: &str = "attachment";
 /// What it calls an address range.
 const RANGE: &str = "address range";
+/// What it calls a binding.
+const BINDING: &str = "binding";
 
 /// The kinds an event carries, which are machine-readable and so are
 /// not the words above.
@@ -56,6 +60,23 @@ mod kind {
     pub(super) const ATTACHMENT: &str = "attachment";
     /// A range was created, resized or removed.
     pub(super) const RANGE: &str = "address-range";
+    /// A binding was configured, changed or removed.
+    pub(super) const BINDING: &str = "binding";
+}
+
+/// The identity an event reports a binding by: its selector, which is
+/// the whole of what makes it unique inside its network.
+///
+/// The kind and the value are joined with a colon, and that is
+/// unambiguous even though a value may itself contain colons -- a
+/// hardware address does. The kind side cannot: the column it comes
+/// from is constrained to five hyphenated words, so the first colon in
+/// this string is always the separator and everything after it is the
+/// value. The attachment identity above needs a refusal instead of
+/// this reasoning because both of *its* halves are operator-supplied
+/// names.
+fn binding_id(selector: &Selector) -> String {
+    format!("{}:{}", selector.kind().as_str(), selector.value())
 }
 
 /// The longest a name may be.
@@ -76,7 +97,7 @@ const NAME_LIMIT: usize = 255;
 /// name travels through logs and event payloads and a newline in the
 /// middle of one is how a single event becomes two plausible-looking
 /// ones.
-fn validate_name(what: &'static str, value: &str) -> Result<()> {
+pub(crate) fn validate_name(what: &'static str, value: &str) -> Result<()> {
     if value.is_empty() {
         return Err(Error::Invalid {
             what,
@@ -168,6 +189,39 @@ fn is_constraint(error: &rusqlite::Error) -> bool {
     )
 }
 
+/// What every read inside one network needs besides the connection.
+///
+/// A struct rather than three more parameters, for the same reason
+/// [`Writing`] is one: these are the same three values for every read
+/// a caller makes, and a signature that repeats them invites a call
+/// site to pass one network to the statement and another to the
+/// check.
+///
+/// The check is the point of the third field. Every row these reads
+/// return carries the network it came from, and that value is
+/// compared with `network` before the row becomes an answer -- so a
+/// statement that lost its scoping refuses to answer rather than
+/// answering out of the wrong network.
+pub(crate) struct Reading<'a> {
+    /// The epoch every cursor on a returned row belongs to.
+    pub(crate) epoch: &'a Epoch,
+    /// The network the caller asked about.
+    pub(crate) network: &'a str,
+    /// The comparison every returned row passes.
+    pub(crate) guard: &'a CrossNetworkGuard,
+}
+
+impl<'a> Reading<'a> {
+    /// Refuse a row that came from a network other than the one asked
+    /// about.
+    fn guard<F>(&self, found: &str, kind: &'static str, id: F) -> Result<()>
+    where
+        F: FnOnce() -> String,
+    {
+        self.guard.check(self.network, found, kind, id)
+    }
+}
+
 // ---------------------------------------------------------------------
 // Reads.
 //
@@ -175,6 +229,13 @@ fn is_constraint(error: &rusqlite::Error) -> bool {
 // a connection inside a read transaction answers all of them at the
 // same position. None of them starts a transaction of its own, which
 // is what makes that true.
+//
+// Every read that names a network takes a `Reading` and passes each
+// row it materialises through its guard. Today most of those
+// comparisons cannot fail, the statements naming the network in their
+// own `WHERE` clauses, and they are made anyway: the comparison costs
+// one string equality and it is what stands between a dropped clause
+// or a rotated parameter list and an answer out of the wrong network.
 // ---------------------------------------------------------------------
 
 /// Every network, by name.
@@ -202,6 +263,12 @@ pub(crate) fn networks(conn: &Connection, epoch: &Epoch) -> Result<Vec<Network>>
 }
 
 /// One network, or nothing.
+///
+/// The only network-named read that takes no [`Reading`], and the
+/// reason is that there is nothing here for a guard to compare. A
+/// network's identity *is* its name, so the row either is the one
+/// asked for or is not returned; there is no second value that could
+/// disagree with the first.
 pub(crate) fn network(conn: &Connection, epoch: &Epoch, name: &str) -> Result<Option<Network>> {
     let found: Option<i64> = conn
         .query_row(
@@ -222,11 +289,8 @@ pub(crate) fn network(conn: &Connection, epoch: &Epoch, name: &str) -> Result<Op
 }
 
 /// Every interface one network has claimed.
-pub(crate) fn attachments(
-    conn: &Connection,
-    epoch: &Epoch,
-    network: &str,
-) -> Result<Vec<Attachment>> {
+pub(crate) fn attachments(conn: &Connection, reading: &Reading<'_>) -> Result<Vec<Attachment>> {
+    let network = reading.network;
     let mut statement = conn
         .prepare_cached(
             "SELECT namespace, ifname, network, cursor_seq FROM attachment
@@ -249,11 +313,12 @@ pub(crate) fn attachments(
     for row in rows {
         let (namespace, ifname, network, cursor_seq) =
             row.map_err(storage("reading an attachment"))?;
+        reading.guard(&network, ATTACHMENT, || attachment_id(&namespace, &ifname))?;
         attachments.push(Attachment {
             network,
             namespace,
             ifname,
-            cursor: Cursor::from_row(epoch, cursor_seq)?,
+            cursor: Cursor::from_row(reading.epoch, cursor_seq)?,
         });
     }
 
@@ -267,28 +332,35 @@ pub(crate) fn attachments(
 /// returned and then rejected.
 pub(crate) fn attachment(
     conn: &Connection,
-    epoch: &Epoch,
-    network: &str,
+    reading: &Reading<'_>,
     namespace: &str,
     ifname: &str,
 ) -> Result<Option<Attachment>> {
-    let found: Option<i64> = conn
+    // The network column is selected rather than taken from the
+    // question, which is what gives the guard below something to
+    // compare. Reading it back costs a string per row and is the
+    // difference between a check and an assumption.
+    let found: Option<(String, i64)> = conn
         .query_row(
-            "SELECT cursor_seq FROM attachment
+            "SELECT network, cursor_seq FROM attachment
              WHERE namespace = ?1 AND ifname = ?2 AND network = ?3",
-            params![namespace, ifname, network],
-            |row| row.get(0),
+            params![namespace, ifname, reading.network],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(storage("reading an attachment"))?;
 
     match found {
-        Some(cursor_seq) => Ok(Some(Attachment {
-            network: network.to_owned(),
-            namespace: namespace.to_owned(),
-            ifname: ifname.to_owned(),
-            cursor: Cursor::from_row(epoch, cursor_seq)?,
-        })),
+        Some((network, cursor_seq)) => {
+            reading.guard(&network, ATTACHMENT, || attachment_id(namespace, ifname))?;
+
+            Ok(Some(Attachment {
+                network,
+                namespace: namespace.to_owned(),
+                ifname: ifname.to_owned(),
+                cursor: Cursor::from_row(reading.epoch, cursor_seq)?,
+            }))
+        }
         None => Ok(None),
     }
 }
@@ -327,9 +399,9 @@ pub(crate) fn interface_owner(
 /// Every range a network owns, lowest address first.
 pub(crate) fn address_ranges(
     conn: &Connection,
-    epoch: &Epoch,
-    network: &str,
+    reading: &Reading<'_>,
 ) -> Result<Vec<AddressRange>> {
+    let network = reading.network;
     let mut statement = conn
         .prepare_cached(
             "SELECT name, first_address, last_address, network, cursor_seq FROM address_range
@@ -353,12 +425,13 @@ pub(crate) fn address_ranges(
     for row in rows {
         let (name, first, last, network, cursor_seq) =
             row.map_err(storage("reading an address range"))?;
+        reading.guard(&network, RANGE, || name.clone())?;
         ranges.push(AddressRange {
             network,
             name,
             first: address_from_row(first)?,
             last: address_from_row(last)?,
-            cursor: Cursor::from_row(epoch, cursor_seq)?,
+            cursor: Cursor::from_row(reading.epoch, cursor_seq)?,
         });
     }
 
@@ -368,30 +441,261 @@ pub(crate) fn address_ranges(
 /// One of a network's ranges, or nothing.
 pub(crate) fn address_range(
     conn: &Connection,
-    epoch: &Epoch,
-    network: &str,
+    reading: &Reading<'_>,
     name: &str,
 ) -> Result<Option<AddressRange>> {
-    let found: Option<(i64, i64, i64)> = conn
+    let found: Option<(String, i64, i64, i64)> = conn
         .query_row(
-            "SELECT first_address, last_address, cursor_seq FROM address_range
+            "SELECT network, first_address, last_address, cursor_seq FROM address_range
              WHERE network = ?1 AND name = ?2",
-            params![network, name],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            params![reading.network, name],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()
         .map_err(storage("reading an address range"))?;
 
     match found {
-        Some((first, last, cursor_seq)) => Ok(Some(AddressRange {
-            network: network.to_owned(),
-            name: name.to_owned(),
-            first: address_from_row(first)?,
-            last: address_from_row(last)?,
-            cursor: Cursor::from_row(epoch, cursor_seq)?,
-        })),
+        Some((network, first, last, cursor_seq)) => {
+            reading.guard(&network, RANGE, || name.to_owned())?;
+
+            Ok(Some(AddressRange {
+                network,
+                name: name.to_owned(),
+                first: address_from_row(first)?,
+                last: address_from_row(last)?,
+                cursor: Cursor::from_row(reading.epoch, cursor_seq)?,
+            }))
+        }
         None => Ok(None),
     }
+}
+
+/// Every binding one network has configured.
+///
+/// Ordered by the key, which is the selector's kind and then its
+/// value, rather than by the precedence between kinds. Precedence is
+/// a property of a lookup and not of a network's configuration: a
+/// listing is what an operator reads to see what is configured, and
+/// the order a client's attributes would be consulted in says nothing
+/// about a set of bindings that may not overlap at all.
+pub(crate) fn bindings(conn: &Connection, reading: &Reading<'_>) -> Result<Vec<Binding>> {
+    let mut statement = conn
+        .prepare_cached(
+            "SELECT selector_kind, selector_value, address, hostname, network, cursor_seq
+             FROM binding WHERE network = ?1 ORDER BY selector_kind, selector_value",
+        )
+        .map_err(storage("preparing a read of a network's bindings"))?;
+
+    let rows = statement
+        .query_map(params![reading.network], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })
+        .map_err(storage("reading a network's bindings"))?;
+
+    let mut bindings = Vec::new();
+    for row in rows {
+        let (kind, value, address, hostname, network, cursor_seq) =
+            row.map_err(storage("reading a binding"))?;
+        let selector = Selector::from_row(&kind, value)?;
+        reading.guard(&network, BINDING, || binding_id(&selector))?;
+        bindings.push(Binding {
+            network,
+            selector,
+            address: address_from_row(address)?,
+            hostname,
+            cursor: Cursor::from_row(reading.epoch, cursor_seq)?,
+        });
+    }
+
+    Ok(bindings)
+}
+
+/// The binding configured against one selector in one network, or
+/// nothing.
+///
+/// This is the single probe every lookup is built from, and the only
+/// statement in the crate that reads the binding table by its key.
+/// Both halves of the key's scoping matter: the network is in the
+/// `WHERE` clause, so another network's binding cannot be returned,
+/// and the network is read back out of the row, so one that somehow
+/// was would be refused rather than served.
+pub(crate) fn binding(
+    conn: &Connection,
+    reading: &Reading<'_>,
+    selector: &Selector,
+) -> Result<Option<Binding>> {
+    let found: Option<(String, i64, Option<String>, i64)> = conn
+        .query_row(
+            "SELECT network, address, hostname, cursor_seq FROM binding
+             WHERE network = ?1 AND selector_kind = ?2 AND selector_value = ?3",
+            params![reading.network, selector.kind().as_str(), selector.value()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(storage("reading a binding"))?;
+
+    match found {
+        Some((network, address, hostname, cursor_seq)) => {
+            reading.guard(&network, BINDING, || binding_id(selector))?;
+
+            Ok(Some(Binding {
+                network,
+                selector: selector.clone(),
+                address: address_from_row(address)?,
+                hostname,
+                cursor: Cursor::from_row(reading.epoch, cursor_seq)?,
+            }))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Which of a network's bindings applies to a client presenting this
+/// identity.
+///
+/// The one matcher in the crate. Every way of asking the question --
+/// a read within a network, a read that also names the interface the
+/// client arrived on, and the explain operation that starts from an
+/// interface and resolves the network itself -- comes through here,
+/// so the answer cannot depend on which of them was asked and the
+/// front-ends cannot grow a second implementation of the precedence.
+///
+/// It walks the client's selectors in precedence order and returns
+/// the first that has a binding, which makes the match the
+/// highest-precedence one by construction rather than by a sort that
+/// could be written wrongly. The cost is up to one indexed probe per
+/// attribute the client presented -- five at the very most, each on a
+/// primary key -- which is a trade worth making for a loop whose
+/// order is visible in one place and cannot be hidden inside a SQL
+/// `ORDER BY` that disagrees with the published documentation.
+///
+/// The returned binding carries the selector it was found under, so
+/// "which selector matched" is part of the answer and not a second
+/// question.
+pub(crate) fn lookup_binding(
+    conn: &Connection,
+    reading: &Reading<'_>,
+    identity: &ClientIdentity,
+) -> Result<Option<Binding>> {
+    for selector in identity.selectors() {
+        if let Some(found) = binding(conn, reading, &selector)? {
+            return Ok(Some(found));
+        }
+    }
+
+    Ok(None)
+}
+
+/// Which of this network's bindings applies to a client presenting
+/// this identity on this interface, where the caller has asserted
+/// that the interface belongs to the network.
+///
+/// The assertion is the whole difference from [`lookup_binding`], and
+/// it is the read where the cross-network guard can fire from the
+/// data rather than from a defect. The network comes from the caller
+/// -- a path that names it, or a request context -- and the
+/// interface's network comes from the store, so the two can disagree.
+/// A request whose arrival interface resolves to one network while
+/// the answer would come from another is precisely the quantity the
+/// specification asks to be counted, and serving an answer anyway
+/// would be the leak this store exists to prevent.
+///
+/// An interface no network has claimed is not found rather than
+/// refused: nothing crossed between networks, and the fault is a
+/// different one.
+///
+/// Note how this differs from [`attachment`], which answers `None`
+/// for an interface another network holds. That read asks whether a
+/// network has an interface, and no is a legitimate answer. This one
+/// asserts that it does in order to be answered for a client on it,
+/// and a false premise there has to be refused rather than quietly
+/// turned into "no binding".
+pub(crate) fn lookup_binding_on_interface(
+    conn: &Connection,
+    reading: &Reading<'_>,
+    namespace: &str,
+    ifname: &str,
+    identity: &ClientIdentity,
+) -> Result<Option<Binding>> {
+    let holder = interface_owner(conn, reading.epoch, namespace, ifname)?.ok_or_else(|| {
+        Error::NotFound {
+            kind: ATTACHMENT,
+            id: format!(
+                "{} in the network {}",
+                attachment_id(namespace, ifname),
+                reading.network
+            ),
+        }
+    })?;
+
+    reading.guard(&holder.network, ATTACHMENT, || {
+        attachment_id(namespace, ifname)
+    })?;
+
+    lookup_binding(conn, reading, identity)
+}
+
+/// What the store would answer a client presenting this identity on
+/// this interface, and how it got there.
+///
+/// Store-global, because it takes no network and its answer includes
+/// one: it starts where the datapath starts, with an interface, and
+/// the first thing it does is the resolution step the datapath
+/// performs before anything is scoped. An operator whose binding is
+/// not being matched needs that step reported as much as the match
+/// itself -- an interface attached to the wrong network, or to none,
+/// looks exactly like a binding that does not match.
+///
+/// This is not a second implementation of the lookup. It resolves the
+/// interface, then calls the same matcher every other form of the
+/// question calls, and reports what that matcher was given along with
+/// what it returned.
+pub(crate) fn explain(
+    conn: &Connection,
+    epoch: &Epoch,
+    guard: &CrossNetworkGuard,
+    at: &Cursor,
+    namespace: &str,
+    ifname: &str,
+    identity: &ClientIdentity,
+) -> Result<Explanation> {
+    let considered = identity.selectors();
+    let holder = interface_owner(conn, epoch, namespace, ifname)?;
+
+    let matched = match &holder {
+        Some(attachment) => {
+            let reading = Reading {
+                epoch,
+                network: &attachment.network,
+                guard,
+            };
+
+            lookup_binding(conn, &reading, identity)?
+        }
+        // No network has claimed the interface, so there is no
+        // network whose bindings could be consulted. Reported as a
+        // network of `None` rather than as an error, because that is
+        // the diagnosis: a client arriving here would be answered by
+        // nobody, and an operator who expected otherwise has found
+        // the fault without having to send a packet.
+        None => None,
+    };
+
+    Ok(Explanation {
+        namespace: namespace.to_owned(),
+        ifname: ifname.to_owned(),
+        network: holder.map(|attachment| attachment.network),
+        matched,
+        considered,
+        cursor: at.clone(),
+    })
 }
 
 // ---------------------------------------------------------------------
@@ -479,6 +783,44 @@ fn event_range_written(
     Ok(transaction.last_insert_rowid())
 }
 
+/// Append the event for a binding that now exists in this form.
+///
+/// The selector appears twice in the payload: once as the resource's
+/// identity, in `resource_id`, and once split into its two parts in
+/// the state. A consumer applying events needs the identity to know
+/// which resource moved, and needs the parts to avoid parsing that
+/// identity back apart.
+fn event_binding_written(
+    transaction: &Transaction<'_>,
+    network: &str,
+    selector: &Selector,
+    address: Ipv4Addr,
+    hostname: Option<&str>,
+    now: i64,
+) -> Result<i64> {
+    transaction
+        .execute(
+            "INSERT INTO event_log (network, kind, resource_id, state, recorded_at)
+             VALUES (?1, ?2, ?3,
+                     json_object('network', ?1, 'selector_kind', ?4,
+                                 'selector_value', ?5, 'address', ?6,
+                                 'hostname', ?7), ?8)",
+            params![
+                network,
+                kind::BINDING,
+                binding_id(selector),
+                selector.kind().as_str(),
+                selector.value(),
+                u32::from(address),
+                hostname,
+                now
+            ],
+        )
+        .map_err(storage("recording a binding"))?;
+
+    Ok(transaction.last_insert_rowid())
+}
+
 /// Append the event for a resource that no longer exists.
 ///
 /// A deletion is a NULL state rather than a kind of its own: the
@@ -520,6 +862,21 @@ pub(crate) struct Writing<'a> {
     pub(crate) clock: &'a dyn Clock,
     /// The epoch the cursor this write is assigned belongs to.
     pub(crate) epoch: &'a Epoch,
+    /// The guard the reads a write does on its way pass through. A
+    /// compare-and-set reads the resource it is about to change, and
+    /// that read is scoped like any other.
+    pub(crate) guard: &'a CrossNetworkGuard,
+}
+
+impl<'a> Writing<'a> {
+    /// The scope for a read this write makes inside `network`.
+    fn reading<'b>(&'b self, network: &'b str) -> Reading<'b> {
+        Reading {
+            epoch: self.epoch,
+            network,
+            guard: self.guard,
+        }
+    }
 }
 
 /// Refuse early if the network named does not exist.
@@ -620,7 +977,8 @@ pub(crate) fn delete_network(
             kind: NETWORK,
             id: name.to_owned(),
             held_by: format!(
-                "it still has {children} attachment(s) and range(s); detach and remove those first"
+                "it still has {children} attachment(s), range(s) and binding(s); remove those \
+                 first"
             ),
         });
     }
@@ -656,7 +1014,8 @@ fn count_children(transaction: &Transaction<'_>, network: &str) -> Result<i64> {
     transaction
         .query_row(
             "SELECT (SELECT count(*) FROM attachment WHERE network = ?1)
-                  + (SELECT count(*) FROM address_range WHERE network = ?1)",
+                  + (SELECT count(*) FROM address_range WHERE network = ?1)
+                  + (SELECT count(*) FROM binding WHERE network = ?1)",
             params![network],
             |row| row.get(0),
         )
@@ -749,12 +1108,10 @@ pub(crate) fn detach_interface(
     // Scoped to the network that asked. An interface another network
     // holds is not found here, rather than being released on that
     // network's behalf.
-    let current =
-        attachment(&transaction, writing.epoch, network, namespace, ifname)?.ok_or_else(|| {
-            Error::NotFound {
-                kind: ATTACHMENT,
-                id: format!("{id} in the network {network}"),
-            }
+    let current = attachment(&transaction, &writing.reading(network), namespace, ifname)?
+        .ok_or_else(|| Error::NotFound {
+            kind: ATTACHMENT,
+            id: format!("{id} in the network {network}"),
         })?;
     if &current.cursor != expected {
         return Err(Error::changed(ATTACHMENT, id, expected, &current.cursor));
@@ -891,12 +1248,13 @@ pub(crate) fn update_address_range(
         .transaction()
         .map_err(storage("starting a transaction to resize a range"))?;
 
-    let current = address_range(&transaction, writing.epoch, network, name)?.ok_or_else(|| {
-        Error::NotFound {
-            kind: RANGE,
-            id: format!("{name} in the network {network}"),
-        }
-    })?;
+    let current =
+        address_range(&transaction, &writing.reading(network), name)?.ok_or_else(|| {
+            Error::NotFound {
+                kind: RANGE,
+                id: format!("{name} in the network {network}"),
+            }
+        })?;
     if &current.cursor != expected {
         return Err(Error::changed(RANGE, name, expected, &current.cursor));
     }
@@ -936,12 +1294,13 @@ pub(crate) fn delete_address_range(
         .transaction()
         .map_err(storage("starting a transaction to remove a range"))?;
 
-    let current = address_range(&transaction, writing.epoch, network, name)?.ok_or_else(|| {
-        Error::NotFound {
-            kind: RANGE,
-            id: format!("{name} in the network {network}"),
-        }
-    })?;
+    let current =
+        address_range(&transaction, &writing.reading(network), name)?.ok_or_else(|| {
+            Error::NotFound {
+                kind: RANGE,
+                id: format!("{name} in the network {network}"),
+            }
+        })?;
     if &current.cursor != expected {
         return Err(Error::changed(RANGE, name, expected, &current.cursor));
     }
@@ -958,6 +1317,200 @@ pub(crate) fn delete_address_range(
     transaction
         .commit()
         .map_err(storage("committing the removal of an address range"))?;
+
+    Ok(Cursor::new(
+        writing.epoch.clone(),
+        sequence_as_position(sequence)?,
+    ))
+}
+
+/// Refuse a hostname the store would not be able to report back.
+///
+/// The same three rules every other name gets, and no more. A
+/// hostname has a stricter grammar than this -- labels, lengths,
+/// which characters a zone will accept -- and that grammar belongs
+/// with the zones that publish it rather than here, where refusing a
+/// name on a rule the DNS side has not been written yet would be
+/// guessing at it.
+fn validate_hostname(hostname: Option<&str>) -> Result<()> {
+    match hostname {
+        Some(hostname) => validate_name("hostname", hostname),
+        None => Ok(()),
+    }
+}
+
+/// Configure a binding, refusing a selector the network already has
+/// one for.
+pub(crate) fn create_binding(
+    conn: &mut Connection,
+    writing: &Writing<'_>,
+    network: &str,
+    selector: &Selector,
+    address: Ipv4Addr,
+    hostname: Option<&str>,
+) -> Result<Cursor> {
+    validate_hostname(hostname)?;
+
+    let now = writing.clock.unix_seconds();
+    let transaction = conn
+        .transaction()
+        .map_err(storage("starting a transaction to configure a binding"))?;
+
+    require_network(&transaction, network)?;
+
+    let sequence = event_binding_written(&transaction, network, selector, address, hostname, now)?;
+
+    transaction
+        .execute(
+            "INSERT INTO binding
+                 (network, selector_kind, selector_value, address, hostname, cursor_seq)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                network,
+                selector.kind().as_str(),
+                selector.value(),
+                u32::from(address),
+                hostname,
+                sequence
+            ],
+        )
+        .map_err(|error| {
+            if is_constraint(&error) {
+                Error::Conflict {
+                    kind: BINDING,
+                    id: binding_id(selector),
+                    held_by: format!(
+                        "the network {network} already has a binding for that selector; change \
+                         it rather than adding a second answer for one client"
+                    ),
+                }
+            } else {
+                Error::storage("configuring a binding", error)
+            }
+        })?;
+
+    transaction
+        .commit()
+        .map_err(storage("committing a binding"))?;
+
+    Ok(Cursor::new(
+        writing.epoch.clone(),
+        sequence_as_position(sequence)?,
+    ))
+}
+
+/// Change a binding that is still where the caller read it.
+///
+/// The selector is not changeable here, being the binding's identity:
+/// a binding whose selector moved is a different binding, and a
+/// consumer watching the history would have to be told that one
+/// resource went away and another arrived. Removing it and
+/// configuring the new one says exactly that.
+pub(crate) fn update_binding(
+    conn: &mut Connection,
+    writing: &Writing<'_>,
+    network: &str,
+    selector: &Selector,
+    expected: &Cursor,
+    address: Ipv4Addr,
+    hostname: Option<&str>,
+) -> Result<Cursor> {
+    validate_hostname(hostname)?;
+
+    let now = writing.clock.unix_seconds();
+    let transaction = conn
+        .transaction()
+        .map_err(storage("starting a transaction to change a binding"))?;
+
+    let current = binding(&transaction, &writing.reading(network), selector)?.ok_or_else(|| {
+        Error::NotFound {
+            kind: BINDING,
+            id: format!("{} in the network {network}", binding_id(selector)),
+        }
+    })?;
+    if &current.cursor != expected {
+        return Err(Error::changed(
+            BINDING,
+            binding_id(selector),
+            expected,
+            &current.cursor,
+        ));
+    }
+
+    let sequence = event_binding_written(&transaction, network, selector, address, hostname, now)?;
+
+    transaction
+        .execute(
+            "UPDATE binding SET address = ?4, hostname = ?5, cursor_seq = ?6
+             WHERE network = ?1 AND selector_kind = ?2 AND selector_value = ?3",
+            params![
+                network,
+                selector.kind().as_str(),
+                selector.value(),
+                u32::from(address),
+                hostname,
+                sequence
+            ],
+        )
+        .map_err(storage("changing a binding"))?;
+
+    transaction
+        .commit()
+        .map_err(storage("committing a changed binding"))?;
+
+    Ok(Cursor::new(
+        writing.epoch.clone(),
+        sequence_as_position(sequence)?,
+    ))
+}
+
+/// Remove a binding that is still where the caller read it.
+pub(crate) fn delete_binding(
+    conn: &mut Connection,
+    writing: &Writing<'_>,
+    network: &str,
+    selector: &Selector,
+    expected: &Cursor,
+) -> Result<Cursor> {
+    let now = writing.clock.unix_seconds();
+    let transaction = conn
+        .transaction()
+        .map_err(storage("starting a transaction to remove a binding"))?;
+
+    let current = binding(&transaction, &writing.reading(network), selector)?.ok_or_else(|| {
+        Error::NotFound {
+            kind: BINDING,
+            id: format!("{} in the network {network}", binding_id(selector)),
+        }
+    })?;
+    if &current.cursor != expected {
+        return Err(Error::changed(
+            BINDING,
+            binding_id(selector),
+            expected,
+            &current.cursor,
+        ));
+    }
+
+    let sequence = event_deleted(
+        &transaction,
+        network,
+        kind::BINDING,
+        &binding_id(selector),
+        now,
+    )?;
+
+    transaction
+        .execute(
+            "DELETE FROM binding
+             WHERE network = ?1 AND selector_kind = ?2 AND selector_value = ?3",
+            params![network, selector.kind().as_str(), selector.value()],
+        )
+        .map_err(storage("removing a binding"))?;
+
+    transaction
+        .commit()
+        .map_err(storage("committing the removal of a binding"))?;
 
     Ok(Cursor::new(
         writing.epoch.clone(),

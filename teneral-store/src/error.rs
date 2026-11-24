@@ -129,6 +129,27 @@ pub enum Error {
         found: String,
     },
 
+    /// A read scoped to one network produced a row belonging to
+    /// another, and the store refused to serve it.
+    ///
+    /// By construction this cannot happen, which is exactly why it is
+    /// an error and is counted rather than left to a comment: a store
+    /// that noticed a cross-network answer and served it anyway would
+    /// have turned the one failure this project exists to prevent
+    /// into a metric. Both networks are named, because the pair is
+    /// what an operator or a test needs in order to tell which of the
+    /// two scopes was the wrong one.
+    CrossNetwork {
+        /// What kind of resource was being read.
+        kind: &'static str,
+        /// Which one, as its identity reads within a network.
+        id: String,
+        /// The network the caller asked about.
+        asked: String,
+        /// The network the row came from.
+        found: String,
+    },
+
     /// A name or a value the store will not store.
     ///
     /// The store validates the few things it would otherwise have to
@@ -274,6 +295,17 @@ impl fmt::Display for Error {
                 f,
                 "the {kind} {id} was at {expected} when it was read and is at {found} now, so the \
                  change was computed from a state it has left"
+            ),
+            Error::CrossNetwork {
+                kind,
+                id,
+                asked,
+                found,
+            } => write!(
+                f,
+                "the {kind} {id} was read in the network {asked} and belongs to {found}; the \
+                 store refused the answer rather than serving one network's configuration to \
+                 another"
             ),
             Error::Invalid { what, detail } => write!(f, "that {what} will not do: {detail}"),
             Error::Threads { context, source } => {

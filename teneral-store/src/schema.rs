@@ -23,7 +23,7 @@ use crate::error::{Error, Result};
 /// above it is refused. Adding a migration raises this, in the same
 /// commit, and the test at the foot of this file is what notices if
 /// only one of the two happened.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// One step from the version below it to its own.
 struct Migration {
@@ -47,6 +47,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 2,
         sql: include_str!("migrations/0002_resources.sql"),
+    },
+    Migration {
+        version: 3,
+        sql: include_str!("migrations/0003_bindings.sql"),
     },
 ];
 

@@ -26,22 +26,29 @@
 //! runtime feature, so the dependency's own feature list is what
 //! holds the rule rather than anybody's vigilance.
 //!
-//! What exists so far is the foundation and the configured resources
-//! a lookup is scoped by: a database that opens, migrates itself
-//! forward, refuses to open one a newer build wrote, carries an
-//! identity of its own, keeps an event log whose sequence numbers are
-//! never issued twice, and holds networks, the interfaces attached to
-//! them and the address ranges they own. Bindings, leases and the
+//! What exists so far is the foundation, the configured resources a
+//! lookup is scoped by, and the lookup itself: a database that opens,
+//! migrates itself forward, refuses to open one a newer build wrote,
+//! carries an identity of its own, keeps an event log whose sequence
+//! numbers are never issued twice, and holds networks, the interfaces
+//! attached to them, the address ranges they own and the bindings
+//! configured in them. Over those sits the question the whole store
+//! exists to answer -- given what a client presents, in this network,
+//! which binding applies -- together with the explain operation that
+//! asks it with no packet involved, and the check that refuses and
+//! counts any answer that came from the wrong network. Leases and the
 //! reads over the history come next.
 
 mod clock;
 mod cursor;
 mod db;
 mod error;
+mod guard;
 mod identity;
 mod model;
 mod ops;
 mod schema;
+mod selector;
 mod sqlite;
 mod store;
 
@@ -54,7 +61,8 @@ pub use clock::{Clock, SystemClock};
 pub use cursor::Cursor;
 pub use error::{Error, Result};
 pub use identity::Epoch;
-pub use model::{AddressRange, Attachment, Network};
+pub use model::{AddressRange, Attachment, Binding, Explanation, Network};
 pub use schema::SCHEMA_VERSION;
+pub use selector::{ClientIdentity, Selector, SelectorKind};
 pub use sqlite::{SnapshotView, SqliteStore};
 pub use store::{BindingStore, ReadHandle};

@@ -72,9 +72,11 @@ use crate::clock::{Clock, SystemClock};
 use crate::cursor::Cursor;
 use crate::db::{self, Database};
 use crate::error::{Error, Result};
+use crate::guard::CrossNetworkGuard;
 use crate::identity::Epoch;
-use crate::model::{AddressRange, Attachment, Network};
-use crate::ops::{self, Writing};
+use crate::model::{AddressRange, Attachment, Binding, Explanation, Network};
+use crate::ops::{self, Reading, Writing};
+use crate::selector::{ClientIdentity, Selector};
 use crate::store::{BindingStore, ReadHandle};
 
 /// A unit of work for the writer thread.
@@ -191,6 +193,10 @@ pub struct SqliteStore {
     clock: Arc<dyn Clock>,
     /// Live thread counts, shared with every thread the store starts.
     census: Arc<ThreadCensus>,
+    /// The cross-network check, shared with every view this store
+    /// hands out so that the count is the store's rather than one
+    /// view's.
+    guard: Arc<CrossNetworkGuard>,
 }
 
 impl SqliteStore {
@@ -262,6 +268,7 @@ impl SqliteStore {
                 schema_version,
                 clock,
                 census,
+                guard: Arc::new(CrossNetworkGuard::default()),
             }),
             Ok(Err(refusal)) => {
                 let _ = writer.join();
@@ -349,12 +356,17 @@ impl SqliteStore {
         self.write(context, move |database| job(database)).await
     }
 
-    /// The clock-and-epoch pair every write needs, for a job running
-    /// on the writer thread.
-    fn writing<'a>(clock: &'a Arc<dyn Clock>, epoch: &'a Epoch) -> Writing<'a> {
+    /// What every write needs besides the connection, for a job
+    /// running on the writer thread.
+    fn writing<'a>(
+        clock: &'a Arc<dyn Clock>,
+        epoch: &'a Epoch,
+        guard: &'a Arc<CrossNetworkGuard>,
+    ) -> Writing<'a> {
         Writing {
             clock: clock.as_ref(),
             epoch,
+            guard: guard.as_ref(),
         }
     }
 }
@@ -399,11 +411,19 @@ impl BindingStore for SqliteStore {
         self.schema_version
     }
 
+    fn cross_network_answers(&self) -> u64 {
+        // The store's own check, which every view it hands out
+        // shares, so this is the count for the store rather than for
+        // whichever view happened to notice.
+        self.guard.refused()
+    }
+
     async fn read(&self) -> Result<Box<dyn ReadHandle>> {
         let view = SnapshotView::open(
             self.path.clone(),
             self.epoch.clone(),
             Arc::clone(&self.census),
+            Arc::clone(&self.guard),
         )
         .await?;
 
@@ -426,11 +446,12 @@ impl BindingStore for SqliteStore {
 
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
+        let guard = Arc::clone(&self.guard);
 
         self.write("create a network", move |database| {
             ops::create_network(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch),
+                &SqliteStore::writing(&clock, &epoch, &guard),
                 &network,
             )
         })
@@ -443,11 +464,12 @@ impl BindingStore for SqliteStore {
 
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
+        let guard = Arc::clone(&self.guard);
 
         self.write("remove a network", move |database| {
             ops::delete_network(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch),
+                &SqliteStore::writing(&clock, &epoch, &guard),
                 &network,
                 &expected,
             )
@@ -467,11 +489,12 @@ impl BindingStore for SqliteStore {
 
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
+        let guard = Arc::clone(&self.guard);
 
         self.write("claim an interface", move |database| {
             ops::attach_interface(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch),
+                &SqliteStore::writing(&clock, &epoch, &guard),
                 &network,
                 &namespace,
                 &ifname,
@@ -494,11 +517,12 @@ impl BindingStore for SqliteStore {
 
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
+        let guard = Arc::clone(&self.guard);
 
         self.write("release an interface", move |database| {
             ops::detach_interface(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch),
+                &SqliteStore::writing(&clock, &epoch, &guard),
                 &network,
                 &namespace,
                 &ifname,
@@ -520,11 +544,12 @@ impl BindingStore for SqliteStore {
 
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
+        let guard = Arc::clone(&self.guard);
 
         self.write("create an address range", move |database| {
             ops::create_address_range(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch),
+                &SqliteStore::writing(&clock, &epoch, &guard),
                 &network,
                 &name,
                 first,
@@ -548,11 +573,12 @@ impl BindingStore for SqliteStore {
 
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
+        let guard = Arc::clone(&self.guard);
 
         self.write("resize an address range", move |database| {
             ops::update_address_range(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch),
+                &SqliteStore::writing(&clock, &epoch, &guard),
                 &network,
                 &name,
                 &expected,
@@ -575,17 +601,123 @@ impl BindingStore for SqliteStore {
 
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
+        let guard = Arc::clone(&self.guard);
 
         self.write("remove an address range", move |database| {
             ops::delete_address_range(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch),
+                &SqliteStore::writing(&clock, &epoch, &guard),
                 &network,
                 &name,
                 &expected,
             )
         })
         .await
+    }
+
+    async fn create_binding(
+        &self,
+        network: &str,
+        selector: &Selector,
+        address: std::net::Ipv4Addr,
+        hostname: Option<&str>,
+    ) -> Result<Cursor> {
+        let network = network.to_owned();
+        let selector = selector.clone();
+        let hostname = hostname.map(str::to_owned);
+
+        let clock = Arc::clone(&self.clock);
+        let epoch = self.epoch.clone();
+        let guard = Arc::clone(&self.guard);
+
+        self.write("configure a binding", move |database| {
+            ops::create_binding(
+                database.connection_mut(),
+                &SqliteStore::writing(&clock, &epoch, &guard),
+                &network,
+                &selector,
+                address,
+                hostname.as_deref(),
+            )
+        })
+        .await
+    }
+
+    async fn update_binding(
+        &self,
+        network: &str,
+        selector: &Selector,
+        expected: &Cursor,
+        address: std::net::Ipv4Addr,
+        hostname: Option<&str>,
+    ) -> Result<Cursor> {
+        let network = network.to_owned();
+        let selector = selector.clone();
+        let expected = expected.clone();
+        let hostname = hostname.map(str::to_owned);
+
+        let clock = Arc::clone(&self.clock);
+        let epoch = self.epoch.clone();
+        let guard = Arc::clone(&self.guard);
+
+        self.write("change a binding", move |database| {
+            ops::update_binding(
+                database.connection_mut(),
+                &SqliteStore::writing(&clock, &epoch, &guard),
+                &network,
+                &selector,
+                &expected,
+                address,
+                hostname.as_deref(),
+            )
+        })
+        .await
+    }
+
+    async fn delete_binding(
+        &self,
+        network: &str,
+        selector: &Selector,
+        expected: &Cursor,
+    ) -> Result<Cursor> {
+        let network = network.to_owned();
+        let selector = selector.clone();
+        let expected = expected.clone();
+
+        let clock = Arc::clone(&self.clock);
+        let epoch = self.epoch.clone();
+        let guard = Arc::clone(&self.guard);
+
+        self.write("remove a binding", move |database| {
+            ops::delete_binding(
+                database.connection_mut(),
+                &SqliteStore::writing(&clock, &epoch, &guard),
+                &network,
+                &selector,
+                &expected,
+            )
+        })
+        .await
+    }
+}
+
+/// The scope for one network-named read, assembled on the thread
+/// that is about to run it.
+///
+/// A function rather than a method, because the three values it
+/// gathers arrive as owned clones moved into a job closure: the
+/// closure has to own what it reads from, and this is what turns
+/// those owned values back into the borrowed scope the statements
+/// take.
+fn reading<'a>(
+    epoch: &'a Epoch,
+    network: &'a str,
+    guard: &'a Arc<CrossNetworkGuard>,
+) -> Reading<'a> {
+    Reading {
+        epoch,
+        network,
+        guard: guard.as_ref(),
     }
 }
 
@@ -604,6 +736,10 @@ pub struct SnapshotView {
     thread: Option<JoinHandle<()>>,
     /// The position every answer from this view is consistent with.
     cursor: Cursor,
+    /// The store's cross-network check, shared rather than this
+    /// view's own: the count is a property of the store, and a view
+    /// is a short-lived thing nobody would read a counter off.
+    guard: Arc<CrossNetworkGuard>,
 }
 
 impl SnapshotView {
@@ -615,7 +751,12 @@ impl SnapshotView {
     /// deferred transaction takes its snapshot at its first read, so
     /// reading the position is both the answer this returns and the
     /// act that fixes everything the view will go on to say.
-    async fn open(path: PathBuf, epoch: Epoch, census: Arc<ThreadCensus>) -> Result<Self> {
+    async fn open(
+        path: PathBuf,
+        epoch: Epoch,
+        census: Arc<ThreadCensus>,
+        guard: Arc<CrossNetworkGuard>,
+    ) -> Result<Self> {
         let (queries, mut jobs) = mpsc::unbounded_channel::<ReadJob>();
         let (ready, opened) = oneshot::channel::<Result<u64>>();
 
@@ -664,6 +805,7 @@ impl SnapshotView {
                 queries: Some(queries),
                 thread: Some(thread),
                 cursor: Cursor::new(epoch, position),
+                guard,
             }),
             Ok(Err(refusal)) => {
                 let _ = thread.join();
@@ -701,6 +843,12 @@ impl SnapshotView {
     /// The epoch this view's answers are positioned in.
     fn epoch(&self) -> Epoch {
         self.cursor.epoch().clone()
+    }
+
+    /// The store's cross-network check, for a job about to run on
+    /// this view's thread.
+    fn guard(&self) -> Arc<CrossNetworkGuard> {
+        Arc::clone(&self.guard)
     }
 }
 
@@ -750,10 +898,11 @@ impl ReadHandle for SnapshotView {
 
     async fn attachments(&self, network: &str) -> Result<Vec<Attachment>> {
         let epoch = self.epoch();
+        let guard = self.guard();
         let network = network.to_owned();
 
         self.query("list a network's attachments", move |connection| {
-            ops::attachments(connection, &epoch, &network)
+            ops::attachments(connection, &reading(&epoch, &network, &guard))
         })
         .await
     }
@@ -765,34 +914,140 @@ impl ReadHandle for SnapshotView {
         ifname: &str,
     ) -> Result<Option<Attachment>> {
         let epoch = self.epoch();
+        let guard = self.guard();
         let network = network.to_owned();
         let namespace = namespace.to_owned();
         let ifname = ifname.to_owned();
 
         self.query("read an attachment", move |connection| {
-            ops::attachment(connection, &epoch, &network, &namespace, &ifname)
+            ops::attachment(
+                connection,
+                &reading(&epoch, &network, &guard),
+                &namespace,
+                &ifname,
+            )
         })
         .await
     }
 
     async fn address_ranges(&self, network: &str) -> Result<Vec<AddressRange>> {
         let epoch = self.epoch();
+        let guard = self.guard();
         let network = network.to_owned();
 
         self.query("list a network's address ranges", move |connection| {
-            ops::address_ranges(connection, &epoch, &network)
+            ops::address_ranges(connection, &reading(&epoch, &network, &guard))
         })
         .await
     }
 
     async fn address_range(&self, network: &str, name: &str) -> Result<Option<AddressRange>> {
         let epoch = self.epoch();
+        let guard = self.guard();
         let network = network.to_owned();
         let name = name.to_owned();
 
         self.query("read an address range", move |connection| {
-            ops::address_range(connection, &epoch, &network, &name)
+            ops::address_range(connection, &reading(&epoch, &network, &guard), &name)
         })
+        .await
+    }
+
+    async fn bindings(&self, network: &str) -> Result<Vec<Binding>> {
+        let epoch = self.epoch();
+        let guard = self.guard();
+        let network = network.to_owned();
+
+        self.query("list a network's bindings", move |connection| {
+            ops::bindings(connection, &reading(&epoch, &network, &guard))
+        })
+        .await
+    }
+
+    async fn binding(&self, network: &str, selector: &Selector) -> Result<Option<Binding>> {
+        let epoch = self.epoch();
+        let guard = self.guard();
+        let network = network.to_owned();
+        let selector = selector.clone();
+
+        self.query("read a binding", move |connection| {
+            ops::binding(connection, &reading(&epoch, &network, &guard), &selector)
+        })
+        .await
+    }
+
+    async fn lookup_binding(
+        &self,
+        network: &str,
+        identity: &ClientIdentity,
+    ) -> Result<Option<Binding>> {
+        let epoch = self.epoch();
+        let guard = self.guard();
+        let network = network.to_owned();
+        let identity = identity.clone();
+
+        self.query("look a client up in a network", move |connection| {
+            ops::lookup_binding(connection, &reading(&epoch, &network, &guard), &identity)
+        })
+        .await
+    }
+
+    async fn lookup_binding_on_interface(
+        &self,
+        network: &str,
+        namespace: &str,
+        ifname: &str,
+        identity: &ClientIdentity,
+    ) -> Result<Option<Binding>> {
+        let epoch = self.epoch();
+        let guard = self.guard();
+        let network = network.to_owned();
+        let namespace = namespace.to_owned();
+        let ifname = ifname.to_owned();
+        let identity = identity.clone();
+
+        self.query("look a client up on an interface", move |connection| {
+            ops::lookup_binding_on_interface(
+                connection,
+                &reading(&epoch, &network, &guard),
+                &namespace,
+                &ifname,
+                &identity,
+            )
+        })
+        .await
+    }
+
+    async fn explain(
+        &self,
+        namespace: &str,
+        ifname: &str,
+        identity: &ClientIdentity,
+    ) -> Result<Explanation> {
+        let epoch = self.epoch();
+        let guard = self.guard();
+        let namespace = namespace.to_owned();
+        let ifname = ifname.to_owned();
+        let identity = identity.clone();
+        // The view's own position, so that an explanation carries the
+        // cursor it was computed at and can be ordered against a
+        // watch stream like any other answer.
+        let at = self.cursor.clone();
+
+        self.query(
+            "explain what a client would be answered",
+            move |connection| {
+                ops::explain(
+                    connection,
+                    &epoch,
+                    guard.as_ref(),
+                    &at,
+                    &namespace,
+                    &ifname,
+                    &identity,
+                )
+            },
+        )
         .await
     }
 }
