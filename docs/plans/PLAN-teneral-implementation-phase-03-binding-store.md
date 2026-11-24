@@ -498,13 +498,27 @@ the crates.io API the same day.
     from.
 
     Address *selection* is different and does have a source. RFC
-    2131 section 4.3.1 specifies the order a server considers --
-    the address the client already has, then the address it
-    requested, then one from the pool -- and that gets the
-    provenance file's first RFC-cited rows. The tie-break within
-    the pool is unspecified, so teneral's choice of the lowest
-    free address is recorded as its own with the RFC cited for
-    the part the RFC covers and the tie-break named as ours.
+    2131 section 4.3.1 specifies the order a server considers,
+    and it is **four** steps rather than the three first written
+    here: the address the client already holds, then the address
+    it held under a now-expired or released lease if that address
+    is in the pool and not already allocated, then the address it
+    requested if valid and not already allocated, then one from
+    the pool. The keyword introducing the list is SHOULD, not
+    MUST. Step 3d found the omission by reading the section
+    rather than this paragraph, which is the second time in this
+    phase that a premise about what an RFC says has turned out
+    wrong -- see decision 12 above for why that class of claim
+    wants checking precisely when it is load-bearing.
+
+    That order gets a provenance row. Two things in teneral's
+    implementation of it do not, because the section does not
+    settle them: the tie-break within the pool, where teneral
+    takes the lowest free address and section 2.2's "least
+    recently assigned" is an example rather than a rule; and the
+    reading of the section's "valid" as "inside one of the
+    network's configured ranges". Both are named as teneral's own
+    inside the row rather than left to look RFC-cited.
 
 13. **Migrations are forward-only, versioned in
     `PRAGMA user_version`, and a database written by a newer
@@ -532,7 +546,7 @@ operator rather than working around it.
 | 3a | high | opus | none | The crate, the dependency and the schema's foundations. Read decisions 1, 2, 5, 7 and 13 and survey findings 4, 5 and 6 first. **Do the dependency gate before anything else:** add `teneral-store` as a second workspace member, raise `[workspace.package] rust-version` to `1.89` with a comment saying rusqlite 0.41.0+ is what needed it, add `rusqlite = { version = "0.43.0", default-features = false, features = ["bundled", "cache", "extra_check"] }`, and per decision 3 add `async-trait` and `tokio = { default-features = false, features = ["sync"] }` as dependencies plus a `tokio` dev-dependency carrying `["rt", "macros"]` to drive tests -- pick the current released version of each and say in the report what resolved. Then run `make lock` then `make build` and `make deny`, and confirm from `Cargo.lock` that the resolved rusqlite is 0.43.x rather than 0.40.2 -- the MSRV raise is the only reason it can be, so a 0.40.x in the lockfile means the raise did not take. The build must succeed through the `Makefile`, which compiles `--network none` against a read-only cargo cache, so the bundled SQLite's C compile has to work offline with no network and no writable cache; if it cannot, **stop and report** rather than switching to the system `libsqlite3`, because that choice is decision 2's and belongs to the operator. Then build the schema's foundations and nothing above them: `PRAGMA user_version` holding a schema version with forward-only migrations applied at open and a refusal (naming both versions) when the database is ahead of the code; a per-connection pragma set that includes `foreign_keys = ON` -- per connection rather than a property of the file, and a test must assert it so that removing the line fails -- plus `journal_mode = WAL` and `synchronous = FULL` on the writer per decision 4. **Note what the step found about the last two**, because the brief originally said `foreign_keys` was "off by default in SQLite" and that is not true of this engine: `libsqlite3-sys` 0.40.0's `build.rs:171` compiles the bundled amalgamation with `-DSQLITE_DEFAULT_FOREIGN_KEYS=1`, and it moves neither `SQLITE_DEFAULT_SYNCHRONOUS` nor `SQLITE_DEFAULT_WAL_SYNCHRONOUS` off 2. So both pragmas are already in force before the store asks, a behavioural test of either passes with its pragma line deleted, and each needs a second test that builds a connection with the setting *off* and asserts the pragma set turns it on. `journal_mode` is the exception and is genuinely guarded, WAL not being a default; a single-row store identity table whose epoch is `lower(hex(randomblob(16)))`, stable across reopen; and the event log table as `seq INTEGER PRIMARY KEY AUTOINCREMENT` with a test that writes rows, deletes them, writes again, and asserts the new sequence exceeds every sequence ever issued. No trait, no resources, no lookup: 3b owns the trait. Verify with `make build`, `make test`, `make lint`, `make deny` and `pre-commit run --all-files`, and paste the rusqlite line from `Cargo.lock` into the report. |
 | 3b | high | opus | none | The storage trait, and the first three resources over it. Read decisions 1, 3, 6 and 10 and `docs/api-design.md:776-820`, whose five numbered demands are the specification this step is written against -- the trait's doc comment should say, per method group, which demand it serves, so that phase 8 can tell a deliberate shape from an accident. The trait is **asynchronous** (decision 3, which the operator overturned at the back brief -- read it in full, because it is not merely `async fn` on the signatures: the writer is a thread the store owns and fed by a channel, each live read handle holds its transaction on a thread of its own, and the trait is declared with `#[async_trait]` rather than native `async fn` so that it stays dyn-compatible for phase 8). No `spawn_blocking` anywhere, and `tokio` is used for its channels only. It must give: write operations that return the cursor they were assigned, never a bare `Ok(())`; a read handle that can be held across the caller's awaits, that reports the cursor it reads at, and that gives a consistent view across several reads rather than independent getters -- that handle is the hardest thing in this step, and decision 3 says why the obvious implementation of it does not compile; compare-and-set forms for the operations the API says are single operations; and **a network parameter on every method**, with the deliberately store-global ones (the epoch, the schema version, history reads across a scope) enumerated in the trait's doc comment, because a reader needs to tell those from an oversight. Then implement networks, attachments and address ranges over it, including decision 6's primary key on `(namespace, ifname)` -- and prove the constraint rather than asserting it, with a test that bypasses the trait and inserts the conflicting attachment with raw SQL so the database is what refuses. Every resource write emits an event into 3a's log in the same transaction as the write, never after it. Two networks sharing a subnet is the fixture every test uses from here on; write it once, in a test support module, and use it in this step's tests rather than deferring it to 3c. Keep the connection type and all SQL private to the crate (decision 1). |
 | 3c | high | opus | none | Bindings, selector matching, and the two diagnostics that belong to lookup. Read decisions 10 and 12, `docs/api-design.md:195-296` for the resource model and `docs/api-design.md:499-556` for what a consumer needs in order to notice a wrong answer. A selector is a `(kind, value)` pair meaningful only inside a network and is **not** independently addressable, so a binding's identity is `(network, selector kind, selector value)` and there is no table a selector exists in on its own. Client identity is the union of MAC, client-id, DUID/IAID, user-class and vendor-class. Implement the lookup that answers "given these presented attributes in this network, which binding applies", decide the precedence order between kinds, and **return which selector matched** on every lookup result -- that return value is not a nicety, it is the only way a consumer can check that its understanding of a precedence teneral invented matches the daemon's. Document the order in `docs/api-design.md`, in the section that already says the precedence is the API's own, and write no `docs/provenance.md` row for it (decision 12 says why; a row citing nothing would break the file's rule). Also build the explain operation -- given a synthetic identity and an attachment, what would be answered, which selector matched, and in which network, with no packet involved -- because `docs/api-design.md:505-515` calls it the single most valuable diagnostic the API can offer and the front-ends need the same code path anyway. And build decision 10's guard: compare every returned row's network with the one asked for, error, and count. Test it by planting a mismatched row with raw SQL and asserting both the error and the counter; assert the counter is zero after the rest of the suite. Two networks with the same MAC bound to different addresses, each resolving to its own, is the test that matters most here. |
-| 3d | high | opus | none | Leases: the lifecycle, allocation, and the durability point. The hardest step in the phase and the one where a defect is both silent and cross-network, so read decisions 4, 8, 9 and 12 in full first. A lease is keyed by `(network, address)` because within one network an address has at most one holder, and a client may legitimately hold two addresses during a renumber -- so do not key it by client, and make "what does this client hold" a first-class query within a network rather than a filter a caller applies to a list, because that query is the thing the existing consumer cannot do today (`docs/api-design.md:261-273`). Implement the state machine with its transitions and the compare-and-set forms the API names as single operations: "create this binding only if no lease holds the address" and "revoke that lease and create this binding" are each one operation, because a read followed by a write is correct only on a single-writer store. Expiry is absolute and lazy (decision 9): a lease past its expiry is expired when read, with no sweeper having run, and allocation must not hand out an address whose lease has expired but not been swept -- write the test that proves it by advancing the injected `Clock` and allocating without sweeping. Address selection follows RFC 2131 section 4.3.1's order -- the address the client already holds, then the address it requested if free and in range, then one from the pool -- with the lowest free address as the pool tie-break; add the provenance rows for the RFC-cited part and name the tie-break as teneral's own (decision 12). The lease id is the sequence at which the holder acquired the address (decision 8), so a renewal keeps it and a reassignment changes it; test both. The durability point is decision 4: the commit happens before anything could ACK, and the store must offer no API that lets a caller get a lease back before it is committed. Finally, run the `mutation-check` skill over the lease module: break each guard in turn, confirm a test fails and that it is the right test, restore from a copy rather than with `git checkout`, run each mutant under `timeout`, and count a timeout as killed. Report the helper's output and the script's path. |
+| 3d | high | opus | none | Leases: the lifecycle, allocation, and the durability point. The hardest step in the phase and the one where a defect is both silent and cross-network, so read decisions 4, 8, 9 and 12 in full first. A lease is keyed by `(network, address)` because within one network an address has at most one holder, and a client may legitimately hold two addresses during a renumber -- so do not key it by client, and make "what does this client hold" a first-class query within a network rather than a filter a caller applies to a list, because that query is the thing the existing consumer cannot do today (`docs/api-design.md:261-273`). Implement the state machine with its transitions and the compare-and-set forms the API names as single operations: "create this binding only if no lease holds the address" and "revoke that lease and create this binding" are each one operation, because a read followed by a write is correct only on a single-writer store. Expiry is absolute and lazy (decision 9): a lease past its expiry is expired when read, with no sweeper having run, and allocation must not hand out an address whose lease has expired but not been swept -- write the test that proves it by advancing the injected `Clock` and allocating without sweeping. Address selection follows RFC 2131 section 4.3.1's order, which this brief originally described as three steps and which **has four**: the address the client already holds, then the address it held under a lapsed lease if that address is in the pool and unallocated, then the address it requested if valid and unallocated, then one from the pool -- introduced by SHOULD rather than MUST. The step found that by reading the section, and the correction is kept here rather than only in the notes so that nobody re-derives the wrong list. The lowest free address is the pool tie-break and is **not** from that source; add the provenance row for the RFC-cited order and name the tie-break, and the reading of "valid", as teneral's own (decision 12). The lease id is the sequence at which the holder acquired the address (decision 8), so a renewal keeps it and a reassignment changes it; test both. The durability point is decision 4: the commit happens before anything could ACK, and the store must offer no API that lets a caller get a lease back before it is committed. Finally, run the `mutation-check` skill over the lease module: break each guard in turn, confirm a test fails and that it is the right test, restore from a copy rather than with `git checkout`, run each mutant under `timeout`, and count a timeout as killed. Report the helper's output and the script's path. |
 | 3e | high | opus | none | The event history's semantics, and the per-network digest. Read `docs/api-design.md:336-497` in full -- it specifies this step almost completely -- and demand 5 at `docs/api-design.md:812-820`. Build the store half of the watch contract and none of the wire half: a snapshot read at a single cursor that is a consistent view rather than a walk that races mutations, ending with that cursor so a stream can resume at exactly it with no gap and no overlap; a history read after a cursor that returns events in order, including the intermediate states, because collapsing a create-then-release into nothing leaves a consumer holding a state it will never see end; and the three distinct answers a presented cursor can get -- resume, evicted, and epoch mismatch -- as distinguishable results the API layer can turn into its `resync` event. Retention is bounded by a count of events and by age, with the count as the operative bound, and the truncation is **durable and in the same transaction as the write that triggers it**, with a low-water mark recorded so that "evicted" is distinguishable from "never existed" rather than inferred from an empty result. Every event carries its network, including on a single-network read, and the total order must not be presentable as causality between networks -- say so in the doc comment, because a consumer that reads cross-network causality from the cursor is a bug this layer can prevent only by documenting. Also build the per-network digest from `docs/api-design.md:535-543`: a cheap value per network that changes when its configured set changes, so a consumer compares one value instead of diffing everything. Test that it changes on a binding change in its own network and does **not** change on one in the other network -- that second assertion is the whole point of it. |
 | 3f | medium | sonnet | none | Documentation and fold-back. This step writes no store code. Six things. (1) Write `docs/binding-store.md`: the schema with its keys and why each identity is what it is, the five demands and how the trait meets each, the lease lifecycle and its durability point, the retention bound, and the three diagnostics -- a reader who needs the store should not have to read `api-design.md` and the plan to find it. (2) Update `ARCHITECTURE.md` only where the shape changed: the binding store is now real, and the `Related documents` list gains the new page. Do not move reference material into it. (3) Update `AGENTS.md` only if a *convention* changed -- the two-network fixture being mandatory for store tests is one, and so is decision 3's rule in its final form -- the store's interface is async, the store owns the threads its blocking happens on, and a caller that reaches for `spawn_blocking` around a store call has misread it; nothing else. (4) `docs/development.md` must not still describe the store as to come. (5) Add this phase's provenance rows if 3d did not, and check every row the phase added carries its `Row id` and either an RFC section or a named test. (6) Correct the master plan where this phase proved it wrong, add anything declined to its *Future work*, and set phase 3's `Status` to `Complete` with its `Merged` cell; `docs/plans/index.md` stays `In progress`. Run `pre-commit run --all-files`, `make test`, `make lint` and `make deny`, and fix what they report. |
 
@@ -910,6 +924,104 @@ so it is usable as a gate; 39 tests pass; the attachment
 constraint is refused by the database with `UNIQUE constraint
 failed: attachment.namespace, attachment.ifname`; and the three
 `unused dependency` warnings from 3a have cleared.
+
+**2026-11-25 (AEDT): step 3d. Leases, and a second plan premise
+corrected -- this time by the step, before it could become a
+wrong provenance row.** The row described RFC 2131 section
+4.3.1's address selection as three steps: the address the client
+holds, then the address it requested, then one from the pool.
+**The section has four.** Between the first and the "requested"
+step sits the address the client held under a now-expired or
+released lease, if that address is in the pool and not already
+allocated. The keyword introducing the list is **SHOULD**, not
+MUST. The step read the RFC rather than the plan, implemented
+four steps, and said so; the management session verified the
+whole passage independently before the row was committed,
+because a provenance row asserting a normative order is exactly
+the kind of claim this phase has already been wrong about once.
+
+That verification also settled the tie-break. Section 4.3.1 is
+silent on which free address the fourth step takes, and section
+2.2's "least recently assigned" is introduced with a lowercase
+"may", as an example of choosing an address to *reuse* when a
+pool is exhausted -- not a rule, and not about this question. So
+no RFC is cited for the lowest-free-address tie-break, and the
+`lease-address-selection-order` row names the two things that
+are teneral's own: that tie-break, and the reading of the RFC's
+"valid" as "inside one of the network's configured ranges",
+there being nothing else in this daemon for an address to be
+valid against.
+
+The state machine has three states and only two of them are
+rows: unleased is the absence of a row, held is a row whose
+instant is ahead of the clock, and expired is *the same row read
+later*, which no write produces. Two transitions are absent on
+purpose: no silent change of holder, and no renewal of a lapsed
+lease, the address having been free in the interim. Both
+compare-and-set forms are genuinely single operations -- "create
+this binding only if no lease holds the address" is a property
+of `create_binding` itself rather than a second method a caller
+could route around, and the revoking form's token is the lease
+id, so a renewal in between does not invalidate the instruction
+while a reassignment does.
+
+Verified in review rather than taken on report: 98 tests, 36
+trait methods, 28 provenance rows, every gate clean. The
+mutation run is 21 mutants, all killed, and its log names the
+killing tests against an `expect` field naming the test that
+*should* kill each, so it establishes that the right test fails
+rather than merely that some test does. I re-ran the durability
+mutant -- removing the commit from the allocation path -- and
+`a_lease_is_committed_before_the_caller_is_told_about_it` fails
+as named, along with three others. That test is better than the
+row asked for: it reads the lease back through a *second
+connection to the same database*, which can only see commits, so
+it proves the commit had already happened when the value a
+front-end would acknowledge was returned.
+
+**Three things for 3f to promote into the master plan's *Future
+work*,** recorded here so that they survive this file:
+
+1. **The sweep interval is also an address-stickiness knob, and
+   the two cannot be set independently.** The RFC's second step
+   remembers a client's address in the lapsed lease row, and the
+   sweep deletes that row -- so however often a later phase
+   sweeps is exactly how long a client keeps getting its old
+   address back. Phase 5 chooses that interval and should know
+   it is choosing both things. Documented in
+   `docs/api-design.md`; it wants to be somewhere phase 5 will
+   actually look.
+2. **A client that stops presenting its client identifier is not
+   recognised as its lease's holder.** A lease is recorded
+   against the highest-precedence attribute presented, so a
+   client that supplied an identifier and later stops supplying
+   one looks like a different client. This is honest -- the
+   store cannot know that two identities are one machine -- and
+   it is the protocol's own warning about keying on a hardware
+   address, in reverse. Asserted by a test today and explained
+   only in that test's comment. Phase 5 should decide whether to
+   mitigate it, and record the decision either way.
+3. **There is no `update_binding_revoking_lease`.** The
+   specification names only the create form, so the step built
+   only that and documented the gap rather than hiding it. Fill
+   it when a consumer needs it.
+
+**Departures accepted.** Lease SQL lives in `lease.rs` rather
+than `ops.rs`, which breaks that module's "all SQL here or in a
+migration" rule; `ops.rs`'s doc comment is amended to say why,
+and the lease statements are numerous and cohesive enough that
+the split reads better than the rule did. `renew_lease`'s
+compare-and-set is on the holder rather than a cursor, because a
+renewal arrives from the wire with no position to present. A view
+fixes `now` when it opens, so a lease's `expired` is that
+instant's reading while `expires_at` is the fact -- the right way
+round for a consistent view, and worth knowing before somebody
+reads `expired` from a view held open for a long time. The pool
+refusing an address a binding reserves was not asked for, is not
+specified, and is right: an address held for a machine that is
+switched off must not go to somebody else. `acquire` and `sweep`
+were added to the trait script's list of mutating verbs, which
+strengthens that gate.
 
 **2026-11-25 (AEDT): step 3c. The precedence chosen, and a
 decision of this plan's overturned by checking it.** The order
