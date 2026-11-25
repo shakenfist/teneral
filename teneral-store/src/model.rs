@@ -11,6 +11,14 @@
 //! Each also carries the cursor at which it was last written, which
 //! is what makes "change this only if it is still what I read" a
 //! single operation available to any caller that has read the row.
+//!
+//! And each carries who wrote it last. That is a rendered value and
+//! not a structure, because nothing parses an actor back: it is read
+//! by a person asking who moved something. It is on the row rather
+//! than only in the history because the history is bounded and the
+//! resource is not -- the event that named the writer is evicted on a
+//! schedule, while the row it described stays until somebody changes
+//! it.
 
 use std::net::Ipv4Addr;
 
@@ -24,6 +32,9 @@ pub struct Network {
     pub name: String,
     /// Where this network's creation sits in the store's order.
     pub cursor: Cursor,
+    /// Who made the write that produced this state, as the store
+    /// recorded it.
+    pub written_by: String,
 }
 
 /// An interface, in a namespace, belonging to exactly one network.
@@ -42,6 +53,9 @@ pub struct Attachment {
     pub ifname: String,
     /// Where the claim sits in the store's order.
     pub cursor: Cursor,
+    /// Who made the write that produced this state, as the store
+    /// recorded it.
+    pub written_by: String,
 }
 
 /// A contiguous span of addresses a network may allocate from.
@@ -63,6 +77,9 @@ pub struct AddressRange {
     pub last: Ipv4Addr,
     /// Where the range's last write sits in the store's order.
     pub cursor: Cursor,
+    /// Who made the write that produced this state, as the store
+    /// recorded it.
+    pub written_by: String,
 }
 
 impl AddressRange {
@@ -104,6 +121,9 @@ pub struct Binding {
     pub hostname: Option<String>,
     /// Where the binding's last write sits in the store's order.
     pub cursor: Cursor,
+    /// Who made the write that produced this state, as the store
+    /// recorded it.
+    pub written_by: String,
 }
 
 /// An address a client is using in a network, as against one an
@@ -182,6 +202,9 @@ pub struct Lease {
     pub expired: bool,
     /// Where the lease's last write sits in the store's order.
     pub cursor: Cursor,
+    /// Who made the write that produced this state, as the store
+    /// recorded it.
+    pub written_by: String,
 }
 
 /// What the store would answer a client, and how it got there, with
@@ -243,6 +266,7 @@ mod tests {
             first: first.parse().unwrap(),
             last: last.parse().unwrap(),
             cursor: Cursor::new(Epoch::for_test("00"), 1),
+            written_by: "peer:0".to_owned(),
         }
     }
 

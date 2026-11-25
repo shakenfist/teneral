@@ -47,12 +47,24 @@
 //! finite, and the per-network digest that answers "do we still agree"
 //! in one value.
 //!
+//! Beside all of that, and not above it, are the credentials. Every
+//! write names the [`Actor`] that made it, and the store stamps that
+//! on the event and on the row it wrote, so "who moved this binding"
+//! survives the eviction of the event that said so. [`TokenStore`] is
+//! where the tokens themselves live -- minted, removed, listed and
+//! verified -- and it is a trait of its own rather than part of
+//! [`BindingStore`] because a token's answer *is* which networks may
+//! be reached, so there is no network to ask it within. Its own
+//! documentation carries the whole argument, including why a token
+//! mutation is not an event.
+//!
 //! What is deliberately not here is anything that speaks to anything.
 //! There is no transport, no stream and no wire format: this crate's
 //! half of the watch contract is the snapshot, the history, and the
 //! positions that join the two without a gap or an overlap. Turning a
 //! refusal into a `resync` on a connection belongs to the layer above.
 
+mod actor;
 mod clock;
 mod cursor;
 mod db;
@@ -67,12 +79,14 @@ mod schema;
 mod selector;
 mod sqlite;
 mod store;
+mod tokens;
 
 #[cfg(test)]
 mod behaviour;
 #[cfg(test)]
 mod test_support;
 
+pub use actor::Actor;
 pub use clock::{Clock, SystemClock};
 pub use cursor::Cursor;
 pub use error::{Error, Result};
@@ -83,3 +97,4 @@ pub use schema::SCHEMA_VERSION;
 pub use selector::{ClientIdentity, Selector, SelectorKind};
 pub use sqlite::{SnapshotView, SqliteStore};
 pub use store::{BindingStore, ReadHandle};
+pub use tokens::{Caller, Capability, MintedToken, Token, TokenId, TokenScope, TokenStore};

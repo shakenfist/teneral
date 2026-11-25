@@ -94,8 +94,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::cursor::Cursor;
 use crate::error::{Error, Result};
-use crate::history::{self, EventKind, Retention};
-use crate::identity::Epoch;
+use crate::history::{self, EventKind};
 use crate::model::Lease;
 use crate::ops::{self, LEASE, Reading, Writing};
 use crate::selector::{ClientIdentity, Selector};
@@ -115,15 +114,14 @@ pub(crate) fn is_held(expires_at: i64, now: i64) -> bool {
 
 /// The columns every read of a lease selects, in one place so that
 /// the row reader below cannot drift from them.
-const COLUMNS: &str =
-    "network, address, holder_kind, holder_value, lease_id, acquired_at, expires_at, cursor_seq";
+const COLUMNS: &str = "network, address, holder_kind, holder_value, lease_id, acquired_at, \
+                       expires_at, cursor_seq, written_by";
 
 /// One row of the lease table, as the engine hands it over.
 ///
-/// A struct rather than an eight-element tuple: every field is a
-/// number or a string, so a tuple would let two of them swap places
-/// without a type error, and two of the numbers are an instant and a
-/// position.
+/// A struct rather than a tuple of nine: every field is a number or a
+/// string, so a tuple would let two of them swap places without a
+/// type error, and two of the numbers are an instant and a position.
 struct Row {
     /// The network the row belongs to, read back rather than taken
     /// from the question, so that the guard has something to compare.
@@ -142,6 +140,8 @@ struct Row {
     expires_at: i64,
     /// Where the row's last write sits in the store's order.
     cursor_seq: i64,
+    /// Who made that write.
+    written_by: String,
 }
 
 /// Read one row of the lease table in the order [`COLUMNS`] names.
@@ -155,6 +155,7 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
         acquired_at: row.get(5)?,
         expires_at: row.get(6)?,
         cursor_seq: row.get(7)?,
+        written_by: row.get(8)?,
     })
 }
 
@@ -179,6 +180,7 @@ fn into_lease(reading: &Reading<'_>, now: i64, row: Row) -> Result<Lease> {
         expires_at: row.expires_at,
         expired: !is_held(row.expires_at, now),
         cursor: Cursor::from_row(reading.epoch, row.cursor_seq)?,
+        written_by: row.written_by,
     })
 }
 
@@ -448,18 +450,19 @@ struct Appended {
 /// standing where an identity should be.
 fn event_lease_written(
     transaction: &Transaction<'_>,
-    bound: &Retention,
+    writing: &Writing<'_>,
     network: &str,
     writable: &Writable,
     now: i64,
 ) -> Result<Appended> {
     transaction
         .execute(
-            "INSERT INTO event_log (network, kind, resource_id, state, recorded_at)
+            "INSERT INTO event_log (network, kind, resource_id, state, recorded_at, actor)
              VALUES (?1, ?2, ?3,
                      json_object('network', ?1, 'address', ?4, 'holder_kind', ?5,
                                  'holder_value', ?6, 'lease_id', ?7,
-                                 'acquired_at', ?8, 'expires_at', ?9), ?10)",
+                                 'acquired_at', ?8, 'expires_at', ?9,
+                                 'written_by', ?11), ?10, ?11)",
             params![
                 network,
                 EventKind::Lease.as_str(),
@@ -470,12 +473,13 @@ fn event_lease_written(
                 writable.lease_id,
                 writable.acquired_at,
                 writable.expires_at,
-                now
+                now,
+                writing.actor.as_recorded()
             ],
         )
         .map_err(ops::storage("recording a lease"))?;
 
-    let sequence = history::appended(transaction, bound, now)?;
+    let sequence = history::appended(transaction, writing.retention, now)?;
 
     let lease_id = match writable.lease_id {
         Some(existing) => existing,
@@ -507,6 +511,7 @@ fn event_lease_written(
 /// a read that could disagree with the first.
 fn write_row(
     transaction: &Transaction<'_>,
+    writing: &Writing<'_>,
     network: &str,
     writable: &Writable,
     appended: &Appended,
@@ -516,7 +521,7 @@ fn write_row(
         transaction.execute(
             "UPDATE lease
                 SET holder_kind = ?3, holder_value = ?4, lease_id = ?5,
-                    acquired_at = ?6, expires_at = ?7, cursor_seq = ?8
+                    acquired_at = ?6, expires_at = ?7, cursor_seq = ?8, written_by = ?9
               WHERE network = ?1 AND address = ?2",
             params![
                 network,
@@ -526,15 +531,16 @@ fn write_row(
                 appended.lease_id,
                 writable.acquired_at,
                 writable.expires_at,
-                appended.sequence
+                appended.sequence,
+                writing.actor.as_recorded()
             ],
         )
     } else {
         transaction.execute(
             "INSERT INTO lease
                  (network, address, holder_kind, holder_value, lease_id,
-                  acquired_at, expires_at, cursor_seq)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                  acquired_at, expires_at, cursor_seq, written_by)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 network,
                 u32::from(writable.address),
@@ -543,7 +549,8 @@ fn write_row(
                 appended.lease_id,
                 writable.acquired_at,
                 writable.expires_at,
-                appended.sequence
+                appended.sequence,
+                writing.actor.as_recorded()
             ],
         )
     };
@@ -562,10 +569,12 @@ fn write_row(
 /// made the lease survive a power cut, never before.
 fn written(
     network: &str,
+    writing: &Writing<'_>,
     writable: &Writable,
     appended: &Appended,
-    epoch: &Epoch,
 ) -> Result<Lease> {
+    let epoch = writing.epoch;
+
     Ok(Lease {
         network: network.to_owned(),
         address: writable.address,
@@ -579,6 +588,11 @@ fn written(
         // consistent with the instant the write itself used.
         expired: false,
         cursor: Cursor::from_row(epoch, appended.sequence)?,
+        // The value this write stamped on the row, from the write
+        // itself rather than from a read of it: the caller is handed
+        // the lease it just made, so the attribution it carries is
+        // the one that was written.
+        written_by: writing.actor.as_recorded(),
     })
 }
 
@@ -641,8 +655,15 @@ pub(crate) fn acquire_lease(
     let replacing = current.is_some();
     let writable = plan_acquisition(identity, &holder, current, address, now, expires_at)?;
 
-    let appended = event_lease_written(&transaction, writing.retention, network, &writable, now)?;
-    write_row(&transaction, network, &writable, &appended, replacing)?;
+    let appended = event_lease_written(&transaction, writing, network, &writable, now)?;
+    write_row(
+        &transaction,
+        writing,
+        network,
+        &writable,
+        &appended,
+        replacing,
+    )?;
 
     transaction
         .commit()
@@ -653,7 +674,7 @@ pub(crate) fn acquire_lease(
     // cut would then take back -- and the store would hand the same
     // address to somebody else while the first client went on using
     // it.
-    let lease = written(network, &writable, &appended, writing.epoch)?;
+    let lease = written(network, writing, &writable, &appended)?;
     let at = Cursor::new(
         writing.epoch.clone(),
         ops::sequence_as_position(appended.sequence)?,
@@ -761,8 +782,8 @@ pub(crate) fn renew_lease(
         expires_at,
     };
 
-    let appended = event_lease_written(&transaction, writing.retention, network, &writable, now)?;
-    write_row(&transaction, network, &writable, &appended, true)?;
+    let appended = event_lease_written(&transaction, writing, network, &writable, now)?;
+    write_row(&transaction, writing, network, &writable, &appended, true)?;
 
     transaction
         .commit()
@@ -814,7 +835,7 @@ pub(crate) fn revoke_lease(
         ));
     }
 
-    let sequence = remove(&transaction, writing.retention, network, address, now)?;
+    let sequence = remove(&transaction, writing, network, address, now)?;
 
     transaction
         .commit()
@@ -830,14 +851,14 @@ pub(crate) fn revoke_lease(
 /// transaction.
 fn remove(
     transaction: &Transaction<'_>,
-    bound: &Retention,
+    writing: &Writing<'_>,
     network: &str,
     address: Ipv4Addr,
     now: i64,
 ) -> Result<i64> {
     let sequence = ops::event_deleted(
         transaction,
-        bound,
+        writing,
         network,
         EventKind::Lease,
         &lease_id(address),
@@ -914,13 +935,7 @@ pub(crate) fn sweep_expired_leases(
 
     let mut last = None;
     for lease in &expired {
-        last = Some(remove(
-            &transaction,
-            writing.retention,
-            network,
-            lease.address,
-            now,
-        )?);
+        last = Some(remove(&transaction, writing, network, lease.address, now)?);
     }
 
     transaction
@@ -1036,15 +1051,22 @@ pub(crate) fn allocate_lease(
         }
     };
 
-    let appended = event_lease_written(&transaction, writing.retention, network, &writable, now)?;
-    write_row(&transaction, network, &writable, &appended, replacing)?;
+    let appended = event_lease_written(&transaction, writing, network, &writable, now)?;
+    write_row(
+        &transaction,
+        writing,
+        network,
+        &writable,
+        &appended,
+        replacing,
+    )?;
 
     transaction
         .commit()
         .map_err(ops::storage("committing an allocated address"))?;
 
     // After the commit, for the reason in `acquire_lease`.
-    let lease = written(network, &writable, &appended, writing.epoch)?;
+    let lease = written(network, writing, &writable, &appended)?;
     let at = Cursor::new(
         writing.epoch.clone(),
         ops::sequence_as_position(appended.sequence)?,
@@ -1389,7 +1411,7 @@ pub(crate) fn revoke_for_binding(
         ));
     }
 
-    remove(transaction, writing.retention, network, address, now)?;
+    remove(transaction, writing, network, address, now)?;
 
     Ok(())
 }

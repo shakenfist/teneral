@@ -27,6 +27,17 @@
 # lease and `fn renew_lease(...)` writes one, and nothing about their
 # types says which.
 #
+# It governs the two traits in `teneral-store/src/store.rs` -- the
+# binding store and a read handle on one -- and nothing else. The
+# token store in `teneral-store/src/tokens.rs` is deliberately outside
+# it: a token's answer *is* which networks may be reached, so there is
+# no network for its methods to take, and a token mutation appends no
+# event, so there is no position for one to return. Both rules below
+# would fail every method of it, and for reasons that are the design
+# rather than a defect. A gate that silently did not cover something
+# would be worse than one whose scope is written down, so this is
+# where the scope is written down.
+#
 # The enumerated exceptions are read out of the trait's doc comment, so
 # the list a reader sees and the list this script trusts cannot drift
 # apart: there is only one. A name enumerated that is not a method of

@@ -43,8 +43,11 @@ first commit rather than acquiring that key later.
 It exists, as the `teneral-store` crate: SQLite behind an
 asynchronous trait, holding networks, attachments, address ranges,
 bindings and leases, with the event log that gives the control
-plane's cursor a total order. Zones and records, content blobs and
-tokens are deferred to the layers that will consume them. See
+plane's cursor a total order. It also holds the tokens a consumer
+authenticates with, and every write names the actor that made it --
+a token, a local peer, or a named part of the daemon -- on both the
+event and the row. Zones and records and content blobs are deferred
+to the layers that will consume them. See
 [docs/binding-store.md](docs/binding-store.md).
 
 **The front-ends** each turn a wire request into a lookup and a

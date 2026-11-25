@@ -180,6 +180,27 @@ pub enum Error {
         detail: String,
     },
 
+    /// The caller may not do what it asked, and the store refused
+    /// rather than leaving the check to whatever called it.
+    ///
+    /// The one rule the store enforces about who may do something is
+    /// that a token grants no more than it holds. It is here rather
+    /// than only in the layer that serves the socket because an
+    /// authorisation rule checked in one caller is a rule the second
+    /// caller skips, and the consequence of skipping this one is a
+    /// token that can mint itself a wider one.
+    ///
+    /// `detail` names what was outside the caller's reach. That is
+    /// not a leak: the only thing it names back is something the
+    /// caller already holds or already asked for.
+    Unauthorised {
+        /// What was being attempted, as a phrase that completes
+        /// "the caller may not ...".
+        action: &'static str,
+        /// Why it was refused, in a form the caller can act on.
+        detail: String,
+    },
+
     /// The store could not start a thread it needs.
     ///
     /// The database is confined to threads the store owns, so one it
@@ -328,6 +349,9 @@ impl fmt::Display for Error {
                 f,
                 "there is no address available in the network {network}: {detail}"
             ),
+            Error::Unauthorised { action, detail } => {
+                write!(f, "the caller may not {action}: {detail}")
+            }
             Error::Threads { context, source } => {
                 write!(
                     f,

@@ -16,6 +16,7 @@ use std::net::Ipv4Addr;
 
 use rusqlite::{Connection, ErrorCode};
 
+use crate::actor::Actor;
 use crate::cursor::Cursor;
 use crate::error::Error;
 use crate::history::{Event, EventKind, History, Retention};
@@ -24,9 +25,10 @@ use crate::model::{Binding, Lease};
 use crate::selector::{ClientIdentity, Selector, SelectorKind};
 use crate::store::BindingStore;
 use crate::test_support::{
-    ALPHA, ALPHA_NAMESPACE, BETA, BETA_NAMESPACE, FIXTURE_NOW, IFNAME, POOL, POOL_FIRST, POOL_LAST,
-    TwoNetworks,
+    ALPHA, ALPHA_NAMESPACE, BETA, BETA_NAMESPACE, FIXTURE_NOW, IFNAME, OPERATOR, POOL, POOL_FIRST,
+    POOL_LAST, TwoNetworks,
 };
+use crate::tokens::{Caller, Capability, MintedToken, TokenId, TokenScope, TokenStore};
 
 /// An address inside both networks' pools, written once.
 fn in_pool(last_octet: u8) -> Ipv4Addr {
@@ -81,7 +83,7 @@ async fn configure(
 ) -> Binding {
     fixture
         .store
-        .create_binding(network, selector, address, None)
+        .create_binding(&OPERATOR, network, selector, address, None)
         .await
         .expect("a binding");
 
@@ -150,10 +152,14 @@ async fn two_networks_hold_the_same_addresses_and_each_gets_its_own_answer() {
 async fn every_write_returns_a_position_later_than_the_last() {
     let fixture = TwoNetworks::new("positions").await;
 
-    let first = fixture.store.create_network("gamma").await.unwrap();
+    let first = fixture
+        .store
+        .create_network(&OPERATOR, "gamma")
+        .await
+        .unwrap();
     let second = fixture
         .store
-        .create_address_range("gamma", POOL, POOL_FIRST, POOL_LAST)
+        .create_address_range(&OPERATOR, "gamma", POOL, POOL_FIRST, POOL_LAST)
         .await
         .unwrap();
 
@@ -172,7 +178,7 @@ async fn a_claim_on_an_interface_another_network_holds_is_refused_and_names_it()
     // The second network tries to claim the interface the first has.
     let refusal = fixture
         .store
-        .attach_interface(BETA, ALPHA_NAMESPACE, IFNAME)
+        .attach_interface(&OPERATOR, BETA, ALPHA_NAMESPACE, IFNAME)
         .await
         .unwrap_err();
 
@@ -307,7 +313,11 @@ async fn a_view_does_not_see_a_write_committed_after_it_opened() {
     // then resumes a stream at the snapshot's position, and the two
     // must not overlap or leave a gap. If the view could see this
     // write, the consumer would be delivered it twice.
-    let written = fixture.store.create_network("gamma").await.unwrap();
+    let written = fixture
+        .store
+        .create_network(&OPERATOR, "gamma")
+        .await
+        .unwrap();
     assert!(written.sequence() > position.sequence());
 
     let after = view.networks().await.unwrap();
@@ -338,10 +348,14 @@ async fn a_view_answers_several_reads_at_one_position() {
     // nothing in the result would say which.
     let range = fixture
         .store
-        .create_address_range(ALPHA, "second", in_pool(200), in_pool(210))
+        .create_address_range(&OPERATOR, ALPHA, "second", in_pool(200), in_pool(210))
         .await
         .unwrap();
-    fixture.store.create_network("gamma").await.unwrap();
+    fixture
+        .store
+        .create_network(&OPERATOR, "gamma")
+        .await
+        .unwrap();
 
     assert_eq!(view.networks().await.unwrap(), networks_before);
     assert_eq!(view.address_ranges(ALPHA).await.unwrap().len(), 1);
@@ -402,7 +416,14 @@ async fn a_change_computed_from_a_stale_position_is_refused() {
     // One resize succeeds and moves the range's position.
     let moved = fixture
         .store
-        .update_address_range(ALPHA, POOL, &original.cursor, in_pool(20), in_pool(90))
+        .update_address_range(
+            &OPERATOR,
+            ALPHA,
+            POOL,
+            &original.cursor,
+            in_pool(20),
+            in_pool(90),
+        )
         .await
         .unwrap();
     assert!(moved.sequence() > original.cursor.sequence());
@@ -414,7 +435,14 @@ async fn a_change_computed_from_a_stale_position_is_refused() {
     // owned.
     let refusal = fixture
         .store
-        .update_address_range(ALPHA, POOL, &original.cursor, in_pool(30), in_pool(40))
+        .update_address_range(
+            &OPERATOR,
+            ALPHA,
+            POOL,
+            &original.cursor,
+            in_pool(30),
+            in_pool(40),
+        )
         .await
         .unwrap_err();
 
@@ -448,7 +476,7 @@ async fn an_overlap_is_refused_within_a_network_and_ignored_between_them() {
     // A span neither network's pool covers, given to one of them.
     fixture
         .store
-        .create_address_range(ALPHA, "high", in_pool(200), in_pool(210))
+        .create_address_range(&OPERATOR, ALPHA, "high", in_pool(200), in_pool(210))
         .await
         .expect("a second range in a network that has room for it");
 
@@ -457,7 +485,7 @@ async fn an_overlap_is_refused_within_a_network_and_ignored_between_them() {
     // answers, and the refusal names the range in the way.
     let refusal = fixture
         .store
-        .create_address_range(ALPHA, "higher", in_pool(205), in_pool(215))
+        .create_address_range(&OPERATOR, ALPHA, "higher", in_pool(205), in_pool(215))
         .await
         .unwrap_err();
 
@@ -476,7 +504,7 @@ async fn an_overlap_is_refused_within_a_network_and_ignored_between_them() {
     // than asking about the address space.
     fixture
         .store
-        .create_address_range(BETA, "higher", in_pool(205), in_pool(215))
+        .create_address_range(&OPERATOR, BETA, "higher", in_pool(205), in_pool(215))
         .await
         .expect("the other network's addresses are its own");
 
@@ -495,7 +523,7 @@ async fn a_range_that_runs_backwards_is_refused() {
 
     let refusal = fixture
         .store
-        .create_address_range(ALPHA, "backwards", in_pool(200), in_pool(190))
+        .create_address_range(&OPERATOR, ALPHA, "backwards", in_pool(200), in_pool(190))
         .await
         .unwrap_err();
 
@@ -508,7 +536,7 @@ async fn a_range_cannot_be_given_to_a_network_that_does_not_exist() {
 
     let refusal = fixture
         .store
-        .create_address_range("delta", POOL, POOL_FIRST, POOL_LAST)
+        .create_address_range(&OPERATOR, "delta", POOL, POOL_FIRST, POOL_LAST)
         .await
         .unwrap_err();
 
@@ -534,7 +562,7 @@ async fn a_network_with_anything_still_in_it_will_not_be_removed() {
 
     let refusal = fixture
         .store
-        .delete_network(ALPHA, &network.cursor)
+        .delete_network(&OPERATOR, ALPHA, &network.cursor)
         .await
         .unwrap_err();
     assert!(matches!(refusal, Error::Conflict { .. }), "{refusal:?}");
@@ -542,17 +570,23 @@ async fn a_network_with_anything_still_in_it_will_not_be_removed() {
     // Emptied in the right order, it goes.
     fixture
         .store
-        .detach_interface(ALPHA, ALPHA_NAMESPACE, IFNAME, &attachment.cursor)
+        .detach_interface(
+            &OPERATOR,
+            ALPHA,
+            ALPHA_NAMESPACE,
+            IFNAME,
+            &attachment.cursor,
+        )
         .await
         .unwrap();
     fixture
         .store
-        .delete_address_range(ALPHA, POOL, &range.cursor)
+        .delete_address_range(&OPERATOR, ALPHA, POOL, &range.cursor)
         .await
         .unwrap();
     fixture
         .store
-        .delete_network(ALPHA, &network.cursor)
+        .delete_network(&OPERATOR, ALPHA, &network.cursor)
         .await
         .unwrap();
 
@@ -582,7 +616,7 @@ async fn an_interface_another_network_holds_cannot_be_detached() {
     // there is nothing of that name to release.
     let refusal = fixture
         .store
-        .detach_interface(BETA, ALPHA_NAMESPACE, IFNAME, &held.cursor)
+        .detach_interface(&OPERATOR, BETA, ALPHA_NAMESPACE, IFNAME, &held.cursor)
         .await
         .unwrap_err();
 
@@ -603,10 +637,14 @@ async fn an_interface_another_network_holds_cannot_be_detached() {
 async fn every_write_leaves_one_event_at_the_position_it_returned() {
     let fixture = TwoNetworks::new("events").await;
 
-    let created = fixture.store.create_network("gamma").await.unwrap();
+    let created = fixture
+        .store
+        .create_network(&OPERATOR, "gamma")
+        .await
+        .unwrap();
     let range = fixture
         .store
-        .create_address_range("gamma", "pool-two", in_pool(150), in_pool(160))
+        .create_address_range(&OPERATOR, "gamma", "pool-two", in_pool(150), in_pool(160))
         .await
         .unwrap();
 
@@ -657,7 +695,7 @@ async fn a_deletion_is_an_event_with_no_state() {
 
     let removed = fixture
         .store
-        .delete_address_range(BETA, POOL, &range.cursor)
+        .delete_address_range(&OPERATOR, BETA, POOL, &range.cursor)
         .await
         .unwrap();
 
@@ -690,15 +728,19 @@ async fn a_refused_write_leaves_no_event() {
     // without this assertion.
     fixture
         .store
-        .attach_interface(BETA, ALPHA_NAMESPACE, IFNAME)
+        .attach_interface(&OPERATOR, BETA, ALPHA_NAMESPACE, IFNAME)
         .await
         .unwrap_err();
     fixture
         .store
-        .create_address_range(ALPHA, "overlapping", in_pool(50), in_pool(60))
+        .create_address_range(&OPERATOR, ALPHA, "overlapping", in_pool(50), in_pool(60))
         .await
         .unwrap_err();
-    fixture.store.create_network(ALPHA).await.unwrap_err();
+    fixture
+        .store
+        .create_network(&OPERATOR, ALPHA)
+        .await
+        .unwrap_err();
 
     assert_eq!(events(&connection).len(), before);
 }
@@ -708,7 +750,11 @@ async fn an_event_is_stamped_with_the_store_clock() {
     let fixture = TwoNetworks::new("clock").await;
 
     fixture.clock.advance(60);
-    let created = fixture.store.create_network("gamma").await.unwrap();
+    let created = fixture
+        .store
+        .create_network(&OPERATOR, "gamma")
+        .await
+        .unwrap();
 
     let connection = fixture.behind_the_store();
     let recorded: i64 = connection
@@ -730,13 +776,13 @@ async fn a_name_the_store_could_not_report_back_is_refused() {
     let fixture = TwoNetworks::new("names").await;
 
     assert!(matches!(
-        fixture.store.create_network("").await,
+        fixture.store.create_network(&OPERATOR, "").await,
         Err(Error::Invalid { .. })
     ));
     assert!(matches!(
         fixture
             .store
-            .attach_interface(ALPHA, "ns/with-a-separator", "eth1")
+            .attach_interface(&OPERATOR, ALPHA, "ns/with-a-separator", "eth1")
             .await,
         Err(Error::Invalid { .. })
     ));
@@ -753,7 +799,11 @@ async fn the_epoch_and_the_schema_version_describe_the_whole_store() {
 
     // Every cursor the store issues is in its epoch, which is what a
     // consumer compares before trying to resume.
-    let written = fixture.store.create_network("gamma").await.unwrap();
+    let written = fixture
+        .store
+        .create_network(&OPERATOR, "gamma")
+        .await
+        .unwrap();
     assert_eq!(written.epoch(), fixture.store.epoch());
 
     let view = fixture.store.read().await.unwrap();
@@ -897,7 +947,7 @@ async fn the_highest_precedence_selector_a_client_presents_is_the_one_that_match
 
         fixture
             .store
-            .delete_binding(ALPHA, &expected.selector, &expected.cursor)
+            .delete_binding(&OPERATOR, ALPHA, &expected.selector, &expected.cursor)
             .await
             .unwrap();
     }
@@ -1225,6 +1275,7 @@ async fn the_ordinary_work_of_the_store_never_counts_a_cross_network_answer() {
         let changed = fixture
             .store
             .update_binding(
+                &OPERATOR,
                 network,
                 &mac,
                 &binding.cursor,
@@ -1235,7 +1286,7 @@ async fn the_ordinary_work_of_the_store_never_counts_a_cross_network_answer() {
             .unwrap();
         fixture
             .store
-            .delete_binding(network, &mac, &changed)
+            .delete_binding(&OPERATOR, network, &mac, &changed)
             .await
             .unwrap();
 
@@ -1244,12 +1295,12 @@ async fn the_ordinary_work_of_the_store_never_counts_a_cross_network_answer() {
         // address.
         let (_, leased) = fixture
             .store
-            .allocate_lease(network, &identity, None, 86_400)
+            .allocate_lease(&OPERATOR, network, &identity, None, 86_400)
             .await
             .unwrap();
         fixture
             .store
-            .renew_lease(network, leased.address, &identity, 86_400)
+            .renew_lease(&OPERATOR, network, leased.address, &identity, 86_400)
             .await
             .unwrap();
 
@@ -1269,10 +1320,14 @@ async fn the_ordinary_work_of_the_store_never_counts_a_cross_network_answer() {
 
         fixture
             .store
-            .revoke_lease(network, leased.address, &held.cursor)
+            .revoke_lease(&OPERATOR, network, leased.address, &held.cursor)
             .await
             .unwrap();
-        fixture.store.sweep_expired_leases(network).await.unwrap();
+        fixture
+            .store
+            .sweep_expired_leases(&OPERATOR, network)
+            .await
+            .unwrap();
     }
 
     let view = fixture.store.read().await.unwrap();
@@ -1302,7 +1357,7 @@ async fn a_second_binding_for_one_selector_is_refused_and_the_other_network_is_u
     // they meant.
     let refusal = fixture
         .store
-        .create_binding(ALPHA, &mac, in_pool(12), None)
+        .create_binding(&OPERATOR, ALPHA, &mac, in_pool(12), None)
         .await
         .unwrap_err();
 
@@ -1319,7 +1374,7 @@ async fn a_second_binding_for_one_selector_is_refused_and_the_other_network_is_u
     // never was.
     fixture
         .store
-        .create_binding(BETA, &mac, in_pool(12), None)
+        .create_binding(&OPERATOR, BETA, &mac, in_pool(12), None)
         .await
         .expect("the other network's clients are its own");
 
@@ -1336,7 +1391,14 @@ async fn a_binding_changed_from_a_stale_position_is_refused() {
 
     let moved = fixture
         .store
-        .update_binding(ALPHA, &mac, &original.cursor, in_pool(12), Some("till-one"))
+        .update_binding(
+            &OPERATOR,
+            ALPHA,
+            &mac,
+            &original.cursor,
+            in_pool(12),
+            Some("till-one"),
+        )
         .await
         .unwrap();
 
@@ -1346,7 +1408,7 @@ async fn a_binding_changed_from_a_stale_position_is_refused() {
     // off an address somebody else has been told about.
     let refusal = fixture
         .store
-        .update_binding(ALPHA, &mac, &original.cursor, in_pool(13), None)
+        .update_binding(&OPERATOR, ALPHA, &mac, &original.cursor, in_pool(13), None)
         .await
         .unwrap_err();
     assert!(matches!(refusal, Error::Changed { .. }), "{refusal:?}");
@@ -1376,12 +1438,18 @@ async fn a_network_with_a_binding_still_in_it_will_not_be_removed() {
 
     fixture
         .store
-        .detach_interface(ALPHA, ALPHA_NAMESPACE, IFNAME, &attachment.cursor)
+        .detach_interface(
+            &OPERATOR,
+            ALPHA,
+            ALPHA_NAMESPACE,
+            IFNAME,
+            &attachment.cursor,
+        )
         .await
         .unwrap();
     fixture
         .store
-        .delete_address_range(ALPHA, POOL, &range.cursor)
+        .delete_address_range(&OPERATOR, ALPHA, POOL, &range.cursor)
         .await
         .unwrap();
 
@@ -1390,7 +1458,7 @@ async fn a_network_with_a_binding_still_in_it_will_not_be_removed() {
     // configured is not a thing to do quietly.
     let refusal = fixture
         .store
-        .delete_network(ALPHA, &network.cursor)
+        .delete_network(&OPERATOR, ALPHA, &network.cursor)
         .await
         .unwrap_err();
     match &refusal {
@@ -1400,12 +1468,12 @@ async fn a_network_with_a_binding_still_in_it_will_not_be_removed() {
 
     fixture
         .store
-        .delete_binding(ALPHA, &mac, &binding.cursor)
+        .delete_binding(&OPERATOR, ALPHA, &mac, &binding.cursor)
         .await
         .unwrap();
     fixture
         .store
-        .delete_network(ALPHA, &network.cursor)
+        .delete_network(&OPERATOR, ALPHA, &network.cursor)
         .await
         .unwrap();
 
@@ -1422,7 +1490,7 @@ async fn configuring_a_binding_leaves_one_event_carrying_its_selector() {
 
     let written = fixture
         .store
-        .create_binding(ALPHA, &mac, in_pool(11), Some("till-one"))
+        .create_binding(&OPERATOR, ALPHA, &mac, in_pool(11), Some("till-one"))
         .await
         .unwrap();
 
@@ -1463,7 +1531,7 @@ async fn configuring_a_binding_leaves_one_event_carrying_its_selector() {
     drop(view);
     let removed = fixture
         .store
-        .delete_binding(ALPHA, &mac, &binding.cursor)
+        .delete_binding(&OPERATOR, ALPHA, &mac, &binding.cursor)
         .await
         .unwrap();
 
@@ -1609,7 +1677,7 @@ async fn repool(fixture: &TwoNetworks, first: Ipv4Addr, last: Ipv4Addr) {
 
         fixture
             .store
-            .update_address_range(network, POOL, &range.cursor, first, last)
+            .update_address_range(&OPERATOR, network, POOL, &range.cursor, first, last)
             .await
             .expect("a resized pool");
     }
@@ -1625,7 +1693,7 @@ async fn take(
 ) -> Lease {
     let (at, lease) = fixture
         .store
-        .acquire_lease(network, identity, address, duration)
+        .acquire_lease(&OPERATOR, network, identity, address, duration)
         .await
         .expect("a lease");
 
@@ -1646,7 +1714,7 @@ async fn allocate(
 ) -> Lease {
     let (at, lease) = fixture
         .store
-        .allocate_lease(network, identity, requested, DAY)
+        .allocate_lease(&OPERATOR, network, identity, requested, DAY)
         .await
         .expect("an allocated address");
 
@@ -1719,7 +1787,7 @@ async fn two_networks_lease_the_same_address_to_different_clients_at_once() {
     // assertion a single-network test cannot make.
     fixture
         .store
-        .revoke_lease(ALPHA, in_pool(50), &alpha.cursor)
+        .revoke_lease(&OPERATOR, ALPHA, in_pool(50), &alpha.cursor)
         .await
         .unwrap();
 
@@ -1760,7 +1828,7 @@ async fn the_pool_offers_the_lowest_free_address_and_each_network_has_its_own() 
         // rather than being given somebody else's.
         let refusal = fixture
             .store
-            .allocate_lease(network, &client(MAC_FOUR), None, DAY)
+            .allocate_lease(&OPERATOR, network, &client(MAC_FOUR), None, DAY)
             .await
             .unwrap_err();
 
@@ -1947,14 +2015,14 @@ async fn a_network_with_no_range_allocates_nothing_and_says_which_network() {
 
         fixture
             .store
-            .delete_address_range(network, POOL, &range.cursor)
+            .delete_address_range(&OPERATOR, network, POOL, &range.cursor)
             .await
             .unwrap();
     }
 
     let refusal = fixture
         .store
-        .allocate_lease(ALPHA, &client(MAC_ONE), None, DAY)
+        .allocate_lease(&OPERATOR, ALPHA, &client(MAC_ONE), None, DAY)
         .await
         .unwrap_err();
 
@@ -1997,7 +2065,7 @@ async fn an_address_is_held_up_to_its_instant_and_allocatable_from_it_without_a_
     assert!(
         fixture
             .store
-            .allocate_lease(ALPHA, &client(MAC_TWO), None, DAY)
+            .allocate_lease(&OPERATOR, ALPHA, &client(MAC_TWO), None, DAY)
             .await
             .is_err()
     );
@@ -2051,7 +2119,7 @@ async fn a_renewal_keeps_the_lease_id() {
     fixture.clock.advance(10);
     let renewed = fixture
         .store
-        .renew_lease(ALPHA, in_pool(50), &one, DAY)
+        .renew_lease(&OPERATOR, ALPHA, in_pool(50), &one, DAY)
         .await
         .unwrap();
 
@@ -2078,7 +2146,7 @@ async fn a_reassignment_changes_the_lease_id() {
 
     fixture
         .store
-        .revoke_lease(ALPHA, in_pool(50), &first.cursor)
+        .revoke_lease(&OPERATOR, ALPHA, in_pool(50), &first.cursor)
         .await
         .unwrap();
     let second = take(&fixture, ALPHA, &client(MAC_TWO), in_pool(50), DAY).await;
@@ -2106,7 +2174,7 @@ async fn an_address_another_client_holds_is_refused_and_names_the_holder() {
 
     let refusal = fixture
         .store
-        .acquire_lease(ALPHA, &client(MAC_TWO), in_pool(50), DAY)
+        .acquire_lease(&OPERATOR, ALPHA, &client(MAC_TWO), in_pool(50), DAY)
         .await
         .unwrap_err();
 
@@ -2151,7 +2219,7 @@ async fn a_lease_stays_its_clients_own_when_the_client_presents_more_than_it_did
         .unwrap();
     fixture
         .store
-        .renew_lease(ALPHA, in_pool(50), &richer, DAY)
+        .renew_lease(&OPERATOR, ALPHA, in_pool(50), &richer, DAY)
         .await
         .expect("the same client renewing its own lease");
     assert_eq!(
@@ -2167,7 +2235,7 @@ async fn a_lease_stays_its_clients_own_when_the_client_presents_more_than_it_did
     assert!(matches!(
         fixture
             .store
-            .renew_lease(ALPHA, in_pool(50), &client(MAC_TWO), DAY)
+            .renew_lease(&OPERATOR, ALPHA, in_pool(50), &client(MAC_TWO), DAY)
             .await,
         Err(Error::Conflict { .. })
     ));
@@ -2259,7 +2327,7 @@ async fn a_client_presenting_nothing_cannot_hold_a_lease() {
     // query could ever find it again.
     let refusal = fixture
         .store
-        .allocate_lease(ALPHA, &ClientIdentity::new(), None, DAY)
+        .allocate_lease(&OPERATOR, ALPHA, &ClientIdentity::new(), None, DAY)
         .await
         .unwrap_err();
 
@@ -2273,7 +2341,7 @@ async fn a_lease_that_would_expire_as_it_was_taken_is_refused() {
     for duration in [0, -1] {
         let refusal = fixture
             .store
-            .acquire_lease(ALPHA, &client(MAC_ONE), in_pool(50), duration)
+            .acquire_lease(&OPERATOR, ALPHA, &client(MAC_ONE), in_pool(50), duration)
             .await
             .unwrap_err();
         assert!(matches!(refusal, Error::Invalid { .. }), "{refusal:?}");
@@ -2292,7 +2360,7 @@ async fn a_renewal_of_a_lapsed_lease_is_refused_rather_than_quietly_reacquiring(
 
     let refusal = fixture
         .store
-        .renew_lease(ALPHA, in_pool(50), &one, DAY)
+        .renew_lease(&OPERATOR, ALPHA, in_pool(50), &one, DAY)
         .await
         .unwrap_err();
 
@@ -2325,7 +2393,7 @@ async fn a_revocation_computed_from_a_stale_position_is_refused() {
     fixture.clock.advance(10);
     fixture
         .store
-        .renew_lease(ALPHA, in_pool(50), &one, DAY)
+        .renew_lease(&OPERATOR, ALPHA, in_pool(50), &one, DAY)
         .await
         .unwrap();
 
@@ -2333,7 +2401,7 @@ async fn a_revocation_computed_from_a_stale_position_is_refused() {
     // revocation was computed from a state the lease has left.
     let refusal = fixture
         .store
-        .revoke_lease(ALPHA, in_pool(50), &first.cursor)
+        .revoke_lease(&OPERATOR, ALPHA, in_pool(50), &first.cursor)
         .await
         .unwrap_err();
     assert!(matches!(refusal, Error::Changed { .. }), "{refusal:?}");
@@ -2353,7 +2421,7 @@ async fn a_lapsed_lease_may_be_revoked_rather_than_waited_out() {
     // something only a sweep can.
     fixture
         .store
-        .revoke_lease(ALPHA, in_pool(50), &first.cursor)
+        .revoke_lease(&OPERATOR, ALPHA, in_pool(50), &first.cursor)
         .await
         .unwrap();
 
@@ -2377,7 +2445,7 @@ async fn a_binding_against_a_leased_address_is_refused_and_names_the_lease() {
     // for.
     let refusal = fixture
         .store
-        .create_binding(ALPHA, &two, in_pool(50), None)
+        .create_binding(&OPERATOR, ALPHA, &two, in_pool(50), None)
         .await
         .unwrap_err();
 
@@ -2403,7 +2471,7 @@ async fn a_binding_against_a_leased_address_is_refused_and_names_the_lease() {
     assert!(matches!(
         fixture
             .store
-            .update_binding(ALPHA, &two, &moving.cursor, in_pool(50), None)
+            .update_binding(&OPERATOR, ALPHA, &two, &moving.cursor, in_pool(50), None)
             .await,
         Err(Error::Conflict { .. })
     ));
@@ -2415,7 +2483,7 @@ async fn a_binding_against_a_leased_address_is_refused_and_names_the_lease() {
     fixture.clock.advance(DAY + 1);
     fixture
         .store
-        .update_binding(ALPHA, &two, &moving.cursor, in_pool(50), None)
+        .update_binding(&OPERATOR, ALPHA, &two, &moving.cursor, in_pool(50), None)
         .await
         .expect("a lapsed lease is not in the way");
 }
@@ -2429,7 +2497,14 @@ async fn a_binding_may_revoke_the_lease_in_its_way_as_one_operation() {
 
     let at = fixture
         .store
-        .create_binding_revoking_lease(ALPHA, &two, in_pool(50), Some("till-one"), &held.lease_id)
+        .create_binding_revoking_lease(
+            &OPERATOR,
+            ALPHA,
+            &two,
+            in_pool(50),
+            Some("till-one"),
+            &held.lease_id,
+        )
         .await
         .expect("the binding, and the lease taken for it");
 
@@ -2479,7 +2554,7 @@ async fn a_binding_that_cannot_be_written_leaves_the_lease_it_was_to_revoke_in_p
 
     let refusal = fixture
         .store
-        .create_binding_revoking_lease(ALPHA, &two, in_pool(50), None, &held.lease_id)
+        .create_binding_revoking_lease(&OPERATOR, ALPHA, &two, in_pool(50), None, &held.lease_id)
         .await
         .unwrap_err();
     assert!(matches!(refusal, Error::Conflict { .. }), "{refusal:?}");
@@ -2505,7 +2580,7 @@ async fn a_binding_cannot_revoke_a_lease_that_has_changed_holder() {
     let first = take(&fixture, ALPHA, &client(MAC_ONE), in_pool(50), DAY).await;
     fixture
         .store
-        .revoke_lease(ALPHA, in_pool(50), &first.cursor)
+        .revoke_lease(&OPERATOR, ALPHA, in_pool(50), &first.cursor)
         .await
         .unwrap();
     let second = take(&fixture, ALPHA, &client(MAC_TWO), in_pool(50), DAY).await;
@@ -2516,6 +2591,7 @@ async fn a_binding_cannot_revoke_a_lease_that_has_changed_holder() {
     let refusal = fixture
         .store
         .create_binding_revoking_lease(
+            &OPERATOR,
             ALPHA,
             &selector(SelectorKind::Mac, MAC_THREE),
             in_pool(50),
@@ -2536,12 +2612,13 @@ async fn a_binding_cannot_revoke_a_lease_that_has_changed_holder() {
     fixture.clock.advance(10);
     fixture
         .store
-        .renew_lease(ALPHA, in_pool(50), &client(MAC_TWO), DAY)
+        .renew_lease(&OPERATOR, ALPHA, in_pool(50), &client(MAC_TWO), DAY)
         .await
         .unwrap();
     fixture
         .store
         .create_binding_revoking_lease(
+            &OPERATOR,
             ALPHA,
             &selector(SelectorKind::Mac, MAC_THREE),
             in_pool(50),
@@ -2562,7 +2639,11 @@ async fn a_sweep_announces_the_expiries_that_had_already_happened_and_nothing_el
 
     fixture.clock.advance(DAY + 1);
 
-    let (at, swept) = fixture.store.sweep_expired_leases(ALPHA).await.unwrap();
+    let (at, swept) = fixture
+        .store
+        .sweep_expired_leases(&OPERATOR, ALPHA)
+        .await
+        .unwrap();
 
     // Exactly the leases whose instant had passed, in the network
     // asked about. The second network's identical lease has lapsed
@@ -2597,7 +2678,11 @@ async fn a_sweep_announces_the_expiries_that_had_already_happened_and_nothing_el
     // A second sweep has nothing to do, writes nothing, and reports
     // no position -- because a sweep that removed nothing has no
     // position to report and inventing one would be a lie.
-    let (nothing, empty) = fixture.store.sweep_expired_leases(ALPHA).await.unwrap();
+    let (nothing, empty) = fixture
+        .store
+        .sweep_expired_leases(&OPERATOR, ALPHA)
+        .await
+        .unwrap();
     assert!(nothing.is_none());
     assert!(empty.is_empty());
 }
@@ -2668,7 +2753,7 @@ async fn every_lease_write_leaves_one_event_carrying_its_whole_post_state() {
     fixture.clock.advance(10);
     let renewed = fixture
         .store
-        .renew_lease(ALPHA, in_pool(50), &one, DAY)
+        .renew_lease(&OPERATOR, ALPHA, in_pool(50), &one, DAY)
         .await
         .unwrap();
 
@@ -2700,12 +2785,18 @@ async fn a_network_with_a_lease_on_it_will_not_be_removed() {
 
     fixture
         .store
-        .detach_interface(ALPHA, ALPHA_NAMESPACE, IFNAME, &attachment.cursor)
+        .detach_interface(
+            &OPERATOR,
+            ALPHA,
+            ALPHA_NAMESPACE,
+            IFNAME,
+            &attachment.cursor,
+        )
         .await
         .unwrap();
     fixture
         .store
-        .delete_address_range(ALPHA, POOL, &range.cursor)
+        .delete_address_range(&OPERATOR, ALPHA, POOL, &range.cursor)
         .await
         .unwrap();
 
@@ -2714,7 +2805,7 @@ async fn a_network_with_a_lease_on_it_will_not_be_removed() {
     // address somebody is using.
     let refusal = fixture
         .store
-        .delete_network(ALPHA, &network.cursor)
+        .delete_network(&OPERATOR, ALPHA, &network.cursor)
         .await
         .unwrap_err();
     match &refusal {
@@ -2724,12 +2815,12 @@ async fn a_network_with_a_lease_on_it_will_not_be_removed() {
 
     fixture
         .store
-        .revoke_lease(ALPHA, in_pool(50), &lease.cursor)
+        .revoke_lease(&OPERATOR, ALPHA, in_pool(50), &lease.cursor)
         .await
         .unwrap();
     fixture
         .store
-        .delete_network(ALPHA, &network.cursor)
+        .delete_network(&OPERATOR, ALPHA, &network.cursor)
         .await
         .unwrap();
 
@@ -2815,7 +2906,7 @@ async fn a_snapshot_is_a_consistent_view_and_a_resume_joins_it_exactly_once() {
     // A writer commits while the view is held.
     let written = fixture
         .store
-        .create_binding(ALPHA, &reserved, in_pool(50), None)
+        .create_binding(&OPERATOR, ALPHA, &reserved, in_pool(50), None)
         .await
         .unwrap();
     assert!(written.sequence() > at.sequence());
@@ -2897,6 +2988,11 @@ async fn a_snapshots_events_say_what_the_live_events_said() {
         assert_eq!(event.state, live.state, "{:?}", event.kind);
         assert_eq!(event.cursor, live.cursor, "{:?}", event.kind);
 
+        // The log's actor column and the resource row's `written_by`
+        // are the same value written twice by one write, so the two
+        // paths have to agree on it as well as on the state.
+        assert_eq!(event.actor, live.actor, "{:?}", event.kind);
+
         // A snapshot says where a resource was last written and not
         // when, a resource row carrying the one and not the other.
         assert!(event.recorded_at.is_none());
@@ -2927,7 +3023,7 @@ async fn a_resume_delivers_the_intermediate_states_and_not_only_the_outcome() {
     let lease = take(&fixture, ALPHA, &client(MAC_ONE), in_pool(50), DAY).await;
     fixture
         .store
-        .revoke_lease(ALPHA, in_pool(50), &lease.cursor)
+        .revoke_lease(&OPERATOR, ALPHA, in_pool(50), &lease.cursor)
         .await
         .unwrap();
 
@@ -2962,12 +3058,12 @@ async fn a_history_read_scoped_to_one_network_sees_only_its_own_events() {
     // correct one by looking at a resource identity.
     let in_alpha = fixture
         .store
-        .create_binding(ALPHA, &shared, in_pool(50), None)
+        .create_binding(&OPERATOR, ALPHA, &shared, in_pool(50), None)
         .await
         .unwrap();
     let in_beta = fixture
         .store
-        .create_binding(BETA, &shared, in_pool(50), None)
+        .create_binding(&OPERATOR, BETA, &shared, in_pool(50), None)
         .await
         .unwrap();
 
@@ -3112,7 +3208,11 @@ async fn the_history_is_bounded_by_a_count_of_events() {
 
     // And the window moves with each write rather than being trimmed
     // when something remembers to: one more write, one more eviction.
-    fixture.store.create_network("gamma").await.unwrap();
+    fixture
+        .store
+        .create_network(&OPERATOR, "gamma")
+        .await
+        .unwrap();
 
     let kept = retained(&behind);
     assert_eq!(kept.len(), 3);
@@ -3132,7 +3232,11 @@ async fn the_history_is_also_bounded_by_the_age_of_its_events() {
     // one-minute window -- and the count bound, which has room for
     // fifty thousand, is not what removes it.
     fixture.clock.advance(120);
-    let written = fixture.store.create_network("gamma").await.unwrap();
+    let written = fixture
+        .store
+        .create_network(&OPERATOR, "gamma")
+        .await
+        .unwrap();
 
     let kept = retained(&behind);
     assert_eq!(kept, vec![i64::try_from(written.sequence()).unwrap()]);
@@ -3166,7 +3270,11 @@ async fn a_refused_write_evicts_nothing() {
     // change that never happened, and told a consumer afterwards that
     // it could not resume from a position whose events are all still
     // there.
-    let refusal = fixture.store.create_network(ALPHA).await.unwrap_err();
+    let refusal = fixture
+        .store
+        .create_network(&OPERATOR, ALPHA)
+        .await
+        .unwrap_err();
     assert!(matches!(refusal, Error::Conflict { .. }));
 
     assert_eq!(retained(&behind), kept);
@@ -3187,7 +3295,7 @@ async fn the_digest_changes_in_its_own_network_and_not_in_the_other() {
     // A binding configured in one network.
     let written = fixture
         .store
-        .create_binding(BETA, &reserved, in_pool(50), None)
+        .create_binding(&OPERATOR, BETA, &reserved, in_pool(50), None)
         .await
         .unwrap();
 
@@ -3207,7 +3315,7 @@ async fn the_digest_changes_in_its_own_network_and_not_in_the_other() {
     // happens to work.
     let in_alpha = fixture
         .store
-        .create_binding(ALPHA, &reserved, in_pool(50), None)
+        .create_binding(&OPERATOR, ALPHA, &reserved, in_pool(50), None)
         .await
         .unwrap();
 
@@ -3222,7 +3330,7 @@ async fn the_digest_changes_in_its_own_network_and_not_in_the_other() {
     // network's configured set exactly as it was before it existed.
     fixture
         .store
-        .delete_binding(ALPHA, &reserved, &in_alpha)
+        .delete_binding(&OPERATOR, ALPHA, &reserved, &in_alpha)
         .await
         .unwrap();
 
@@ -3261,7 +3369,7 @@ async fn the_digest_does_not_move_when_a_lease_does() {
 
     fixture
         .store
-        .revoke_lease(ALPHA, in_pool(50), &lease.cursor)
+        .revoke_lease(&OPERATOR, ALPHA, in_pool(50), &lease.cursor)
         .await
         .unwrap();
 
@@ -3291,4 +3399,1191 @@ async fn a_network_the_store_does_not_hold_has_no_snapshot_and_no_digest() {
     // been asked about one that does not.
     assert!(view.snapshot(ALPHA).await.is_ok());
     assert!(view.digest(BETA).await.is_ok());
+}
+
+// ---------------------------------------------------------------------
+// Write attribution.
+//
+// Every write names the actor that made it, and the store stamps that
+// on the event and on the row in the same statements. Both halves are
+// checked here, and the second one is checked after the first has been
+// evicted -- which is the whole reason the row carries it too.
+// ---------------------------------------------------------------------
+
+/// The actor recorded against the event at a position.
+fn actor_at(connection: &Connection, at: &Cursor) -> String {
+    connection
+        .query_row(
+            "SELECT actor FROM event_log WHERE seq = ?1",
+            rusqlite::params![i64::try_from(at.sequence()).unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|error| panic!("an event at {at}: {error}"))
+}
+
+/// Who the store says last wrote the one row `query` selects.
+///
+/// Every resource table carries the column, so one helper reads all
+/// five: the question is the same whichever row is asked about, and
+/// only the query differs.
+fn written_by(connection: &Connection, query: &str, params: &[&dyn rusqlite::ToSql]) -> String {
+    connection
+        .query_row(query, params, |row| row.get(0))
+        .unwrap_or_else(|error| panic!("a row for {query}: {error}"))
+}
+
+/// Who the store says last wrote a network's binding for a selector.
+fn binding_written_by(connection: &Connection, network: &str, value: &str) -> String {
+    written_by(
+        connection,
+        "SELECT written_by FROM binding WHERE network = ?1 AND selector_value = ?2",
+        &[&network, &value],
+    )
+}
+
+#[tokio::test]
+async fn every_write_records_the_actor_that_made_it() {
+    // All sixteen mutating methods, each called with an actor of a
+    // kind that would be plausible for it -- a consumer's token, the
+    // owning peer, the daemon's own sweeper -- and every one of them
+    // checked against the event it left. Sixteen signatures changed
+    // to carry the actor, and a method that took the parameter and
+    // then dropped it on the floor would still compile; this is what
+    // notices.
+    let fixture = TwoNetworks::new("attribution").await;
+    let token = Actor::Token(TokenId::for_test("f00dcafe"));
+    let other = Actor::Token(TokenId::for_test("0b57ac1e"));
+    let peer = Actor::Peer(1000);
+    let daemon = Actor::Daemon("sweeper");
+
+    const GAMMA: &str = "gamma";
+    const GAMMA_NAMESPACE: &str = "ns-gamma";
+    const SECOND_POOL: &str = "pool-two";
+
+    let store = &fixture.store;
+    let mut expected: Vec<(Cursor, &Actor)> = Vec::new();
+
+    let created = store.create_network(&token, GAMMA).await.unwrap();
+    expected.push((created.clone(), &token));
+
+    let range = store
+        .create_address_range(&token, GAMMA, SECOND_POOL, in_pool(150), in_pool(160))
+        .await
+        .unwrap();
+    expected.push((range.clone(), &token));
+
+    let attached = store
+        .attach_interface(&token, GAMMA, GAMMA_NAMESPACE, IFNAME)
+        .await
+        .unwrap();
+    expected.push((attached.clone(), &token));
+
+    // The row carries the actor as well as the event, which is the
+    // half that survives the event's eviction. Read here, where the
+    // three rows still exist, rather than at the end of a walk that
+    // removes them again.
+    let connection = fixture.behind_the_store();
+    assert_eq!(
+        written_by(
+            &connection,
+            "SELECT written_by FROM network WHERE name = ?1",
+            &[&GAMMA]
+        ),
+        token.as_recorded()
+    );
+    assert_eq!(
+        written_by(
+            &connection,
+            "SELECT written_by FROM attachment WHERE namespace = ?1 AND ifname = ?2",
+            &[&GAMMA_NAMESPACE, &IFNAME]
+        ),
+        token.as_recorded()
+    );
+    assert_eq!(
+        written_by(
+            &connection,
+            "SELECT written_by FROM address_range WHERE network = ?1 AND name = ?2",
+            &[&GAMMA, &SECOND_POOL]
+        ),
+        token.as_recorded()
+    );
+
+    let resized = store
+        .update_address_range(
+            &peer,
+            GAMMA,
+            SECOND_POOL,
+            &range,
+            in_pool(150),
+            in_pool(170),
+        )
+        .await
+        .unwrap();
+    expected.push((resized.clone(), &peer));
+
+    // A change restamps the row, so it names whoever produced the
+    // state it is in now rather than whoever created it.
+    assert_eq!(
+        written_by(
+            &connection,
+            "SELECT written_by FROM address_range WHERE network = ?1 AND name = ?2",
+            &[&GAMMA, &SECOND_POOL]
+        ),
+        peer.as_recorded()
+    );
+
+    // The binding writes happen in both networks, against the same
+    // hardware address, because that is the pair of rows a store with
+    // a cross-network defect would attribute to one writer.
+    let shared = selector(SelectorKind::Mac, SHARED_MAC);
+    let bound_alpha = store
+        .create_binding(&token, ALPHA, &shared, in_pool(20), None)
+        .await
+        .unwrap();
+    expected.push((bound_alpha.clone(), &token));
+
+    let bound_beta = store
+        .create_binding(&other, BETA, &shared, in_pool(20), None)
+        .await
+        .unwrap();
+    expected.push((bound_beta.clone(), &other));
+
+    let changed = store
+        .update_binding(&peer, ALPHA, &shared, &bound_alpha, in_pool(21), None)
+        .await
+        .unwrap();
+    expected.push((changed.clone(), &peer));
+
+    // Both networks' rows, each naming its own writer: the same
+    // hardware address in two networks is two unrelated clients, and
+    // a store that stamped whichever actor it saw last would pass a
+    // single-network version of this.
+    assert_eq!(
+        binding_written_by(&connection, ALPHA, SHARED_MAC),
+        peer.as_recorded(),
+        "a change restamps the row, so the change and not the create is what it names"
+    );
+    assert_eq!(
+        binding_written_by(&connection, BETA, SHARED_MAC),
+        other.as_recorded()
+    );
+
+    let unbound = store
+        .delete_binding(&token, ALPHA, &shared, &changed)
+        .await
+        .unwrap();
+    expected.push((unbound.clone(), &token));
+
+    // The lease writes are the daemon's own: nothing in this phase
+    // has a request behind them, and a sweep never will.
+    let holder = client(MAC_ONE);
+    let (taken, _) = store
+        .acquire_lease(&daemon, ALPHA, &holder, in_pool(30), DAY)
+        .await
+        .unwrap();
+    expected.push((taken.clone(), &daemon));
+
+    let renewed = store
+        .renew_lease(&daemon, ALPHA, in_pool(30), &holder, DAY)
+        .await
+        .unwrap();
+    expected.push((renewed.clone(), &daemon));
+
+    assert_eq!(
+        written_by(
+            &connection,
+            "SELECT written_by FROM lease WHERE network = ?1 AND address = ?2",
+            &[&ALPHA, &u32::from(in_pool(30))]
+        ),
+        daemon.as_recorded()
+    );
+    let revoked = store
+        .revoke_lease(&peer, ALPHA, in_pool(30), &renewed)
+        .await
+        .unwrap();
+    expected.push((revoked.clone(), &peer));
+
+    let (allocated, lease) = store
+        .allocate_lease(&daemon, BETA, &holder, None, DAY)
+        .await
+        .unwrap();
+    expected.push((allocated.clone(), &daemon));
+
+    // Two writes in one transaction, so the position returned is the
+    // later of them and the revocation it rolled over is the earlier.
+    let over_the_lease = store
+        .create_binding_revoking_lease(
+            &peer,
+            BETA,
+            &selector(SelectorKind::Mac, MAC_TWO),
+            lease.address,
+            None,
+            &lease.lease_id,
+        )
+        .await
+        .unwrap();
+    expected.push((over_the_lease.clone(), &peer));
+
+    let (lapsing, _) = store
+        .acquire_lease(&daemon, ALPHA, &holder, in_pool(40), 60)
+        .await
+        .unwrap();
+    expected.push((lapsing.clone(), &daemon));
+
+    fixture.clock.advance(120);
+    let (swept, gone) = store.sweep_expired_leases(&daemon, ALPHA).await.unwrap();
+    assert_eq!(gone.len(), 1);
+    expected.push((swept.expect("the sweep wrote an event").clone(), &daemon));
+
+    let detached = store
+        .detach_interface(&peer, GAMMA, GAMMA_NAMESPACE, IFNAME, &attached)
+        .await
+        .unwrap();
+    expected.push((detached.clone(), &peer));
+
+    let range_gone = store
+        .delete_address_range(&peer, GAMMA, SECOND_POOL, &resized)
+        .await
+        .unwrap();
+    expected.push((range_gone.clone(), &peer));
+
+    let network_gone = store.delete_network(&token, GAMMA, &created).await.unwrap();
+    expected.push((network_gone.clone(), &token));
+
+    for (at, actor) in &expected {
+        assert_eq!(
+            &actor_at(&connection, at),
+            &actor.as_recorded(),
+            "the event at {at} should name the actor that wrote it"
+        );
+    }
+
+    // Eighteen calls over the sixteen methods -- two of them twice,
+    // once per network -- so a method missed from the walk above
+    // fails here rather than silently going unchecked.
+    assert_eq!(expected.len(), 18);
+
+    // And nothing anywhere in the log is unattributed, which covers
+    // the fixture's own writes as well as this test's.
+    let unattributed: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM event_log WHERE actor = 'unrecorded'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(unattributed, 0);
+
+    assert_eq!(store.cross_network_answers(), 0);
+}
+
+#[tokio::test]
+async fn an_actor_survives_on_the_resource_after_its_event_has_been_evicted() {
+    // Two events of history, so the bindings written below are pushed
+    // out of the window by the writes that follow them. This is the
+    // question the row's own column exists to answer: the log is
+    // bounded and the resource is not, so "who configured the answer
+    // this network is giving now" outlives the event that said so.
+    let fixture =
+        TwoNetworks::with_retention("attribution-evicted", Retention::new(2, A_YEAR).unwrap())
+            .await;
+    let token = Actor::Token(TokenId::for_test("f00dcafe"));
+    let peer = Actor::Peer(1000);
+
+    let shared = selector(SelectorKind::Mac, SHARED_MAC);
+    let alpha = fixture
+        .store
+        .create_binding(&token, ALPHA, &shared, in_pool(20), None)
+        .await
+        .unwrap();
+    let beta = fixture
+        .store
+        .create_binding(&peer, BETA, &shared, in_pool(20), None)
+        .await
+        .unwrap();
+
+    // Three more writes, which puts both of the positions above
+    // outside a two-event window.
+    for last_octet in [31, 32, 33] {
+        fixture
+            .store
+            .create_binding(
+                &peer,
+                ALPHA,
+                &selector(SelectorKind::Mac, &format!("52:54:00:00:00:{last_octet}")),
+                in_pool(last_octet),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
+    let view = fixture.store.read().await.unwrap();
+    for at in [&alpha, &beta] {
+        assert!(matches!(
+            view.history(ALPHA, at).await.unwrap(),
+            History::Evicted { .. }
+        ));
+    }
+    drop(view);
+
+    let connection = fixture.behind_the_store();
+    for at in [&alpha, &beta] {
+        let surviving: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM event_log WHERE seq = ?1",
+                rusqlite::params![i64::try_from(at.sequence()).unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(surviving, 0, "the event at {at} should have been evicted");
+    }
+
+    // The same address in both networks, each row still naming its
+    // own writer. One network would have proved nothing: a store that
+    // stamped whichever actor it saw last would pass that test.
+    assert_eq!(
+        binding_written_by(&connection, ALPHA, SHARED_MAC),
+        token.as_recorded()
+    );
+    assert_eq!(
+        binding_written_by(&connection, BETA, SHARED_MAC),
+        peer.as_recorded()
+    );
+}
+
+// ---------------------------------------------------------------------
+// Tokens.
+//
+// A token is not a resource of a network and its mutations are not
+// events, so these tests ask different questions from the ones above:
+// what is stored of a secret, what a token may reach, and what it may
+// hand on. The last of those is the one worth the most, because a
+// token that can mint a wider token is the whole boundary gone.
+// ---------------------------------------------------------------------
+
+/// The uid the daemon runs as, for a test that mints as the peer.
+const OWNER: u32 = 1000;
+
+/// Mint a token as the owning peer, which may mint anything.
+async fn mint_as_owner(
+    fixture: &TwoNetworks,
+    name: &str,
+    scope: TokenScope,
+    capabilities: &[Capability],
+) -> MintedToken {
+    fixture
+        .store
+        .mint(&Caller::OwningPeer(OWNER), name, &scope, capabilities)
+        .await
+        .expect("a token minted by the owning peer")
+}
+
+/// What the table holds for a token's secret.
+fn stored_hash(connection: &Connection, id: &TokenId) -> String {
+    connection
+        .query_row(
+            "SELECT secret_sha256 FROM token WHERE id = ?1",
+            rusqlite::params![id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_minted_secret_verifies_and_the_table_holds_only_its_hash() {
+    let fixture = TwoNetworks::new("token-secret").await;
+
+    let minted = mint_as_owner(
+        &fixture,
+        "the home ipam",
+        TokenScope::Networks(vec![ALPHA.to_owned()]),
+        &[Capability::Read, Capability::Watch],
+    )
+    .await;
+
+    // The secret is the engine's randomness, as hex, and it is the
+    // only thing here that was never stored.
+    assert_eq!(minted.secret.len(), 64);
+    let stored = stored_hash(&fixture.behind_the_store(), &minted.token.id);
+    assert_ne!(stored, minted.secret);
+    assert_eq!(stored.len(), 64);
+
+    // Nothing in the row is the secret. Checked across the whole row
+    // rather than against the one column it would be in, because the
+    // failure being guarded against is a secret written somewhere
+    // nobody meant to write one.
+    let row: String = fixture
+        .behind_the_store()
+        .query_row(
+            "SELECT coalesce(group_concat(value, ' '), '') FROM token, json_each(
+                 json_array(token.id, name, secret_sha256, minted_by)
+             ) WHERE token.id = ?1",
+            rusqlite::params![minted.token.id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!row.contains(&minted.secret), "{row}");
+
+    // And presenting it answers with the token it was minted for.
+    let verified = fixture
+        .store
+        .authenticate(&minted.secret)
+        .await
+        .unwrap()
+        .expect("the secret should verify");
+    assert_eq!(verified.id, minted.token.id);
+    assert_eq!(
+        verified.capabilities,
+        vec![Capability::Read, Capability::Watch]
+    );
+    assert_eq!(verified.minted_by, Actor::Peer(OWNER).as_recorded());
+
+    // A secret nothing was minted with is no answer rather than an
+    // error, so no message bound for a log ever has to name it.
+    assert!(
+        fixture
+            .store
+            .authenticate(&"0".repeat(64))
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // The last use is recorded by the verification itself, so a
+    // dormant credential is visible in a listing.
+    assert_eq!(minted.token.last_used_at, None);
+    let listed = fixture
+        .store
+        .list(&Caller::OwningPeer(OWNER))
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].last_used_at, Some(FIXTURE_NOW));
+}
+
+#[tokio::test]
+async fn a_token_reaches_only_the_networks_its_scope_names() {
+    // Two networks holding the same address, which is why the scope
+    // is a set of names and not anything derived from what a network
+    // contains.
+    let fixture = TwoNetworks::new("token-scope").await;
+
+    let narrow = mint_as_owner(
+        &fixture,
+        "alpha only",
+        TokenScope::Networks(vec![ALPHA.to_owned()]),
+        &[Capability::Read],
+    )
+    .await;
+    let wide = mint_as_owner(
+        &fixture,
+        "everywhere",
+        TokenScope::EveryNetwork,
+        &[Capability::Read],
+    )
+    .await;
+
+    let narrow = fixture
+        .store
+        .authenticate(&narrow.secret)
+        .await
+        .unwrap()
+        .expect("the narrow token");
+    assert!(narrow.may_reach(ALPHA));
+    assert!(!narrow.may_reach(BETA));
+
+    // Not the other network's name, and not a name that merely looks
+    // like its own: the comparison is the whole name.
+    assert!(!narrow.may_reach("alpha-two"));
+    assert!(!narrow.may_reach("gamma"));
+
+    let wide = fixture
+        .store
+        .authenticate(&wide.secret)
+        .await
+        .unwrap()
+        .expect("the wide token");
+    assert!(wide.may_reach(ALPHA));
+    assert!(wide.may_reach(BETA));
+
+    // Including a network that did not exist when it was minted,
+    // which is what the every-network form means and why it is a
+    // variant rather than a list the store filled in at minting.
+    fixture
+        .store
+        .create_network(&OPERATOR, "gamma")
+        .await
+        .unwrap();
+    assert!(wide.may_reach("gamma"));
+}
+
+#[tokio::test]
+async fn a_token_cannot_mint_a_scope_its_minter_does_not_hold() {
+    let fixture = TwoNetworks::new("token-subset-scope").await;
+
+    let admin = mint_as_owner(
+        &fixture,
+        "alpha's operator",
+        TokenScope::Networks(vec![ALPHA.to_owned()]),
+        &[Capability::Read, Capability::Write, Capability::Admin],
+    )
+    .await;
+    let minter = Caller::Token(admin.token.id.clone());
+
+    // The every-network form, which is the one that matters: a token
+    // holding admin in one network minting itself the whole store is
+    // the boundary defeated in a single call.
+    let refusal = fixture
+        .store
+        .mint(
+            &minter,
+            "everything",
+            &TokenScope::EveryNetwork,
+            &[Capability::Read],
+        )
+        .await
+        .unwrap_err();
+    match &refusal {
+        Error::Unauthorised { detail, .. } => assert!(detail.contains("every network"), "{detail}"),
+        other => panic!("expected the mint to be refused, got {other:?}"),
+    }
+
+    // And the other network by name, which is the same rule reached
+    // the other way round.
+    assert!(matches!(
+        fixture
+            .store
+            .mint(
+                &minter,
+                "the other network",
+                &TokenScope::Networks(vec![BETA.to_owned()]),
+                &[Capability::Read],
+            )
+            .await,
+        Err(Error::Unauthorised { .. })
+    ));
+
+    // Its own network is allowed, which is what makes the two
+    // refusals above about the scope rather than about minting.
+    let narrowed = fixture
+        .store
+        .mint(
+            &minter,
+            "alpha's reader",
+            &TokenScope::Networks(vec![ALPHA.to_owned()]),
+            &[Capability::Read],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        narrowed.token.minted_by,
+        format!("token:{}", admin.token.id)
+    );
+
+    // Nothing was written for the refused mints: the store holds the
+    // two tokens it accepted and no more.
+    assert_eq!(
+        fixture
+            .store
+            .list(&Caller::OwningPeer(OWNER))
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn a_token_cannot_mint_a_capability_it_does_not_hold() {
+    let fixture = TwoNetworks::new("token-subset-capability").await;
+
+    let admin = mint_as_owner(
+        &fixture,
+        "a reader who may mint",
+        TokenScope::Networks(vec![ALPHA.to_owned()]),
+        &[Capability::Read, Capability::Admin],
+    )
+    .await;
+    let minter = Caller::Token(admin.token.id);
+
+    for withheld in [Capability::Write, Capability::Watch] {
+        let refusal = fixture
+            .store
+            .mint(
+                &minter,
+                "a wider token",
+                &TokenScope::Networks(vec![ALPHA.to_owned()]),
+                &[Capability::Read, withheld],
+            )
+            .await
+            .unwrap_err();
+
+        match &refusal {
+            Error::Unauthorised { detail, .. } => {
+                assert!(detail.contains(withheld.as_str()), "{detail}");
+            }
+            other => panic!("expected the mint to be refused, got {other:?}"),
+        }
+    }
+
+    // What it does hold, it may hand on -- including the admin
+    // capability itself, which is how an operator delegates.
+    assert!(
+        fixture
+            .store
+            .mint(
+                &minter,
+                "another operator",
+                &TokenScope::Networks(vec![ALPHA.to_owned()]),
+                &[Capability::Read, Capability::Admin],
+            )
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn a_token_without_the_admin_capability_cannot_mint_at_all() {
+    // The subset rule alone would let a read-only token mint
+    // read-only tokens, which widens nothing and multiplies
+    // credentials nobody issued. Minting needs the capability, and
+    // the store is where that is decided rather than only in whatever
+    // serves the socket.
+    let fixture = TwoNetworks::new("token-mint-needs-admin").await;
+
+    let reader = mint_as_owner(
+        &fixture,
+        "a reader",
+        TokenScope::EveryNetwork,
+        &[Capability::Read, Capability::Watch],
+    )
+    .await;
+
+    let refusal = fixture
+        .store
+        .mint(
+            &Caller::Token(reader.token.id),
+            "another reader",
+            &TokenScope::EveryNetwork,
+            &[Capability::Read],
+        )
+        .await
+        .unwrap_err();
+
+    match &refusal {
+        Error::Unauthorised { detail, .. } => assert!(detail.contains("admin"), "{detail}"),
+        other => panic!("expected the mint to be refused, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_removed_token_stops_authenticating_and_still_names_its_writes() {
+    let fixture = TwoNetworks::new("token-removed").await;
+
+    let minted = mint_as_owner(
+        &fixture,
+        "a consumer",
+        TokenScope::Networks(vec![ALPHA.to_owned(), BETA.to_owned()]),
+        &[Capability::Write],
+    )
+    .await;
+    let actor = Actor::Token(minted.token.id.clone());
+
+    let shared = selector(SelectorKind::Mac, SHARED_MAC);
+    fixture
+        .store
+        .create_binding(&actor, ALPHA, &shared, in_pool(20), None)
+        .await
+        .unwrap();
+
+    fixture
+        .store
+        .delete(&Caller::OwningPeer(OWNER), &minted.token.id)
+        .await
+        .unwrap();
+
+    assert!(
+        fixture
+            .store
+            .authenticate(&minted.secret)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        fixture
+            .store
+            .list(&Caller::OwningPeer(OWNER))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // A token the store does not have is reported as absent rather
+    // than quietly succeeding, because a caller that believes it has
+    // revoked a credential and has not is the worst outcome here.
+    assert!(matches!(
+        fixture
+            .store
+            .delete(&Caller::OwningPeer(OWNER), &minted.token.id)
+            .await,
+        Err(Error::NotFound { .. })
+    ));
+
+    // The attribution outlives the credential. "Who configured this
+    // binding" is a question about the past, and a token revoked this
+    // morning is still its answer.
+    let connection = fixture.behind_the_store();
+    assert_eq!(
+        binding_written_by(&connection, ALPHA, SHARED_MAC),
+        actor.as_recorded()
+    );
+
+    // The scope and the capabilities went with it, so there is no
+    // half-removed token for a later mint to compare against.
+    let orphans: i64 = connection
+        .query_row(
+            "SELECT (SELECT count(*) FROM token_network)
+                  + (SELECT count(*) FROM token_capability)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(orphans, 0);
+}
+
+#[tokio::test]
+async fn minting_a_token_leaves_no_event_in_any_networks_history() {
+    // The claim decision 7 of this design rests on, asserted rather
+    // than described: a token has no network to log an event against,
+    // so it logs none, and the store's order does not move for it.
+    let fixture = TwoNetworks::new("token-no-event").await;
+
+    let view = fixture.store.read().await.unwrap();
+    let before = view.cursor().clone();
+    drop(view);
+
+    let minted = mint_as_owner(
+        &fixture,
+        "a consumer",
+        TokenScope::EveryNetwork,
+        &[Capability::Read],
+    )
+    .await;
+    fixture.store.authenticate(&minted.secret).await.unwrap();
+    fixture
+        .store
+        .delete(&Caller::OwningPeer(OWNER), &minted.token.id)
+        .await
+        .unwrap();
+
+    let view = fixture.store.read().await.unwrap();
+    assert_eq!(view.cursor(), &before);
+    for network in [ALPHA, BETA] {
+        let (events, _) = resumed(view.history(network, &before).await.unwrap());
+        assert!(events.is_empty(), "{events:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_token_that_could_do_nothing_is_refused() {
+    // Both of these are a mistake rather than a configuration, and
+    // the typed form for what the caller meant is right there: the
+    // every-network scope, or a capability.
+    let fixture = TwoNetworks::new("token-useless").await;
+
+    assert!(matches!(
+        fixture
+            .store
+            .mint(
+                &Caller::OwningPeer(OWNER),
+                "reaches nothing",
+                &TokenScope::Networks(Vec::new()),
+                &[Capability::Read],
+            )
+            .await,
+        Err(Error::Invalid { .. })
+    ));
+
+    assert!(matches!(
+        fixture
+            .store
+            .mint(
+                &Caller::OwningPeer(OWNER),
+                "does nothing",
+                &TokenScope::EveryNetwork,
+                &[],
+            )
+            .await,
+        Err(Error::Invalid { .. })
+    ));
+
+    assert!(
+        fixture
+            .store
+            .list(&Caller::OwningPeer(OWNER))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn a_deletion_names_the_actor_that_removed_it() {
+    // The one event whose state cannot carry the answer. A deletion's
+    // state is the absence it reports, so the event's own column is
+    // the only place the remover can be named -- and "who deleted
+    // this binding" is the question attribution is for.
+    let fixture = TwoNetworks::new("attribution-deletion").await;
+    let token = Actor::Token(TokenId::for_test("f00dcafe"));
+    let peer = Actor::Peer(1000);
+
+    let shared = selector(SelectorKind::Mac, SHARED_MAC);
+    let before = start(&fixture);
+    let created = fixture
+        .store
+        .create_binding(&token, ALPHA, &shared, in_pool(20), None)
+        .await
+        .unwrap();
+    let removed = fixture
+        .store
+        .delete_binding(&peer, ALPHA, &shared, &created)
+        .await
+        .unwrap();
+
+    let view = fixture.store.read().await.unwrap();
+    let (events, _) = resumed(view.history(ALPHA, &before).await.unwrap());
+
+    let deletion = events
+        .iter()
+        .find(|event| event.cursor == removed)
+        .expect("the deletion's event");
+    assert_eq!(deletion.state, None);
+    assert_eq!(deletion.actor, peer.as_recorded());
+
+    // And the write it undid still names whoever made that, so the
+    // history reads as two acts by two parties rather than one.
+    let creation = events
+        .iter()
+        .find(|event| event.cursor == created)
+        .expect("the creation's event");
+    assert_eq!(creation.actor, token.as_recorded());
+}
+
+#[tokio::test]
+async fn a_read_of_a_resource_names_who_last_wrote_it() {
+    // All five kinds, read through the interface rather than out of
+    // the database, and in both networks: an answer that named one
+    // network's writer for the other's row is the project's central
+    // failure mode wearing a new field.
+    let fixture = TwoNetworks::new("attribution-reads").await;
+    let token = Actor::Token(TokenId::for_test("f00dcafe"));
+    let other = Actor::Token(TokenId::for_test("0b57ac1e"));
+
+    let shared = selector(SelectorKind::Mac, SHARED_MAC);
+    let holder = client(MAC_ONE);
+    for (network, actor) in [(ALPHA, &token), (BETA, &other)] {
+        fixture
+            .store
+            .create_binding(actor, network, &shared, in_pool(20), None)
+            .await
+            .unwrap();
+        fixture
+            .store
+            .acquire_lease(actor, network, &holder, in_pool(30), DAY)
+            .await
+            .unwrap();
+    }
+
+    let view = fixture.store.read().await.unwrap();
+
+    // The fixture built the networks, their interfaces and their
+    // pools as the operator, and every one of those reads says so.
+    for network in [ALPHA, BETA] {
+        assert_eq!(
+            view.network(network).await.unwrap().unwrap().written_by,
+            OPERATOR.as_recorded()
+        );
+        assert_eq!(
+            view.address_range(network, POOL)
+                .await
+                .unwrap()
+                .unwrap()
+                .written_by,
+            OPERATOR.as_recorded()
+        );
+    }
+    for network in view.networks().await.unwrap() {
+        assert_eq!(network.written_by, OPERATOR.as_recorded());
+    }
+    assert_eq!(
+        view.attachment(ALPHA, ALPHA_NAMESPACE, IFNAME)
+            .await
+            .unwrap()
+            .unwrap()
+            .written_by,
+        OPERATOR.as_recorded()
+    );
+    assert_eq!(
+        fixture
+            .store
+            .interface_owner(BETA_NAMESPACE, IFNAME)
+            .await
+            .unwrap()
+            .unwrap()
+            .written_by,
+        OPERATOR.as_recorded()
+    );
+
+    // The bindings and the leases were written by a different party
+    // in each network, over the same address, and each answer names
+    // its own.
+    for (network, actor) in [(ALPHA, &token), (BETA, &other)] {
+        assert_eq!(
+            view.binding(network, &shared)
+                .await
+                .unwrap()
+                .unwrap()
+                .written_by,
+            actor.as_recorded()
+        );
+        assert_eq!(
+            view.lookup_binding(network, &presenting(SelectorKind::Mac, SHARED_MAC))
+                .await
+                .unwrap()
+                .unwrap()
+                .written_by,
+            actor.as_recorded()
+        );
+        assert_eq!(
+            view.lease(network, in_pool(30))
+                .await
+                .unwrap()
+                .unwrap()
+                .written_by,
+            actor.as_recorded()
+        );
+
+        let bindings = view.bindings(network).await.unwrap();
+        assert!(bindings.iter().all(|b| b.written_by == actor.as_recorded()));
+        let held = view.leases_held_by(network, &holder).await.unwrap();
+        assert!(held.iter().all(|l| l.written_by == actor.as_recorded()));
+    }
+
+    assert_eq!(fixture.store.cross_network_answers(), 0);
+}
+
+#[tokio::test]
+async fn a_resources_state_and_its_struct_agree_on_who_wrote_it() {
+    // The state a consumer applies and the struct a reader gets are
+    // built by two statements in two modules. A consumer that applied
+    // the first and then read the second would hold two answers to
+    // one question, so the two spellings are compared rather than
+    // kept in step by hand.
+    let fixture = TwoNetworks::new("attribution-state").await;
+    let token = Actor::Token(TokenId::for_test("f00dcafe"));
+
+    configure(
+        &fixture,
+        ALPHA,
+        &selector(SelectorKind::Mac, SHARED_MAC),
+        in_pool(60),
+    )
+    .await;
+    fixture
+        .store
+        .acquire_lease(&token, ALPHA, &client(MAC_ONE), in_pool(50), DAY)
+        .await
+        .unwrap();
+
+    let view = fixture.store.read().await.unwrap();
+    let snapshot = view.snapshot(ALPHA).await.unwrap();
+
+    // Every kind the store writes, so a state that forgot the key is
+    // a failure here rather than a gap nobody notices.
+    assert_eq!(snapshot.events.len(), 5);
+    for event in &snapshot.events {
+        let state = event.state.as_deref().expect("a snapshot states what is");
+        assert!(
+            state.contains(&format!(r#""written_by":"{}""#, event.actor)),
+            "{:?}: {state}",
+            event.kind
+        );
+    }
+
+    // And the one written by somebody other than the fixture's
+    // operator, so the assertion above is not satisfied by every
+    // state carrying one value.
+    let lease = view.lease(ALPHA, in_pool(50)).await.unwrap().unwrap();
+    assert_eq!(lease.written_by, token.as_recorded());
+    assert_ne!(lease.written_by, OPERATOR.as_recorded());
+}
+
+#[tokio::test]
+async fn a_token_cannot_remove_a_token_outside_its_scope() {
+    // Removing a credential breaks whatever was using it, so this is
+    // the same boundary a mint has to respect, reached from the other
+    // side. Two networks, because a store that compared nothing would
+    // pass a test with one.
+    let fixture = TwoNetworks::new("token-remove-scope").await;
+
+    let alpha_admin = mint_as_owner(
+        &fixture,
+        "alpha's operator",
+        TokenScope::Networks(vec![ALPHA.to_owned()]),
+        &[Capability::Read, Capability::Admin],
+    )
+    .await;
+    let beta_consumer = mint_as_owner(
+        &fixture,
+        "beta's consumer",
+        TokenScope::Networks(vec![BETA.to_owned()]),
+        &[Capability::Read],
+    )
+    .await;
+    let alpha_consumer = mint_as_owner(
+        &fixture,
+        "alpha's consumer",
+        TokenScope::Networks(vec![ALPHA.to_owned()]),
+        &[Capability::Read],
+    )
+    .await;
+    let everywhere = mint_as_owner(
+        &fixture,
+        "a reader of everything",
+        TokenScope::EveryNetwork,
+        &[Capability::Read],
+    )
+    .await;
+
+    let caller = Caller::Token(alpha_admin.token.id.clone());
+
+    // The other network's consumer, and a token that reaches every
+    // network: neither is this caller's to take away.
+    for outside in [&beta_consumer, &everywhere] {
+        assert!(matches!(
+            fixture.store.delete(&caller, &outside.token.id).await,
+            Err(Error::Unauthorised { .. })
+        ));
+        assert!(
+            fixture
+                .store
+                .authenticate(&outside.secret)
+                .await
+                .unwrap()
+                .is_some(),
+            "a refused removal must leave the credential working"
+        );
+    }
+
+    // Its own network's consumer is, which is what makes the refusals
+    // above about the scope rather than about removing.
+    fixture
+        .store
+        .delete(&caller, &alpha_consumer.token.id)
+        .await
+        .unwrap();
+    assert!(
+        fixture
+            .store
+            .authenticate(&alpha_consumer.secret)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // A token without admin cannot remove even inside its own scope.
+    assert!(matches!(
+        fixture
+            .store
+            .delete(&Caller::Token(beta_consumer.token.id), &everywhere.token.id)
+            .await,
+        Err(Error::Unauthorised { .. })
+    ));
+}
+
+#[tokio::test]
+async fn a_listing_shows_only_the_tokens_the_caller_can_reach() {
+    // A network's name is its identifier, so a listing that showed a
+    // token scoped to a network the caller may not reach would say
+    // that the network exists. That is the same leak as answering a
+    // read outside a scope, in a shape an operator would not think to
+    // look for.
+    let fixture = TwoNetworks::new("token-list-scope").await;
+
+    let alpha_admin = mint_as_owner(
+        &fixture,
+        "alpha's operator",
+        TokenScope::Networks(vec![ALPHA.to_owned()]),
+        &[Capability::Read, Capability::Admin],
+    )
+    .await;
+    let beta_admin = mint_as_owner(
+        &fixture,
+        "beta's operator",
+        TokenScope::Networks(vec![BETA.to_owned()]),
+        &[Capability::Read, Capability::Admin],
+    )
+    .await;
+    let everywhere = mint_as_owner(
+        &fixture,
+        "the whole store's operator",
+        TokenScope::EveryNetwork,
+        &[Capability::Read, Capability::Admin],
+    )
+    .await;
+
+    let named = |tokens: Vec<crate::tokens::Token>| {
+        let mut names: Vec<String> = tokens.into_iter().map(|token| token.name).collect();
+        names.sort();
+        names
+    };
+
+    // Each operator sees its own token and nothing of the other
+    // network's, not even that it exists.
+    assert_eq!(
+        named(
+            fixture
+                .store
+                .list(&Caller::Token(alpha_admin.token.id.clone()))
+                .await
+                .unwrap()
+        ),
+        vec!["alpha's operator".to_owned()]
+    );
+    assert_eq!(
+        named(
+            fixture
+                .store
+                .list(&Caller::Token(beta_admin.token.id))
+                .await
+                .unwrap()
+        ),
+        vec!["beta's operator".to_owned()]
+    );
+
+    // An every-network admin token sees all three, and so does the
+    // owning peer, which has no scope at all.
+    for caller in [
+        Caller::Token(everywhere.token.id),
+        Caller::OwningPeer(OWNER),
+    ] {
+        assert_eq!(fixture.store.list(&caller).await.unwrap().len(), 3);
+    }
+
+    // And a token that may reach a network but holds no admin is
+    // refused the listing rather than given a filtered one, the
+    // operations on credentials being the operator's own.
+    let reader = mint_as_owner(
+        &fixture,
+        "alpha's reader",
+        TokenScope::Networks(vec![ALPHA.to_owned()]),
+        &[Capability::Read],
+    )
+    .await;
+    assert!(matches!(
+        fixture.store.list(&Caller::Token(reader.token.id)).await,
+        Err(Error::Unauthorised { .. })
+    ));
 }

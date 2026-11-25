@@ -68,6 +68,7 @@ use async_trait::async_trait;
 use rusqlite::Connection;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::actor::Actor;
 use crate::clock::{Clock, SystemClock};
 use crate::cursor::Cursor;
 use crate::db::{self, Database};
@@ -80,6 +81,9 @@ use crate::model::{AddressRange, Attachment, Binding, Explanation, Lease, Networ
 use crate::ops::{self, Reading, Writing};
 use crate::selector::{ClientIdentity, Selector};
 use crate::store::{BindingStore, ReadHandle};
+use crate::tokens::{
+    self, Caller, Capability, MintedToken, Token, TokenId, TokenScope, TokenStore,
+};
 
 /// A unit of work for the writer thread.
 ///
@@ -386,6 +390,7 @@ impl SqliteStore {
     /// What every write needs besides the connection, for a job
     /// running on the writer thread.
     fn writing<'a>(
+        actor: &'a Actor,
         clock: &'a Arc<dyn Clock>,
         epoch: &'a Epoch,
         guard: &'a Arc<CrossNetworkGuard>,
@@ -393,6 +398,7 @@ impl SqliteStore {
     ) -> Writing<'a> {
         Writing {
             clock: clock.as_ref(),
+            actor,
             epoch,
             guard: guard.as_ref(),
             retention,
@@ -477,9 +483,10 @@ impl BindingStore for SqliteStore {
         .await
     }
 
-    async fn create_network(&self, network: &str) -> Result<Cursor> {
+    async fn create_network(&self, actor: &Actor, network: &str) -> Result<Cursor> {
         let network = network.to_owned();
 
+        let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
@@ -488,17 +495,23 @@ impl BindingStore for SqliteStore {
         self.write("create a network", move |database| {
             ops::create_network(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
+                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
                 &network,
             )
         })
         .await
     }
 
-    async fn delete_network(&self, network: &str, expected: &Cursor) -> Result<Cursor> {
+    async fn delete_network(
+        &self,
+        actor: &Actor,
+        network: &str,
+        expected: &Cursor,
+    ) -> Result<Cursor> {
         let network = network.to_owned();
         let expected = expected.clone();
 
+        let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
@@ -507,7 +520,7 @@ impl BindingStore for SqliteStore {
         self.write("remove a network", move |database| {
             ops::delete_network(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
+                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
                 &network,
                 &expected,
             )
@@ -517,6 +530,7 @@ impl BindingStore for SqliteStore {
 
     async fn attach_interface(
         &self,
+        actor: &Actor,
         network: &str,
         namespace: &str,
         ifname: &str,
@@ -525,6 +539,7 @@ impl BindingStore for SqliteStore {
         let namespace = namespace.to_owned();
         let ifname = ifname.to_owned();
 
+        let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
@@ -533,7 +548,7 @@ impl BindingStore for SqliteStore {
         self.write("claim an interface", move |database| {
             ops::attach_interface(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
+                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
                 &network,
                 &namespace,
                 &ifname,
@@ -544,6 +559,7 @@ impl BindingStore for SqliteStore {
 
     async fn detach_interface(
         &self,
+        actor: &Actor,
         network: &str,
         namespace: &str,
         ifname: &str,
@@ -554,6 +570,7 @@ impl BindingStore for SqliteStore {
         let ifname = ifname.to_owned();
         let expected = expected.clone();
 
+        let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
@@ -562,7 +579,7 @@ impl BindingStore for SqliteStore {
         self.write("release an interface", move |database| {
             ops::detach_interface(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
+                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
                 &network,
                 &namespace,
                 &ifname,
@@ -574,6 +591,7 @@ impl BindingStore for SqliteStore {
 
     async fn create_address_range(
         &self,
+        actor: &Actor,
         network: &str,
         name: &str,
         first: std::net::Ipv4Addr,
@@ -582,6 +600,7 @@ impl BindingStore for SqliteStore {
         let network = network.to_owned();
         let name = name.to_owned();
 
+        let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
@@ -590,7 +609,7 @@ impl BindingStore for SqliteStore {
         self.write("create an address range", move |database| {
             ops::create_address_range(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
+                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
                 &network,
                 &name,
                 first,
@@ -602,6 +621,7 @@ impl BindingStore for SqliteStore {
 
     async fn update_address_range(
         &self,
+        actor: &Actor,
         network: &str,
         name: &str,
         expected: &Cursor,
@@ -612,6 +632,7 @@ impl BindingStore for SqliteStore {
         let name = name.to_owned();
         let expected = expected.clone();
 
+        let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
@@ -620,7 +641,7 @@ impl BindingStore for SqliteStore {
         self.write("resize an address range", move |database| {
             ops::update_address_range(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
+                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
                 &network,
                 &name,
                 &expected,
@@ -633,6 +654,7 @@ impl BindingStore for SqliteStore {
 
     async fn delete_address_range(
         &self,
+        actor: &Actor,
         network: &str,
         name: &str,
         expected: &Cursor,
@@ -641,6 +663,7 @@ impl BindingStore for SqliteStore {
         let name = name.to_owned();
         let expected = expected.clone();
 
+        let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
@@ -649,7 +672,7 @@ impl BindingStore for SqliteStore {
         self.write("remove an address range", move |database| {
             ops::delete_address_range(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
+                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
                 &network,
                 &name,
                 &expected,
@@ -660,6 +683,7 @@ impl BindingStore for SqliteStore {
 
     async fn create_binding(
         &self,
+        actor: &Actor,
         network: &str,
         selector: &Selector,
         address: std::net::Ipv4Addr,
@@ -669,6 +693,7 @@ impl BindingStore for SqliteStore {
         let selector = selector.clone();
         let hostname = hostname.map(str::to_owned);
 
+        let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
@@ -677,7 +702,7 @@ impl BindingStore for SqliteStore {
         self.write("configure a binding", move |database| {
             ops::create_binding(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
+                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
                 &network,
                 &selector,
                 address,
@@ -689,6 +714,7 @@ impl BindingStore for SqliteStore {
 
     async fn update_binding(
         &self,
+        actor: &Actor,
         network: &str,
         selector: &Selector,
         expected: &Cursor,
@@ -700,6 +726,7 @@ impl BindingStore for SqliteStore {
         let expected = expected.clone();
         let hostname = hostname.map(str::to_owned);
 
+        let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
@@ -708,7 +735,7 @@ impl BindingStore for SqliteStore {
         self.write("change a binding", move |database| {
             ops::update_binding(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
+                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
                 &network,
                 &selector,
                 &expected,
@@ -721,6 +748,7 @@ impl BindingStore for SqliteStore {
 
     async fn delete_binding(
         &self,
+        actor: &Actor,
         network: &str,
         selector: &Selector,
         expected: &Cursor,
@@ -729,6 +757,7 @@ impl BindingStore for SqliteStore {
         let selector = selector.clone();
         let expected = expected.clone();
 
+        let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
@@ -737,7 +766,7 @@ impl BindingStore for SqliteStore {
         self.write("remove a binding", move |database| {
             ops::delete_binding(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
+                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
                 &network,
                 &selector,
                 &expected,
@@ -748,6 +777,7 @@ impl BindingStore for SqliteStore {
 
     async fn create_binding_revoking_lease(
         &self,
+        actor: &Actor,
         network: &str,
         selector: &Selector,
         address: std::net::Ipv4Addr,
@@ -759,6 +789,7 @@ impl BindingStore for SqliteStore {
         let hostname = hostname.map(str::to_owned);
         let holder = holder.clone();
 
+        let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
@@ -767,7 +798,7 @@ impl BindingStore for SqliteStore {
         self.write("configure a binding over a lease", move |database| {
             ops::create_binding_revoking_lease(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
+                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
                 &network,
                 &selector,
                 address,
@@ -780,6 +811,7 @@ impl BindingStore for SqliteStore {
 
     async fn acquire_lease(
         &self,
+        actor: &Actor,
         network: &str,
         identity: &ClientIdentity,
         address: std::net::Ipv4Addr,
@@ -788,6 +820,7 @@ impl BindingStore for SqliteStore {
         let network = network.to_owned();
         let identity = identity.clone();
 
+        let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
@@ -796,7 +829,7 @@ impl BindingStore for SqliteStore {
         self.write("take a lease on an address", move |database| {
             lease::acquire_lease(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
+                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
                 &network,
                 &identity,
                 address,
@@ -808,6 +841,7 @@ impl BindingStore for SqliteStore {
 
     async fn allocate_lease(
         &self,
+        actor: &Actor,
         network: &str,
         identity: &ClientIdentity,
         requested: Option<std::net::Ipv4Addr>,
@@ -816,6 +850,7 @@ impl BindingStore for SqliteStore {
         let network = network.to_owned();
         let identity = identity.clone();
 
+        let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
@@ -824,7 +859,7 @@ impl BindingStore for SqliteStore {
         self.write("allocate an address", move |database| {
             lease::allocate_lease(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
+                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
                 &network,
                 &identity,
                 requested,
@@ -836,6 +871,7 @@ impl BindingStore for SqliteStore {
 
     async fn renew_lease(
         &self,
+        actor: &Actor,
         network: &str,
         address: std::net::Ipv4Addr,
         identity: &ClientIdentity,
@@ -844,6 +880,7 @@ impl BindingStore for SqliteStore {
         let network = network.to_owned();
         let identity = identity.clone();
 
+        let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
@@ -852,7 +889,7 @@ impl BindingStore for SqliteStore {
         self.write("renew a lease", move |database| {
             lease::renew_lease(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
+                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
                 &network,
                 address,
                 &identity,
@@ -864,6 +901,7 @@ impl BindingStore for SqliteStore {
 
     async fn revoke_lease(
         &self,
+        actor: &Actor,
         network: &str,
         address: std::net::Ipv4Addr,
         expected: &Cursor,
@@ -871,6 +909,7 @@ impl BindingStore for SqliteStore {
         let network = network.to_owned();
         let expected = expected.clone();
 
+        let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
@@ -879,7 +918,7 @@ impl BindingStore for SqliteStore {
         self.write("revoke a lease", move |database| {
             lease::revoke_lease(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
+                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
                 &network,
                 address,
                 &expected,
@@ -888,9 +927,14 @@ impl BindingStore for SqliteStore {
         .await
     }
 
-    async fn sweep_expired_leases(&self, network: &str) -> Result<(Option<Cursor>, Vec<Lease>)> {
+    async fn sweep_expired_leases(
+        &self,
+        actor: &Actor,
+        network: &str,
+    ) -> Result<(Option<Cursor>, Vec<Lease>)> {
         let network = network.to_owned();
 
+        let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
         let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
@@ -899,9 +943,75 @@ impl BindingStore for SqliteStore {
         self.write("sweep expired leases", move |database| {
             lease::sweep_expired_leases(
                 database.connection_mut(),
-                &SqliteStore::writing(&clock, &epoch, &guard, &retention),
+                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
                 &network,
             )
+        })
+        .await
+    }
+}
+
+#[async_trait]
+impl TokenStore for SqliteStore {
+    async fn mint(
+        &self,
+        minter: &Caller,
+        name: &str,
+        scope: &TokenScope,
+        capabilities: &[Capability],
+    ) -> Result<MintedToken> {
+        let minter = minter.clone();
+        let name = name.to_owned();
+        let scope = scope.clone();
+        let capabilities = capabilities.to_vec();
+
+        let clock = Arc::clone(&self.clock);
+
+        self.write("mint a token", move |database| {
+            tokens::mint(
+                database.connection_mut(),
+                clock.as_ref(),
+                &minter,
+                &name,
+                &scope,
+                &capabilities,
+            )
+        })
+        .await
+    }
+
+    async fn delete(&self, caller: &Caller, id: &TokenId) -> Result<()> {
+        let caller = caller.clone();
+        let id = id.clone();
+
+        self.write("remove a token", move |database| {
+            tokens::delete(database.connection_mut(), &caller, &id)
+        })
+        .await
+    }
+
+    async fn list(&self, caller: &Caller) -> Result<Vec<Token>> {
+        let caller = caller.clone();
+
+        // On the writer thread rather than through a view, as the
+        // other two reads without a view are. A token list is read
+        // when an operator asks for one, so it is not worth a thread
+        // of its own, and it has no position in the store's order for
+        // a view to hold it at: tokens emit no events.
+        self.read_now("list the tokens", move |database| {
+            tokens::list(database.connection(), &caller)
+        })
+        .await
+    }
+
+    async fn authenticate(&self, secret: &str) -> Result<Option<Token>> {
+        let secret = secret.to_owned();
+        let clock = Arc::clone(&self.clock);
+
+        // A write, because verifying a token records that it was
+        // used, and the row is the whole of a token's audit trail.
+        self.write("verify a token", move |database| {
+            tokens::authenticate(database.connection_mut(), clock.as_ref(), &secret)
         })
         .await
     }

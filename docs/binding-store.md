@@ -33,6 +33,7 @@ of them it serves.
 - [The schema](#the-schema)
 - [Client identity and selector precedence](#client-identity-and-selector-precedence)
 - [The lease lifecycle](#the-lease-lifecycle)
+- [Tokens and write attribution](#tokens-and-write-attribution)
 - [The event log, the cursor and the epoch](#the-event-log-the-cursor-and-the-epoch)
 - [Retention](#retention)
 - [The diagnostics](#the-diagnostics)
@@ -40,12 +41,16 @@ of them it serves.
 
 ## The shape of the interface
 
-Two traits. `BindingStore` is the store: everything that changes
-it, plus the handful of reads that cannot be answered from inside
-one network. `ReadHandle` is a view of the store frozen at one
-position in its history, and is where every network-scoped read
-lives. A store and a consistent view of one are different things
-with different lifetimes, which is why they are different types.
+Two traits over the resources, and a third over the credentials.
+`BindingStore` is the store: everything that changes it, plus the
+handful of reads that cannot be answered from inside one network.
+`ReadHandle` is a view of the store frozen at one position in its
+history, and is where every network-scoped read lives. A store and
+a consistent view of one are different things with different
+lifetimes, which is why they are different types. `TokenStore` is
+the third, and [Tokens and write
+attribution](#tokens-and-write-attribution) says why it is not part
+of the first.
 
 Both are asynchronous, and that is a design rather than an
 annotation. SQLite is a synchronous library; a read transaction
@@ -165,11 +170,11 @@ resume path wasted entirely.
 
 ## The schema
 
-Seven tables. Every one is `STRICT`, so a value whose type does not
-match its column is refused rather than stored as given -- without
-it a column declared `INTEGER` holds the text `10.0.0.5` quite
-happily, and every comparison against it then answers something
-other than what the query meant.
+Eleven tables. Every one is `STRICT`, so a value whose type does
+not match its column is refused rather than stored as given --
+without it a column declared `INTEGER` holds the text `10.0.0.5`
+quite happily, and every comparison against it then answers
+something other than what the query meant.
 
 An IPv4 address is one `INTEGER` holding its 32-bit value, never a
 dotted quad in `TEXT`. "The lowest free address in this range" is
@@ -189,6 +194,11 @@ the position each row was last written at without a second query,
 and a caller that wants to change a row presents that position
 back.
 
+Every resource row also carries a `written_by`, and every event a
+matching `actor`. Both are written in the same statement as the row
+and the event they describe, because a write whose attribution can
+fail separately is a write whose attribution is sometimes absent.
+
 | Table | Key | Why that is the identity |
 |-------|-----|--------------------------|
 | `store_identity` | the single row | The epoch: the half of a cursor that says whose sequence numbers these are. |
@@ -199,6 +209,9 @@ back.
 | `address_range` | `(network, name)` | A span of addresses a network may allocate from, named within it. |
 | `binding` | `(network, selector kind, selector value)` | A selector means nothing outside a network, so it is not a resource of its own. |
 | `lease` | `(network, address)` | Within one network an address has at most one holder; a client may hold two addresses. |
+| `token` | `id` | A credential is store-global: its answer is which networks may be reached, so it is not keyed by one. |
+| `token_network` | `(token, network)` | The networks one token may reach, as names rather than references -- a token may be minted before its network exists. |
+| `token_capability` | `(token, capability)` | Rows rather than columns or bits, so a capability for a resource this schema does not hold yet is an insert. |
 
 **A network is a name and nothing else.** The name is the caller's,
 unique in the store, and opaque here: a UUID and the word `guest`
@@ -451,6 +464,79 @@ operation that lets a caller see a lease before it is committed.
 The cost is one `fsync` per lease transaction. If that ever proves
 too expensive, the honest fix is batching acknowledgements, not
 weakening the commit.
+
+## Tokens and write attribution
+
+A token is a secret a consumer presents, a set of networks it may
+reach, and a set of things it may do in them. There are four
+capabilities -- read, write, watch and admin -- and `admin` covers the
+operations that are about the store rather than about a network in
+it: minting and removing tokens, listing them, and minting an epoch.
+
+**Tokens are a trait of their own and not resources of
+`BindingStore`.** A token's answer *is* which networks may be
+reached, so there is no network for its methods to take, and the
+rule that every operation names its network is the one thing the
+crate boundary exists to make mechanical. Forcing a token in anyway
+means forcing a network on to the event its mutation would emit, and
+the event log's `network` column is not nullable: a sentinel name
+collides with a real network, because names here are opaque and `*`
+is legal; a nullable column breaks every reader of the log; and a
+mutation that returned a position without appending an event would
+claim a place in an order it is not in. So a token mutation emits no
+event and returns no cursor, and its audit is the row itself -- who
+minted it, when, and when it was last presented.
+
+**Only the hash of a secret is stored.** The secret is 32 bytes the
+engine generated, rendered as hex and returned in plaintext exactly
+once, from the mint that created it. Verification hashes what was
+presented and looks the hash up, so the plaintext never reaches a
+comparison and nothing above the store holds any hashing logic. No
+key-derivation function is used, and that is a decision rather than
+an omission: there is no guessable input for one to defend, so it
+would only make every handshake slower.
+
+**A token never widens, and the store is where that is enforced.** One
+predicate decides it for all three operations: a caller may act on a
+token whose scope is inside its own, where the every-network form is
+contained only by itself, because it reaches networks that do not
+exist yet. So a mint is refused if it would grant a network outside
+the minter's scope or a capability it does not hold; a removal is
+refused for a token outside the caller's scope, because taking a
+credential away breaks whatever was using it; and a listing is
+*filtered* to the tokens inside the caller's scope rather than
+refused, because a network's name is its identifier and saying that a
+token for some other network exists says that the network does. All
+three need `admin`, the operations on credentials being the
+operator's own.
+
+The owning peer -- a local process connecting as the uid the daemon
+runs as -- has no scope and may do all three to anything, which is
+how the first token comes to exist without a password, a token file
+or a secret printed at startup. The rules live here rather than only
+in whatever serves the socket because an authorisation rule checked
+in one caller is a rule the second caller skips, and the consequence
+of skipping these is a token that can mint itself a wider one or
+delete another network's.
+
+**Every write names its actor**: a token, a local peer's uid, or a
+named part of the daemon. It is rendered into one `TEXT` value and
+never parsed back -- nothing reads it as structure, and a token
+removed this morning is still the answer to "who configured this".
+It is stamped on the event and on the row, because the history is
+bounded and the resource is not: only the log can say who made a
+write that has since been superseded, and only the row can still say
+who made the write that produced the state something is answering
+with now.
+
+Both are readable. Every resource a read returns carries a
+`written_by`, every event carries its actor, and each resource's
+event state carries the same value under the same key -- so a
+consumer applying a stream and a consumer reading a resource get one
+answer rather than two. The event's own column is not redundant with
+its state, and a deletion is why: a deletion's state is the absence
+it reports, so the column is the only place the remover can be
+named.
 
 ## The event log, the cursor and the epoch
 

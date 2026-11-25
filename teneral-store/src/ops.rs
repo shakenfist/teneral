@@ -1,7 +1,8 @@
 //! Every statement the store runs, and the events each write emits.
 //!
 //! All of the SQL in this crate is here, in `lease.rs`, in
-//! `history.rs`, or in a migration, which is deliberate: it is the
+//! `history.rs`, in `tokens.rs`, or in a migration, which is
+//! deliberate: it is the
 //! part a reviewer reads most closely, and the rule that every
 //! operation is scoped to a network is only checkable if the
 //! statements can be read together. Nothing in this module is public,
@@ -41,11 +42,20 @@
 //! transaction again, which is why every append below goes through
 //! [`crate::history::appended`] rather than reading the engine's own
 //! last row id. See there for why the two are one operation.
+//!
+//! **A write stamps the actor that made it in the same statement as
+//! the row and the event.** Not a second statement afterwards: a
+//! write whose attribution can fail separately is a write whose
+//! attribution is sometimes absent, and a row that says who wrote it
+//! only most of the time is a row nobody can read the answer off. It
+//! goes into both the event and the row, because the history is
+//! evicted on a bound and the question outlives it.
 
 use std::net::Ipv4Addr;
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
+use crate::actor::Actor;
 use crate::clock::Clock;
 use crate::cursor::Cursor;
 use crate::error::{Error, Result};
@@ -244,21 +254,26 @@ impl<'a> Reading<'a> {
 /// Every network, by name.
 pub(crate) fn networks(conn: &Connection, epoch: &Epoch) -> Result<Vec<Network>> {
     let mut statement = conn
-        .prepare_cached("SELECT name, cursor_seq FROM network ORDER BY name")
+        .prepare_cached("SELECT name, cursor_seq, written_by FROM network ORDER BY name")
         .map_err(storage("preparing a read of the networks"))?;
 
     let rows = statement
         .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
         })
         .map_err(storage("reading the networks"))?;
 
     let mut networks = Vec::new();
     for row in rows {
-        let (name, cursor_seq) = row.map_err(storage("reading a network"))?;
+        let (name, cursor_seq, written_by) = row.map_err(storage("reading a network"))?;
         networks.push(Network {
             name,
             cursor: Cursor::from_row(epoch, cursor_seq)?,
+            written_by,
         });
     }
 
@@ -273,19 +288,20 @@ pub(crate) fn networks(conn: &Connection, epoch: &Epoch) -> Result<Vec<Network>>
 /// asked for or is not returned; there is no second value that could
 /// disagree with the first.
 pub(crate) fn network(conn: &Connection, epoch: &Epoch, name: &str) -> Result<Option<Network>> {
-    let found: Option<i64> = conn
+    let found: Option<(i64, String)> = conn
         .query_row(
-            "SELECT cursor_seq FROM network WHERE name = ?1",
+            "SELECT cursor_seq, written_by FROM network WHERE name = ?1",
             params![name],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(storage("reading a network"))?;
 
     match found {
-        Some(cursor_seq) => Ok(Some(Network {
+        Some((cursor_seq, written_by)) => Ok(Some(Network {
             name: name.to_owned(),
             cursor: Cursor::from_row(epoch, cursor_seq)?,
+            written_by,
         })),
         None => Ok(None),
     }
@@ -296,7 +312,7 @@ pub(crate) fn attachments(conn: &Connection, reading: &Reading<'_>) -> Result<Ve
     let network = reading.network;
     let mut statement = conn
         .prepare_cached(
-            "SELECT namespace, ifname, network, cursor_seq FROM attachment
+            "SELECT namespace, ifname, network, cursor_seq, written_by FROM attachment
              WHERE network = ?1 ORDER BY namespace, ifname",
         )
         .map_err(storage("preparing a read of a network's attachments"))?;
@@ -308,13 +324,14 @@ pub(crate) fn attachments(conn: &Connection, reading: &Reading<'_>) -> Result<Ve
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
             ))
         })
         .map_err(storage("reading a network's attachments"))?;
 
     let mut attachments = Vec::new();
     for row in rows {
-        let (namespace, ifname, network, cursor_seq) =
+        let (namespace, ifname, network, cursor_seq, written_by) =
             row.map_err(storage("reading an attachment"))?;
         reading.guard(&network, ATTACHMENT, || attachment_id(&namespace, &ifname))?;
         attachments.push(Attachment {
@@ -322,6 +339,7 @@ pub(crate) fn attachments(conn: &Connection, reading: &Reading<'_>) -> Result<Ve
             namespace,
             ifname,
             cursor: Cursor::from_row(reading.epoch, cursor_seq)?,
+            written_by,
         });
     }
 
@@ -343,18 +361,18 @@ pub(crate) fn attachment(
     // question, which is what gives the guard below something to
     // compare. Reading it back costs a string per row and is the
     // difference between a check and an assumption.
-    let found: Option<(String, i64)> = conn
+    let found: Option<(String, i64, String)> = conn
         .query_row(
-            "SELECT network, cursor_seq FROM attachment
+            "SELECT network, cursor_seq, written_by FROM attachment
              WHERE namespace = ?1 AND ifname = ?2 AND network = ?3",
             params![namespace, ifname, reading.network],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(storage("reading an attachment"))?;
 
     match found {
-        Some((network, cursor_seq)) => {
+        Some((network, cursor_seq, written_by)) => {
             reading.guard(&network, ATTACHMENT, || attachment_id(namespace, ifname))?;
 
             Ok(Some(Attachment {
@@ -362,6 +380,7 @@ pub(crate) fn attachment(
                 namespace: namespace.to_owned(),
                 ifname: ifname.to_owned(),
                 cursor: Cursor::from_row(reading.epoch, cursor_seq)?,
+                written_by,
             }))
         }
         None => Ok(None),
@@ -379,21 +398,23 @@ pub(crate) fn interface_owner(
     namespace: &str,
     ifname: &str,
 ) -> Result<Option<Attachment>> {
-    let found: Option<(String, i64)> = conn
+    let found: Option<(String, i64, String)> = conn
         .query_row(
-            "SELECT network, cursor_seq FROM attachment WHERE namespace = ?1 AND ifname = ?2",
+            "SELECT network, cursor_seq, written_by FROM attachment
+             WHERE namespace = ?1 AND ifname = ?2",
             params![namespace, ifname],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(storage("reading which network holds an interface"))?;
 
     match found {
-        Some((network, cursor_seq)) => Ok(Some(Attachment {
+        Some((network, cursor_seq, written_by)) => Ok(Some(Attachment {
             network,
             namespace: namespace.to_owned(),
             ifname: ifname.to_owned(),
             cursor: Cursor::from_row(epoch, cursor_seq)?,
+            written_by,
         })),
         None => Ok(None),
     }
@@ -407,8 +428,8 @@ pub(crate) fn address_ranges(
     let network = reading.network;
     let mut statement = conn
         .prepare_cached(
-            "SELECT name, first_address, last_address, network, cursor_seq FROM address_range
-             WHERE network = ?1 ORDER BY first_address",
+            "SELECT name, first_address, last_address, network, cursor_seq, written_by
+             FROM address_range WHERE network = ?1 ORDER BY first_address",
         )
         .map_err(storage("preparing a read of a network's ranges"))?;
 
@@ -420,13 +441,14 @@ pub(crate) fn address_ranges(
                 row.get::<_, i64>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, i64>(4)?,
+                row.get::<_, String>(5)?,
             ))
         })
         .map_err(storage("reading a network's ranges"))?;
 
     let mut ranges = Vec::new();
     for row in rows {
-        let (name, first, last, network, cursor_seq) =
+        let (name, first, last, network, cursor_seq, written_by) =
             row.map_err(storage("reading an address range"))?;
         reading.guard(&network, RANGE, || name.clone())?;
         ranges.push(AddressRange {
@@ -435,6 +457,7 @@ pub(crate) fn address_ranges(
             first: address_from_row(first)?,
             last: address_from_row(last)?,
             cursor: Cursor::from_row(reading.epoch, cursor_seq)?,
+            written_by,
         });
     }
 
@@ -447,18 +470,26 @@ pub(crate) fn address_range(
     reading: &Reading<'_>,
     name: &str,
 ) -> Result<Option<AddressRange>> {
-    let found: Option<(String, i64, i64, i64)> = conn
+    let found: Option<(String, i64, i64, i64, String)> = conn
         .query_row(
-            "SELECT network, first_address, last_address, cursor_seq FROM address_range
-             WHERE network = ?1 AND name = ?2",
+            "SELECT network, first_address, last_address, cursor_seq, written_by
+             FROM address_range WHERE network = ?1 AND name = ?2",
             params![reading.network, name],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .optional()
         .map_err(storage("reading an address range"))?;
 
     match found {
-        Some((network, first, last, cursor_seq)) => {
+        Some((network, first, last, cursor_seq, written_by)) => {
             reading.guard(&network, RANGE, || name.to_owned())?;
 
             Ok(Some(AddressRange {
@@ -467,6 +498,7 @@ pub(crate) fn address_range(
                 first: address_from_row(first)?,
                 last: address_from_row(last)?,
                 cursor: Cursor::from_row(reading.epoch, cursor_seq)?,
+                written_by,
             }))
         }
         None => Ok(None),
@@ -484,7 +516,8 @@ pub(crate) fn address_range(
 pub(crate) fn bindings(conn: &Connection, reading: &Reading<'_>) -> Result<Vec<Binding>> {
     let mut statement = conn
         .prepare_cached(
-            "SELECT selector_kind, selector_value, address, hostname, network, cursor_seq
+            "SELECT selector_kind, selector_value, address, hostname, network, cursor_seq,
+                    written_by
              FROM binding WHERE network = ?1 ORDER BY selector_kind, selector_value",
         )
         .map_err(storage("preparing a read of a network's bindings"))?;
@@ -498,13 +531,14 @@ pub(crate) fn bindings(conn: &Connection, reading: &Reading<'_>) -> Result<Vec<B
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, String>(4)?,
                 row.get::<_, i64>(5)?,
+                row.get::<_, String>(6)?,
             ))
         })
         .map_err(storage("reading a network's bindings"))?;
 
     let mut bindings = Vec::new();
     for row in rows {
-        let (kind, value, address, hostname, network, cursor_seq) =
+        let (kind, value, address, hostname, network, cursor_seq, written_by) =
             row.map_err(storage("reading a binding"))?;
         let selector = Selector::from_row(&kind, value)?;
         reading.guard(&network, BINDING, || binding_id(&selector))?;
@@ -514,6 +548,7 @@ pub(crate) fn bindings(conn: &Connection, reading: &Reading<'_>) -> Result<Vec<B
             address: address_from_row(address)?,
             hostname,
             cursor: Cursor::from_row(reading.epoch, cursor_seq)?,
+            written_by,
         });
     }
 
@@ -534,18 +569,26 @@ pub(crate) fn binding(
     reading: &Reading<'_>,
     selector: &Selector,
 ) -> Result<Option<Binding>> {
-    let found: Option<(String, i64, Option<String>, i64)> = conn
+    let found: Option<(String, i64, Option<String>, i64, String)> = conn
         .query_row(
-            "SELECT network, address, hostname, cursor_seq FROM binding
+            "SELECT network, address, hostname, cursor_seq, written_by FROM binding
              WHERE network = ?1 AND selector_kind = ?2 AND selector_value = ?3",
             params![reading.network, selector.kind().as_str(), selector.value()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .optional()
         .map_err(storage("reading a binding"))?;
 
     match found {
-        Some((network, address, hostname, cursor_seq)) => {
+        Some((network, address, hostname, cursor_seq, written_by)) => {
             reading.guard(&network, BINDING, || binding_id(selector))?;
 
             Ok(Some(Binding {
@@ -554,6 +597,7 @@ pub(crate) fn binding(
                 address: address_from_row(address)?,
                 hostname,
                 cursor: Cursor::from_row(reading.epoch, cursor_seq)?,
+                written_by,
             }))
         }
         None => Ok(None),
@@ -710,31 +754,43 @@ pub(crate) fn explain(
 // means the escaping is the engine's: a network called `say "hi"` is
 // then a correctly quoted event rather than a payload that parses as
 // something else.
+//
+// Each state carries `written_by` last, spelled as the resource row
+// spells it, because the snapshot in `history.rs` builds the same
+// state from the row and the two are compared against each other. A
+// key added to one of the two and not the other, or added in a
+// different place, is a consumer holding two descriptions of one
+// resource.
 // ---------------------------------------------------------------------
 
 /// Append the event for a network that now exists, and return the
 /// sequence it was given.
 fn event_network_created(
     transaction: &Transaction<'_>,
-    bound: &Retention,
+    writing: &Writing<'_>,
     name: &str,
     now: i64,
 ) -> Result<i64> {
     transaction
         .execute(
-            "INSERT INTO event_log (network, kind, resource_id, state, recorded_at)
-             VALUES (?1, ?2, ?1, json_object('name', ?1), ?3)",
-            params![name, EventKind::Network.as_str(), now],
+            "INSERT INTO event_log (network, kind, resource_id, state, recorded_at, actor)
+             VALUES (?1, ?2, ?1, json_object('name', ?1, 'written_by', ?4), ?3, ?4)",
+            params![
+                name,
+                EventKind::Network.as_str(),
+                now,
+                writing.actor.as_recorded()
+            ],
         )
         .map_err(storage("recording that a network was created"))?;
 
-    history::appended(transaction, bound, now)
+    history::appended(transaction, writing.retention, now)
 }
 
 /// Append the event for an attachment that now exists.
 fn event_attachment_written(
     transaction: &Transaction<'_>,
-    bound: &Retention,
+    writing: &Writing<'_>,
     network: &str,
     namespace: &str,
     ifname: &str,
@@ -742,21 +798,23 @@ fn event_attachment_written(
 ) -> Result<i64> {
     transaction
         .execute(
-            "INSERT INTO event_log (network, kind, resource_id, state, recorded_at)
+            "INSERT INTO event_log (network, kind, resource_id, state, recorded_at, actor)
              VALUES (?1, ?2, ?3,
-                     json_object('network', ?1, 'namespace', ?4, 'ifname', ?5), ?6)",
+                     json_object('network', ?1, 'namespace', ?4, 'ifname', ?5,
+                                 'written_by', ?7), ?6, ?7)",
             params![
                 network,
                 EventKind::Attachment.as_str(),
                 attachment_id(namespace, ifname),
                 namespace,
                 ifname,
-                now
+                now,
+                writing.actor.as_recorded()
             ],
         )
         .map_err(storage("recording that an interface was claimed"))?;
 
-    history::appended(transaction, bound, now)
+    history::appended(transaction, writing.retention, now)
 }
 
 /// Append the event for a range that now exists with these ends.
@@ -767,7 +825,7 @@ fn event_attachment_written(
 /// whatever is doing the reading.
 fn event_range_written(
     transaction: &Transaction<'_>,
-    bound: &Retention,
+    writing: &Writing<'_>,
     network: &str,
     name: &str,
     first: Ipv4Addr,
@@ -776,21 +834,23 @@ fn event_range_written(
 ) -> Result<i64> {
     transaction
         .execute(
-            "INSERT INTO event_log (network, kind, resource_id, state, recorded_at)
+            "INSERT INTO event_log (network, kind, resource_id, state, recorded_at, actor)
              VALUES (?1, ?2, ?3,
-                     json_object('network', ?1, 'name', ?3, 'first', ?4, 'last', ?5), ?6)",
+                     json_object('network', ?1, 'name', ?3, 'first', ?4, 'last', ?5,
+                                 'written_by', ?7), ?6, ?7)",
             params![
                 network,
                 EventKind::AddressRange.as_str(),
                 name,
                 u32::from(first),
                 u32::from(last),
-                now
+                now,
+                writing.actor.as_recorded()
             ],
         )
         .map_err(storage("recording an address range"))?;
 
-    history::appended(transaction, bound, now)
+    history::appended(transaction, writing.retention, now)
 }
 
 /// Append the event for a binding that now exists in this form.
@@ -802,7 +862,7 @@ fn event_range_written(
 /// identity back apart.
 fn event_binding_written(
     transaction: &Transaction<'_>,
-    bound: &Retention,
+    writing: &Writing<'_>,
     network: &str,
     selector: &Selector,
     address: Ipv4Addr,
@@ -811,11 +871,11 @@ fn event_binding_written(
 ) -> Result<i64> {
     transaction
         .execute(
-            "INSERT INTO event_log (network, kind, resource_id, state, recorded_at)
+            "INSERT INTO event_log (network, kind, resource_id, state, recorded_at, actor)
              VALUES (?1, ?2, ?3,
                      json_object('network', ?1, 'selector_kind', ?4,
                                  'selector_value', ?5, 'address', ?6,
-                                 'hostname', ?7), ?8)",
+                                 'hostname', ?7, 'written_by', ?9), ?8, ?9)",
             params![
                 network,
                 EventKind::Binding.as_str(),
@@ -824,12 +884,13 @@ fn event_binding_written(
                 selector.value(),
                 u32::from(address),
                 hostname,
-                now
+                now,
+                writing.actor.as_recorded()
             ],
         )
         .map_err(storage("recording a binding"))?;
 
-    history::appended(transaction, bound, now)
+    history::appended(transaction, writing.retention, now)
 }
 
 /// Append the event for a resource that no longer exists.
@@ -841,7 +902,7 @@ fn event_binding_written(
 /// twice does no harm.
 pub(crate) fn event_deleted(
     transaction: &Transaction<'_>,
-    bound: &Retention,
+    writing: &Writing<'_>,
     network: &str,
     kind: EventKind,
     resource_id: &str,
@@ -849,13 +910,19 @@ pub(crate) fn event_deleted(
 ) -> Result<i64> {
     transaction
         .execute(
-            "INSERT INTO event_log (network, kind, resource_id, state, recorded_at)
-             VALUES (?1, ?2, ?3, NULL, ?4)",
-            params![network, kind.as_str(), resource_id, now],
+            "INSERT INTO event_log (network, kind, resource_id, state, recorded_at, actor)
+             VALUES (?1, ?2, ?3, NULL, ?4, ?5)",
+            params![
+                network,
+                kind.as_str(),
+                resource_id,
+                now,
+                writing.actor.as_recorded()
+            ],
         )
         .map_err(storage("recording that a resource was removed"))?;
 
-    history::appended(transaction, bound, now)
+    history::appended(transaction, writing.retention, now)
 }
 
 // ---------------------------------------------------------------------
@@ -872,6 +939,11 @@ pub(crate) fn event_deleted(
 pub(crate) struct Writing<'a> {
     /// The clock every row and event written here is stamped with.
     pub(crate) clock: &'a dyn Clock,
+    /// Who the write is recorded against, stamped on the event and
+    /// on the row in the same statements that write them. A
+    /// parameter of the write rather than state of the store,
+    /// because one store serves every connection.
+    pub(crate) actor: &'a Actor,
     /// The epoch the cursor this write is assigned belongs to.
     pub(crate) epoch: &'a Epoch,
     /// The guard the reads a write does on its way pass through. A
@@ -934,12 +1006,12 @@ pub(crate) fn create_network(
         .transaction()
         .map_err(storage("starting a transaction to create a network"))?;
 
-    let sequence = event_network_created(&transaction, writing.retention, name, now)?;
+    let sequence = event_network_created(&transaction, writing, name, now)?;
 
     transaction
         .execute(
-            "INSERT INTO network (name, cursor_seq) VALUES (?1, ?2)",
-            params![name, sequence],
+            "INSERT INTO network (name, cursor_seq, written_by) VALUES (?1, ?2, ?3)",
+            params![name, sequence, writing.actor.as_recorded()],
         )
         .map_err(|error| {
             if is_constraint(&error) {
@@ -1000,14 +1072,7 @@ pub(crate) fn delete_network(
         });
     }
 
-    let sequence = event_deleted(
-        &transaction,
-        writing.retention,
-        name,
-        EventKind::Network,
-        name,
-        now,
-    )?;
+    let sequence = event_deleted(&transaction, writing, name, EventKind::Network, name, now)?;
 
     transaction
         .execute("DELETE FROM network WHERE name = ?1", params![name])
@@ -1066,19 +1131,19 @@ pub(crate) fn attach_interface(
 
     require_network(&transaction, network)?;
 
-    let sequence = event_attachment_written(
-        &transaction,
-        writing.retention,
-        network,
-        namespace,
-        ifname,
-        now,
-    )?;
+    let sequence =
+        event_attachment_written(&transaction, writing, network, namespace, ifname, now)?;
 
     let claimed = transaction.execute(
-        "INSERT INTO attachment (namespace, ifname, network, cursor_seq)
-         VALUES (?1, ?2, ?3, ?4)",
-        params![namespace, ifname, network, sequence],
+        "INSERT INTO attachment (namespace, ifname, network, cursor_seq, written_by)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            namespace,
+            ifname,
+            network,
+            sequence,
+            writing.actor.as_recorded()
+        ],
     );
 
     if let Err(error) = claimed {
@@ -1151,7 +1216,7 @@ pub(crate) fn detach_interface(
 
     let sequence = event_deleted(
         &transaction,
-        writing.retention,
+        writing,
         network,
         EventKind::Attachment,
         &id,
@@ -1242,21 +1307,21 @@ pub(crate) fn create_address_range(
     require_network(&transaction, network)?;
     check_span(&transaction, network, name, first, last)?;
 
-    let sequence = event_range_written(
-        &transaction,
-        writing.retention,
-        network,
-        name,
-        first,
-        last,
-        now,
-    )?;
+    let sequence = event_range_written(&transaction, writing, network, name, first, last, now)?;
 
     transaction
         .execute(
-            "INSERT INTO address_range (network, name, first_address, last_address, cursor_seq)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![network, name, u32::from(first), u32::from(last), sequence],
+            "INSERT INTO address_range
+                 (network, name, first_address, last_address, cursor_seq, written_by)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                network,
+                name,
+                u32::from(first),
+                u32::from(last),
+                sequence,
+                writing.actor.as_recorded()
+            ],
         )
         .map_err(|error| {
             if is_constraint(&error) {
@@ -1308,21 +1373,21 @@ pub(crate) fn update_address_range(
 
     check_span(&transaction, network, name, first, last)?;
 
-    let sequence = event_range_written(
-        &transaction,
-        writing.retention,
-        network,
-        name,
-        first,
-        last,
-        now,
-    )?;
+    let sequence = event_range_written(&transaction, writing, network, name, first, last, now)?;
 
     transaction
         .execute(
-            "UPDATE address_range SET first_address = ?3, last_address = ?4, cursor_seq = ?5
-             WHERE network = ?1 AND name = ?2",
-            params![network, name, u32::from(first), u32::from(last), sequence],
+            "UPDATE address_range
+                SET first_address = ?3, last_address = ?4, cursor_seq = ?5, written_by = ?6
+              WHERE network = ?1 AND name = ?2",
+            params![
+                network,
+                name,
+                u32::from(first),
+                u32::from(last),
+                sequence,
+                writing.actor.as_recorded()
+            ],
         )
         .map_err(storage("resizing an address range"))?;
 
@@ -1362,7 +1427,7 @@ pub(crate) fn delete_address_range(
 
     let sequence = event_deleted(
         &transaction,
-        writing.retention,
+        writing,
         network,
         EventKind::AddressRange,
         name,
@@ -1408,6 +1473,7 @@ fn validate_hostname(hostname: Option<&str>) -> Result<()> {
 /// revokes a lease cannot drift from the one which refuses to.
 fn insert_binding(
     transaction: &Transaction<'_>,
+    writing: &Writing<'_>,
     network: &str,
     selector: &Selector,
     address: Ipv4Addr,
@@ -1417,15 +1483,17 @@ fn insert_binding(
     transaction
         .execute(
             "INSERT INTO binding
-                 (network, selector_kind, selector_value, address, hostname, cursor_seq)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 (network, selector_kind, selector_value, address, hostname, cursor_seq,
+                  written_by)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 network,
                 selector.kind().as_str(),
                 selector.value(),
                 u32::from(address),
                 hostname,
-                sequence
+                sequence,
+                writing.actor.as_recorded()
             ],
         )
         .map_err(|error| {
@@ -1473,7 +1541,7 @@ pub(crate) fn create_binding(
 
     let sequence = event_binding_written(
         &transaction,
-        writing.retention,
+        writing,
         network,
         selector,
         address,
@@ -1481,7 +1549,15 @@ pub(crate) fn create_binding(
         now,
     )?;
 
-    insert_binding(&transaction, network, selector, address, hostname, sequence)?;
+    insert_binding(
+        &transaction,
+        writing,
+        network,
+        selector,
+        address,
+        hostname,
+        sequence,
+    )?;
 
     transaction
         .commit()
@@ -1542,7 +1618,7 @@ pub(crate) fn create_binding_revoking_lease(
 
     let sequence = event_binding_written(
         &transaction,
-        writing.retention,
+        writing,
         network,
         selector,
         address,
@@ -1550,7 +1626,15 @@ pub(crate) fn create_binding_revoking_lease(
         now,
     )?;
 
-    insert_binding(&transaction, network, selector, address, hostname, sequence)?;
+    insert_binding(
+        &transaction,
+        writing,
+        network,
+        selector,
+        address,
+        hostname,
+        sequence,
+    )?;
 
     transaction
         .commit()
@@ -1610,7 +1694,7 @@ pub(crate) fn update_binding(
 
     let sequence = event_binding_written(
         &transaction,
-        writing.retention,
+        writing,
         network,
         selector,
         address,
@@ -1620,15 +1704,17 @@ pub(crate) fn update_binding(
 
     transaction
         .execute(
-            "UPDATE binding SET address = ?4, hostname = ?5, cursor_seq = ?6
-             WHERE network = ?1 AND selector_kind = ?2 AND selector_value = ?3",
+            "UPDATE binding
+                SET address = ?4, hostname = ?5, cursor_seq = ?6, written_by = ?7
+              WHERE network = ?1 AND selector_kind = ?2 AND selector_value = ?3",
             params![
                 network,
                 selector.kind().as_str(),
                 selector.value(),
                 u32::from(address),
                 hostname,
-                sequence
+                sequence,
+                writing.actor.as_recorded()
             ],
         )
         .map_err(storage("changing a binding"))?;
@@ -1673,7 +1759,7 @@ pub(crate) fn delete_binding(
 
     let sequence = event_deleted(
         &transaction,
-        writing.retention,
+        writing,
         network,
         EventKind::Binding,
         &binding_id(selector),

@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 
 use rusqlite::Connection;
 
+use crate::actor::Actor;
 use crate::clock::Clock;
 use crate::history::Retention;
 use crate::sqlite::SqliteStore;
@@ -107,6 +108,16 @@ impl Clock for TestClock {
     }
 }
 
+/// Who the fixture's own writes, and most of the suite's, are
+/// recorded against.
+///
+/// The owning peer rather than a token, because that is what an
+/// operator configuring a store is: the uid the daemon runs as,
+/// read from the kernel rather than presented. A test about
+/// attribution itself names its own actor instead, which is how it
+/// can tell its write apart from the fixture's.
+pub(crate) const OPERATOR: Actor = Actor::Peer(0);
+
 /// The instant the fixture's clock starts at: a round number in 2023,
 /// chosen only because a timestamp in a failure message is easier to
 /// read when it is not today's.
@@ -188,19 +199,22 @@ impl TwoNetworks {
         .expect("a store in a fresh directory");
 
         for network in [ALPHA, BETA] {
-            store.create_network(network).await.expect("a network");
             store
-                .create_address_range(network, POOL, POOL_FIRST, POOL_LAST)
+                .create_network(&OPERATOR, network)
+                .await
+                .expect("a network");
+            store
+                .create_address_range(&OPERATOR, network, POOL, POOL_FIRST, POOL_LAST)
                 .await
                 .expect("a pool");
         }
 
         store
-            .attach_interface(ALPHA, ALPHA_NAMESPACE, IFNAME)
+            .attach_interface(&OPERATOR, ALPHA, ALPHA_NAMESPACE, IFNAME)
             .await
             .expect("an interface for the first network");
         store
-            .attach_interface(BETA, BETA_NAMESPACE, IFNAME)
+            .attach_interface(&OPERATOR, BETA, BETA_NAMESPACE, IFNAME)
             .await
             .expect("an interface for the second network");
 

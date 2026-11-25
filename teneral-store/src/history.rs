@@ -239,6 +239,20 @@ pub struct Event {
     /// each resource last changed. A consumer ordering events uses the
     /// cursor, which both kinds carry.
     pub recorded_at: Option<i64>,
+    /// Who made the write this event describes, as the store recorded
+    /// it.
+    ///
+    /// Present on both kinds of event, unlike the instant above: for
+    /// an event read from the history it is the log's own column, and
+    /// for one read from a snapshot it is the resource row's, which
+    /// for a single write are the same value written twice.
+    ///
+    /// It is not redundant with [`Event::state`], and a deletion is
+    /// why. A deletion's state is `None`, that being the post-state
+    /// of something removed, so this is the only place a consumer can
+    /// learn who removed it -- and "who deleted this binding" is the
+    /// question attribution exists to answer.
+    pub actor: String,
 }
 
 /// The state of one network, read at a single position in the store's
@@ -636,7 +650,7 @@ pub(crate) fn history(
 
     let mut statement = conn
         .prepare_cached(
-            "SELECT seq, network, kind, resource_id, state, recorded_at FROM event_log
+            "SELECT seq, network, kind, resource_id, state, recorded_at, actor FROM event_log
              WHERE network = ?1 AND seq > ?2 ORDER BY seq",
         )
         .map_err(ops::storage("preparing a read of a network's history"))?;
@@ -688,7 +702,7 @@ pub(crate) fn history_everywhere(
 
     let mut statement = conn
         .prepare_cached(
-            "SELECT seq, network, kind, resource_id, state, recorded_at FROM event_log
+            "SELECT seq, network, kind, resource_id, state, recorded_at, actor FROM event_log
              WHERE seq > ?1 ORDER BY seq",
         )
         .map_err(ops::storage("preparing a read of the store's history"))?;
@@ -723,6 +737,8 @@ struct Row {
     state: Option<String>,
     /// When it was recorded.
     recorded_at: i64,
+    /// Who made the write it describes.
+    actor: String,
 }
 
 /// Read one row of the event log in the order the statements select.
@@ -734,6 +750,7 @@ fn read_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
         resource_id: row.get(3)?,
         state: row.get(4)?,
         recorded_at: row.get(5)?,
+        actor: row.get(6)?,
     })
 }
 
@@ -746,6 +763,7 @@ fn into_event(epoch: &Epoch, row: Row) -> Result<Event> {
         resource_id: row.resource_id,
         state: row.state,
         recorded_at: Some(row.recorded_at),
+        actor: row.actor,
     })
 }
 
@@ -779,34 +797,36 @@ fn position_as_sequence(cursor: &Cursor) -> Result<i64> {
 // resource and believing both.
 //
 // Every statement selects the same four leading columns -- the state,
-// the position, the network, and then whatever the identity is built
-// from -- so the reader below can be one function.
+// the position, the network and the actor -- and then whatever the
+// identity is built from, so the reader below can be one function.
 // ---------------------------------------------------------------------
 
 /// The network itself. Its name is both the network column and the
 /// identity, which is why it appears twice.
-const SNAPSHOT_NETWORK: &str = "SELECT json_object('name', name), cursor_seq, name, name
+const SNAPSHOT_NETWORK: &str = "SELECT json_object('name', name, 'written_by', written_by),
+            cursor_seq, name, written_by, name
      FROM network WHERE name = ?1";
 
 /// The interfaces the network has claimed.
 const SNAPSHOT_ATTACHMENTS: &str =
-    "SELECT json_object('network', network, 'namespace', namespace, 'ifname', ifname),
-            cursor_seq, network, namespace, ifname
+    "SELECT json_object('network', network, 'namespace', namespace, 'ifname', ifname,
+                        'written_by', written_by),
+            cursor_seq, network, written_by, namespace, ifname
      FROM attachment WHERE network = ?1";
 
 /// The ranges it owns.
 const SNAPSHOT_RANGES: &str =
     "SELECT json_object('network', network, 'name', name, 'first', first_address,
-                        'last', last_address),
-            cursor_seq, network, name
+                        'last', last_address, 'written_by', written_by),
+            cursor_seq, network, written_by, name
      FROM address_range WHERE network = ?1";
 
 /// The bindings configured in it.
 const SNAPSHOT_BINDINGS: &str =
     "SELECT json_object('network', network, 'selector_kind', selector_kind,
                         'selector_value', selector_value, 'address', address,
-                        'hostname', hostname),
-            cursor_seq, network, selector_kind, selector_value
+                        'hostname', hostname, 'written_by', written_by),
+            cursor_seq, network, written_by, selector_kind, selector_value
      FROM binding WHERE network = ?1";
 
 /// The leases held in it, expired or not.
@@ -821,8 +841,9 @@ const SNAPSHOT_BINDINGS: &str =
 const SNAPSHOT_LEASES: &str =
     "SELECT json_object('network', network, 'address', address, 'holder_kind', holder_kind,
                         'holder_value', holder_value, 'lease_id', lease_id,
-                        'acquired_at', acquired_at, 'expires_at', expires_at),
-            cursor_seq, network, address
+                        'acquired_at', acquired_at, 'expires_at', expires_at,
+                        'written_by', written_by),
+            cursor_seq, network, written_by, address
      FROM lease WHERE network = ?1";
 
 /// One network's whole state, at the position the connection reads at.
@@ -918,6 +939,7 @@ fn collect(
         let state: String = column(row, 0)?;
         let cursor_seq: i64 = column(row, 1)?;
         let network: String = column(row, 2)?;
+        let actor: String = column(row, 3)?;
         let resource_id = identify(row)?;
 
         reading.guard(&network, kind.resource(), || resource_id.clone())?;
@@ -931,6 +953,7 @@ fn collect(
             // A resource row records where it was written, not when.
             // See `Event::recorded_at`.
             recorded_at: None,
+            actor,
         });
     }
 
@@ -944,31 +967,31 @@ fn column<T: rusqlite::types::FromSql>(row: &rusqlite::Row<'_>, index: usize) ->
 }
 
 /// A resource identified by a name, which is the column after the
-/// network.
+/// actor.
 fn identify_by_name(row: &rusqlite::Row<'_>) -> Result<String> {
-    column(row, 3)
+    column(row, 4)
 }
 
 /// An attachment, identified by its namespace and interface name
 /// through the same function the write path stamps into its event.
 fn identify_attachment(row: &rusqlite::Row<'_>) -> Result<String> {
-    let namespace: String = column(row, 3)?;
-    let ifname: String = column(row, 4)?;
+    let namespace: String = column(row, 4)?;
+    let ifname: String = column(row, 5)?;
 
     Ok(ops::attachment_id(&namespace, &ifname))
 }
 
 /// A binding, identified by its selector.
 fn identify_binding(row: &rusqlite::Row<'_>) -> Result<String> {
-    let kind: String = column(row, 3)?;
-    let value: String = column(row, 4)?;
+    let kind: String = column(row, 4)?;
+    let value: String = column(row, 5)?;
 
     Ok(ops::binding_id(&Selector::from_row(&kind, value)?))
 }
 
 /// A lease, identified by its address.
 fn identify_lease(row: &rusqlite::Row<'_>) -> Result<String> {
-    let address: i64 = column(row, 3)?;
+    let address: i64 = column(row, 4)?;
 
     Ok(lease::lease_id(ops::address_from_row(address)?))
 }

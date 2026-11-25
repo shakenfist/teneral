@@ -53,6 +53,7 @@
 
 use async_trait::async_trait;
 
+use crate::actor::Actor;
 use crate::cursor::Cursor;
 use crate::error::Result;
 use crate::history::{Digest, History, Snapshot};
@@ -69,6 +70,21 @@ use crate::selector::{ClientIdentity, Selector};
 /// name its cursor would be a write that had emitted no event -- and
 /// a store whose history silently misses a change is worse than one
 /// that refused the change outright.
+///
+/// **Every mutating method takes the actor that is making the write**,
+/// and the store stamps it on the event and on the row in the same
+/// statements that write them. `docs/api-design.md` asks that every
+/// write record who made it, and the log alone cannot answer that
+/// question for long: the retained history is bounded, so the event
+/// naming who last moved a binding is evicted while the binding
+/// itself stays. Both are therefore kept, and the two answer
+/// different questions -- the log says who made a write that has
+/// since been superseded, and the row says who made the write that
+/// produced the state something is answering with now.
+///
+/// The actor is a parameter rather than something a store is
+/// configured with, because one store serves every connection: an
+/// actor held on the store would be whichever request set it last.
 ///
 /// Reads that name a network are on [`ReadHandle`] rather than here,
 /// so that the ordinary way to read several things is to read them
@@ -163,7 +179,7 @@ pub trait BindingStore: Send + Sync {
     /// against the resource not existing: a name already in use is
     /// refused rather than overwritten, and the refusal says which
     /// name.
-    async fn create_network(&self, network: &str) -> Result<Cursor>;
+    async fn create_network(&self, actor: &Actor, network: &str) -> Result<Cursor>;
 
     /// Remove the network `network`, which must still be at `expected`.
     ///
@@ -172,7 +188,12 @@ pub trait BindingStore: Send + Sync {
     /// and the refusal names what is in the way: deleting a network
     /// and silently detaching its interfaces would hand those
     /// interfaces to whichever network claimed them next.
-    async fn delete_network(&self, network: &str, expected: &Cursor) -> Result<Cursor>;
+    async fn delete_network(
+        &self,
+        actor: &Actor,
+        network: &str,
+        expected: &Cursor,
+    ) -> Result<Cursor>;
 
     /// Claim the interface `ifname` in `namespace` for `network`.
     ///
@@ -186,6 +207,7 @@ pub trait BindingStore: Send + Sync {
     /// complete answer to which network the packet belongs to.
     async fn attach_interface(
         &self,
+        actor: &Actor,
         network: &str,
         namespace: &str,
         ifname: &str,
@@ -200,6 +222,7 @@ pub trait BindingStore: Send + Sync {
     /// own network only.
     async fn detach_interface(
         &self,
+        actor: &Actor,
         network: &str,
         namespace: &str,
         ifname: &str,
@@ -219,6 +242,7 @@ pub trait BindingStore: Send + Sync {
     /// right.
     async fn create_address_range(
         &self,
+        actor: &Actor,
         network: &str,
         name: &str,
         first: std::net::Ipv4Addr,
@@ -234,6 +258,7 @@ pub trait BindingStore: Send + Sync {
     /// pool over addresses something else was told it owned.
     async fn update_address_range(
         &self,
+        actor: &Actor,
         network: &str,
         name: &str,
         expected: &Cursor,
@@ -247,6 +272,7 @@ pub trait BindingStore: Send + Sync {
     /// Serves demands 1, 3 and 4.
     async fn delete_address_range(
         &self,
+        actor: &Actor,
         network: &str,
         name: &str,
         expected: &Cursor,
@@ -268,6 +294,7 @@ pub trait BindingStore: Send + Sync {
     /// not a resource with an identity of its own.
     async fn create_binding(
         &self,
+        actor: &Actor,
         network: &str,
         selector: &Selector,
         address: std::net::Ipv4Addr,
@@ -284,6 +311,7 @@ pub trait BindingStore: Send + Sync {
     /// another arrived rather than that one changed shape.
     async fn update_binding(
         &self,
+        actor: &Actor,
         network: &str,
         selector: &Selector,
         expected: &Cursor,
@@ -297,6 +325,7 @@ pub trait BindingStore: Send + Sync {
     /// Serves demands 1, 3 and 4.
     async fn delete_binding(
         &self,
+        actor: &Actor,
         network: &str,
         selector: &Selector,
         expected: &Cursor,
@@ -323,6 +352,7 @@ pub trait BindingStore: Send + Sync {
     /// lease's last write.
     async fn create_binding_revoking_lease(
         &self,
+        actor: &Actor,
         network: &str,
         selector: &Selector,
         address: std::net::Ipv4Addr,
@@ -358,6 +388,7 @@ pub trait BindingStore: Send + Sync {
     /// later position.
     async fn acquire_lease(
         &self,
+        actor: &Actor,
         network: &str,
         identity: &ClientIdentity,
         address: std::net::Ipv4Addr,
@@ -385,6 +416,7 @@ pub trait BindingStore: Send + Sync {
     /// [`BindingStore::acquire_lease`].
     async fn allocate_lease(
         &self,
+        actor: &Actor,
         network: &str,
         identity: &ClientIdentity,
         requested: Option<std::net::Ipv4Addr>,
@@ -407,6 +439,7 @@ pub trait BindingStore: Send + Sync {
     /// acquiring is what issues a new lease id.
     async fn renew_lease(
         &self,
+        actor: &Actor,
         network: &str,
         address: std::net::Ipv4Addr,
         identity: &ClientIdentity,
@@ -426,6 +459,7 @@ pub trait BindingStore: Send + Sync {
     /// so deliberately rather than waiting for a sweep.
     async fn revoke_lease(
         &self,
+        actor: &Actor,
         network: &str,
         address: std::net::Ipv4Addr,
         expected: &Cursor,
@@ -450,7 +484,11 @@ pub trait BindingStore: Send + Sync {
     /// it removed. The position is `None` when nothing had expired: a
     /// sweep that removed nothing wrote nothing, and reporting a
     /// position for it would invent one.
-    async fn sweep_expired_leases(&self, network: &str) -> Result<(Option<Cursor>, Vec<Lease>)>;
+    async fn sweep_expired_leases(
+        &self,
+        actor: &Actor,
+        network: &str,
+    ) -> Result<(Option<Cursor>, Vec<Lease>)>;
 }
 
 /// A view of the store frozen at one position in its order.
