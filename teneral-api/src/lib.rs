@@ -17,9 +17,16 @@
 //! [`wire`] is the framing the two halves share -- a varint length and
 //! then a message, with a bound checked against the length before any
 //! body is read. [`server`] is the one listener. [`client`] is what a
-//! consumer links. [`authz`] decides which capability a request needs,
-//! in one place, and [`refusal`] is the vocabulary everything is
-//! refused with.
+//! consumer links. [`authz`] decides which capability a request needs
+//! and which network it is scoped by, one exhaustive function each,
+//! and [`refusal`] is the vocabulary everything is refused with.
+//!
+//! [`resource`] holds one converter per resource kind, and it is one
+//! rather than two because a resource reaches this crate twice over:
+//! typed, from a read, and as the JSON text an event carries. Two
+//! spellings of one resource is the defect that arrangement produces,
+//! and it stays invisible until a consumer applies a streamed event
+//! over a read it was already holding.
 //!
 //! Server and client are in one crate with no feature gating them
 //! apart. A feature matrix is a thing `--all-targets` does not test,
@@ -55,12 +62,14 @@
 pub mod authz;
 pub mod client;
 pub mod error;
+mod operations;
 pub mod proto;
 pub mod refusal;
+pub mod resource;
 pub mod server;
 pub mod wire;
 
-pub use authz::{Authenticated, required_capability};
+pub use authz::{Authenticated, named_network, required_capability};
 pub use error::{Error, Result};
 pub use server::{Listener, ServerConfig, owning_uid};
 pub use wire::MAX_MESSAGE_BYTES;

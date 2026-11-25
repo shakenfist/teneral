@@ -34,12 +34,25 @@ impl Epoch {
         &self.0
     }
 
+    /// The epoch half of a position a caller presented, which may
+    /// belong to no store at all.
+    ///
+    /// Crate-private: what is public is [`crate::Cursor::presented`],
+    /// which is the only reason an epoch is ever assembled from a
+    /// string a caller handed over, and whose documentation carries
+    /// why that is safe to offer. Nothing reachable from outside this
+    /// crate can make an epoch a store will then *issue* positions in,
+    /// so "two stores do not share an epoch" stays true by
+    /// construction.
+    pub(crate) fn presented(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+
     /// An epoch with a value a test chose.
     ///
-    /// Only a test may make one. Every other epoch comes from the
-    /// engine when the database is created, which is what makes "two
-    /// stores do not share an epoch" true by construction rather than
-    /// by nobody having written the constructor that breaks it.
+    /// Every epoch a store issues positions in comes from the engine
+    /// when the database is created; this and the constructor above
+    /// are the two that are not, and neither can be stored.
     #[cfg(test)]
     pub(crate) fn for_test(value: &str) -> Self {
         Self(value.to_owned())

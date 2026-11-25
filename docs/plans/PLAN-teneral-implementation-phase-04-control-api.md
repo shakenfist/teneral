@@ -722,6 +722,25 @@ failure mode arrives in the control plane rather than in the
 store, so the definition of done requires a two-network test for
 each.
 
+**Corrected during 4d.** This decision counted the store-global
+reads as two, and for a while the wire made them three: the
+schema accepted at the gate gave
+`LookupBindingOnInterfaceRequest` a namespace, an interface and an
+identity and no network, so the server had to resolve the
+interface and check the resolution exactly as it does for the two
+above. That was a schema defect rather than a third diagnostic.
+`BindingStore::lookup_binding_on_interface` takes a network
+because the caller's network and the interface's network can
+disagree, and that disagreement is the only data path into
+`cross_network_answers` -- the counter `docs/api-design.md` calls
+the best alarm this project has. A message that named no network
+could not express it, so the guard could only ever have fired on a
+coding defect inside the store. The field was added, and the
+operation is now an ordinary network-named one: plain scope check,
+no resolve-then-refuse, and not on this list. The two reads this
+decision is about are `interface_owner` and `explain`, and they
+are two.
+
 ### 13. The numbers, and where they live
 
 There is no configuration file and will not be one
@@ -1047,6 +1066,32 @@ definition of done above were both rewritten to say what is now
 true, including the trap, because an invariant that claims an
 enforcement it does not have is worse than one that asks for
 vigilance.
+
+**4d found a defect in the schema the gate accepted, and the gate
+is where it should have been caught.** The whole point of stopping
+4c with the `.proto` written and reviewing it before 4d was briefed
+was to catch exactly this, and the review read the message's three
+fields without asking what the operation's network was for.
+`LookupBindingOnInterfaceRequest` carried no network, so the step
+built the resolve-then-refuse treatment for it as if it were a
+third store-global read. What that would have cost is not the
+handler, which worked: it is that
+`cross_network_answers` -- the counter that should always be zero,
+and the alarm this project would rather have than any dashboard --
+becomes unreachable from the wire. The store refuses and counts
+when a caller's network and an interface's network disagree, and a
+message with one network in it cannot disagree with anything. The
+guard would have stood for the life of the daemon able to fire only
+on a defect inside the store, which is the half of the failure
+class least likely to happen and the half the store's own tests
+already cover. The field was added as `network = 4`, the operation
+became an ordinary network-named one, `interface_owner` was added
+to `ReadHandle` so that the two reads whose answer *is* a network
+can be resolved from the position the rest of an answer is read at,
+and two tests were added over the socket: a lookup naming one
+network for another's interface is refused without naming either
+and the counter moves, and the ordinary case answers from the
+network the caller named.
 
 **Not a phase-4 change, recorded here because it landed on this
 branch.** `bluecatengineering/dhcproto#111`, the `hlen` clamp this

@@ -18,7 +18,10 @@ pub use generated::*;
 
 use std::net::Ipv4Addr;
 
-use teneral_store::{Capability as StoreCapability, Cursor as StoreCursor, TokenScope};
+use teneral_store::{
+    Capability as StoreCapability, Cursor as StoreCursor, Selector as StoreSelector,
+    SelectorKind as StoreSelectorKind, Token as StoreToken, TokenScope,
+};
 
 /// The store's position, as the wire carries it.
 ///
@@ -87,6 +90,84 @@ pub fn scope_from_wire(scope: &Scope) -> Option<TokenScope> {
     match scope.reach.as_ref()? {
         scope::Reach::EveryNetwork(_) => Some(TokenScope::EveryNetwork),
         scope::Reach::Networks(names) => Some(TokenScope::Networks(names.names.clone())),
+    }
+}
+
+/// A selector kind, as the wire carries it.
+///
+/// An exhaustive match and not a cast, for the reason a capability is:
+/// one of these enumerations is a precedence order the store walks and
+/// the other is a set of field numbers, and a cast between them would
+/// make the precedence a thing nobody may reorder.
+pub fn selector_kind(kind: StoreSelectorKind) -> SelectorKind {
+    match kind {
+        StoreSelectorKind::ClientId => SelectorKind::ClientId,
+        StoreSelectorKind::DuidIaid => SelectorKind::DuidIaid,
+        StoreSelectorKind::Mac => SelectorKind::Mac,
+        StoreSelectorKind::UserClass => SelectorKind::UserClass,
+        StoreSelectorKind::VendorClass => SelectorKind::VendorClass,
+    }
+}
+
+/// The selector kind a wire value names, or `None` for one this build
+/// does not know.
+///
+/// `None` rather than a default, because a kind that arrived as a
+/// number this build cannot name is a request to be refused: guessing
+/// would configure a binding against an attribute nobody named. The
+/// unspecified value lands here too, a field nobody set not being a
+/// selector kind.
+pub fn selector_kind_from_wire(value: SelectorKind) -> Option<StoreSelectorKind> {
+    match value {
+        SelectorKind::ClientId => Some(StoreSelectorKind::ClientId),
+        SelectorKind::DuidIaid => Some(StoreSelectorKind::DuidIaid),
+        SelectorKind::Mac => Some(StoreSelectorKind::Mac),
+        SelectorKind::UserClass => Some(StoreSelectorKind::UserClass),
+        SelectorKind::VendorClass => Some(StoreSelectorKind::VendorClass),
+        SelectorKind::Unspecified => None,
+    }
+}
+
+/// The selector kind the store spells `name`, or `None` for a spelling
+/// this build does not know.
+///
+/// Through the store's own list rather than a second table of strings,
+/// so that the spelling in a database column and the spelling this
+/// crate matches on cannot come apart. It is needed because a resource
+/// reaches this crate twice over: once typed, and once as the JSON an
+/// event carries, where a selector's kind is that string.
+pub fn selector_kind_named(name: &str) -> Option<StoreSelectorKind> {
+    StoreSelectorKind::ALL
+        .into_iter()
+        .find(|kind| kind.as_str() == name)
+}
+
+/// A selector, as the wire carries it.
+pub fn selector(selector: &StoreSelector) -> Selector {
+    Selector {
+        kind: selector_kind(selector.kind()) as i32,
+        value: selector.value().to_owned(),
+    }
+}
+
+/// A credential, as the wire carries it, which is without its secret.
+///
+/// There is no field for the secret on this message at all, so the one
+/// answer that can carry one is a mint. That is the structural half of
+/// "returned exactly once".
+pub fn token(token: &StoreToken) -> Token {
+    Token {
+        id: token.id.as_str().to_owned(),
+        name: token.name.clone(),
+        scope: Some(scope(&token.scope)),
+        capabilities: token
+            .capabilities
+            .iter()
+            .map(|held| capability(*held) as i32)
+            .collect(),
+        minted_by: token.minted_by.clone(),
+        minted_at: token.minted_at,
+        last_used_at: token.last_used_at,
     }
 }
 

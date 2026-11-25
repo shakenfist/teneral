@@ -239,6 +239,57 @@ async fn the_database_refuses_a_second_networks_claim_without_the_trait() {
 }
 
 #[tokio::test]
+async fn a_view_answers_which_network_holds_an_interface_at_its_own_position() {
+    let fixture = TwoNetworks::new("owner-through-a-view").await;
+
+    // The same question the store answers without a view, asked of
+    // one, because a caller that resolves an interface and then reads
+    // the attachment has to be answered about one instant: two
+    // independent reads of a changing store agree most of the time,
+    // which is the property that produces an answer describing two
+    // states that were never true together.
+    let view = fixture.store.read().await.unwrap();
+
+    let alpha = view
+        .interface_owner(ALPHA_NAMESPACE, IFNAME)
+        .await
+        .unwrap()
+        .expect("the first network's interface");
+    let beta = view
+        .interface_owner(BETA_NAMESPACE, IFNAME)
+        .await
+        .unwrap()
+        .expect("the second network's interface");
+
+    assert_eq!(alpha.network, ALPHA);
+    assert_eq!(beta.network, BETA);
+
+    // The attachment each resolution names, read through the same
+    // view, agrees with it -- and with the position the view reads at,
+    // which is what the whole arrangement is for.
+    let claimed = view
+        .attachment(&alpha.network, ALPHA_NAMESPACE, IFNAME)
+        .await
+        .unwrap()
+        .expect("the attachment the resolution named");
+    assert_eq!(claimed, alpha);
+    assert_eq!(alpha.cursor.epoch(), view.cursor().epoch());
+
+    // An interface no network has claimed is absent rather than
+    // refused: nothing crossed between networks, and the two faults
+    // have different fixes.
+    assert!(
+        view.interface_owner(ALPHA_NAMESPACE, "eth9")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    drop(view);
+    assert_eq!(fixture.store.cross_network_answers(), 0);
+}
+
+#[tokio::test]
 async fn the_same_interface_name_in_two_namespaces_belongs_to_two_networks() {
     let fixture = TwoNetworks::new("namespaces").await;
 

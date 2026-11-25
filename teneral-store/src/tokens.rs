@@ -79,6 +79,20 @@ impl TokenId {
         &self.0
     }
 
+    /// The id a caller named a credential by.
+    ///
+    /// Not a way to make a credential. This is how a caller says
+    /// *which* one it means, and the only operations that take one
+    /// look it up -- an id no credential holds is reported as not
+    /// found, and one the caller may not reach is refused for the
+    /// scope, both of them answers about an id the caller supplied
+    /// itself. Every id a credential actually has still comes from a
+    /// mint, which is what keeps "two tokens do not share an id" true
+    /// by construction.
+    pub fn presented(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+
     /// An id with a value a test chose.
     #[cfg(test)]
     pub(crate) fn for_test(value: &str) -> Self {

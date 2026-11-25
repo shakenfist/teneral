@@ -18,7 +18,9 @@ use std::time::Duration;
 use tokio::net::UnixStream;
 
 use crate::error::{Error, Result};
-use crate::proto::{Hello, HelloResult, Welcome, hello_result};
+use crate::proto::{
+    Hello, HelloResult, Request, Response, Welcome, hello_result, request, response,
+};
 use crate::{PROTOCOL_VERSION, wire};
 
 /// An open connection to a daemon, past its handshake.
@@ -73,6 +75,62 @@ impl Connection {
     /// reach than it thinks.
     pub fn welcome(&self) -> &Welcome {
         &self.welcome
+    }
+
+    /// Make one request and read the one answer it produces.
+    ///
+    /// A refusal comes back as the answer it is rather than as an
+    /// error: it travels inside the envelope the daemon put it in, and
+    /// a caller that wants to know both that a request was refused and
+    /// what the daemon said about it reads one value.
+    ///
+    /// This is for the operations that answer once. A collection
+    /// arrives as a sequence ended by a marker, and a caller that read
+    /// one message of one would leave the rest on the connection to be
+    /// read as the answer to whatever it asked next -- so a collection
+    /// goes through [`Connection::request_collection`] instead.
+    pub async fn request(&mut self, request: request::Kind) -> Result<Response> {
+        self.send(request).await?;
+
+        wire::read_message(&mut self.stream).await
+    }
+
+    /// Make one request and read the whole of the collection it
+    /// answers with, the marker included.
+    ///
+    /// The marker is kept rather than dropped, because the count it
+    /// carries is the check a consumer makes against what it kept: a
+    /// connection that failed halfway through a collection otherwise
+    /// looks exactly like a collection that was that short. A refusal
+    /// ends the reading too, there being no collection to wait for.
+    pub async fn request_collection(&mut self, request: request::Kind) -> Result<Vec<Response>> {
+        self.send(request).await?;
+
+        let mut answers = Vec::new();
+        loop {
+            let response: Response = wire::read_message(&mut self.stream).await?;
+            let ended = matches!(
+                response.answer,
+                Some(response::Answer::CollectionEnd(_)) | Some(response::Answer::Refusal(_))
+            );
+
+            answers.push(response);
+
+            if ended {
+                return Ok(answers);
+            }
+        }
+    }
+
+    /// Write one request on to the connection.
+    async fn send(&mut self, request: request::Kind) -> Result<()> {
+        wire::write_message(
+            &mut self.stream,
+            &Request {
+                kind: Some(request),
+            },
+        )
+        .await
     }
 
     /// Take the socket and the welcome apart.

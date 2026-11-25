@@ -245,6 +245,15 @@ pub trait BindingStore: Send + Sync {
     /// answer is a network, so there is no network to ask within.
     /// `None` means no network has claimed it, which is a different
     /// thing from a network having claimed it and configured nothing.
+    ///
+    /// [`ReadHandle::interface_owner`] answers the same question and
+    /// is not a duplicate of this one, so neither should be removed
+    /// as one. This is the question the datapath asks for every
+    /// packet it answers, which is why it is here: it needs an answer
+    /// cheaply and with no position attached, and a view costs a
+    /// thread for as long as it is held -- a thread per packet. The
+    /// one on a view answers as of a position, alongside whatever
+    /// else the caller is reading at it.
     async fn interface_owner(&self, namespace: &str, ifname: &str) -> Result<Option<Attachment>>;
 
     /// Create a network called `network`.
@@ -614,14 +623,21 @@ pub trait BindingStore: Send + Sync {
 /// is not something to keep open between requests.
 ///
 /// Store-global methods, enumerated so that a reader can tell them
-/// from an oversight: `cursor`, `networks`, `explain`,
-/// `history_everywhere`.
+/// from an oversight: `cursor`, `networks`, `interface_owner`,
+/// `explain`, `history_everywhere`.
 ///
 /// - `cursor` is the position this view reads at, which spans every
 ///   network because the order does.
 /// - `networks` lists the networks themselves. Its answer *is* the
 ///   set of networks, so there is no network it could be scoped by;
 ///   every other read here names one.
+/// - `interface_owner` answers which network has claimed an
+///   interface, so its answer is a network and there is none to ask
+///   it within. It is the same question
+///   [`BindingStore::interface_owner`] answers and not the same
+///   method, for the reason both doc comments give: one is asked per
+///   packet and must cost no view, and this one is asked as of a
+///   position, beside a caller's other reads.
 /// - `explain` starts where a packet starts, with the interface it
 ///   arrived on, and resolving that to a network is the first thing
 ///   it does. Its answer therefore contains a network rather than
@@ -670,14 +686,31 @@ pub trait ReadHandle: Send {
     /// `None` when another network holds the interface, because the
     /// question was asked within one network and an answer from
     /// another one would be the leak this store is built to prevent.
-    /// [`BindingStore::interface_owner`] is how a caller asks the
-    /// question that has no network.
+    /// [`ReadHandle::interface_owner`] is how a caller asks the
+    /// question that has no network at this same position, and
+    /// [`BindingStore::interface_owner`] is how the datapath asks it
+    /// without opening a view at all.
     async fn attachment(
         &self,
         network: &str,
         namespace: &str,
         ifname: &str,
     ) -> Result<Option<Attachment>>;
+
+    /// Which network, if any, has claimed `ifname` in `namespace`, at
+    /// this handle's position.
+    ///
+    /// Store-global, for the reason in this trait's doc comment. The
+    /// twin of [`BindingStore::interface_owner`] rather than a
+    /// duplicate of it, and the difference is which question each is
+    /// asked: that one is the datapath's, per packet, where a view
+    /// would cost a thread apiece; this one is asked by a caller that
+    /// is reading other things at the same position and needs the
+    /// answer to agree with them. A caller that resolved an interface
+    /// here and then read the attachment through this handle is
+    /// answered about one instant, where two separate reads could
+    /// describe two states that were never true together.
+    async fn interface_owner(&self, namespace: &str, ifname: &str) -> Result<Option<Attachment>>;
 
     /// Every range `network` owns, lowest address first.
     ///

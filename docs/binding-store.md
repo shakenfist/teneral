@@ -163,13 +163,25 @@ than by a network, and `live_views` counts those views;
 spans every network; `identity` answers for the file, like the two
 above it; `networks` answers with the set of networks;
 `history_everywhere` is a scope a watch may legitimately ask for;
-and
-`interface_owner` and `explain` both *answer* with a network,
+and `interface_owner` and `explain` both *answer* with a network,
 being the resolution step a datapath performs before anything is
 scoped. Note that the last two are the opposite of the shape the
 demand warns against: they take no network and return the one
 they found, so a caller cannot ask about one network and be handed
 another's answer.
+
+`interface_owner` is on both traits, and the two are not
+duplicates. The one on the store is the datapath's: it asks which
+network an interface belongs to for every packet it answers, and it
+needs that cheaply and with no position attached, where opening a
+view would cost a thread per packet. The one on a read handle
+answers the same question *as of a position*, for a caller that is
+reading other things at the same one and needs the answers to agree
+with each other -- a resolution and a read of the resource it
+resolved to, taken from two separate reads, could describe two
+states that were never true together. Each method's documentation
+points at the other, so that neither is removed later as a
+duplicate of the other.
 
 **5. History retention belongs to the store.** The event window is
 durable and is truncated durably. The bound is applied inside the

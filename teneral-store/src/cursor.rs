@@ -56,6 +56,26 @@ impl Cursor {
         Ok(Self::new(epoch.clone(), sequence))
     }
 
+    /// A position a caller presented, from the two values it arrived
+    /// as.
+    ///
+    /// The one constructor outside this crate, and it exists because
+    /// every compare-and-set the store offers takes a position the
+    /// caller read earlier -- which, for a caller on the far side of a
+    /// socket, means a position reassembled from an epoch and a
+    /// sequence it was handed. Without this, a remembered position
+    /// could be read out of the store and never put back into one.
+    ///
+    /// It makes no claim about the store. An epoch that is not this
+    /// store's fails every comparison it is used in, which is exactly
+    /// the answer wanted: a caller presenting a position from another
+    /// store's order is told the epoch changed rather than quietly
+    /// matched against a sequence number that means something else
+    /// here.
+    pub fn presented(epoch: &str, sequence: u64) -> Self {
+        Self::new(Epoch::presented(epoch), sequence)
+    }
+
     /// Whose history this position belongs to.
     pub fn epoch(&self) -> &Epoch {
         &self.epoch

@@ -1403,6 +1403,21 @@ impl ReadHandle for SnapshotView {
         .await
     }
 
+    async fn interface_owner(&self, namespace: &str, ifname: &str) -> Result<Option<Attachment>> {
+        let epoch = self.epoch();
+        let namespace = namespace.to_owned();
+        let ifname = ifname.to_owned();
+
+        // No guard, because there is no network in the question for an
+        // answer to disagree with: the cross-network check compares
+        // the network a caller asked about with the one a row came
+        // from, and here the row's network *is* the answer.
+        self.query("ask which network holds an interface", move |connection| {
+            ops::interface_owner(connection, &epoch, &namespace, &ifname)
+        })
+        .await
+    }
+
     async fn address_ranges(&self, network: &str) -> Result<Vec<AddressRange>> {
         let epoch = self.epoch();
         let guard = self.guard();

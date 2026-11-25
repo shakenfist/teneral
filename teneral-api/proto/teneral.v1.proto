@@ -819,9 +819,10 @@ message DetachInterfaceRequest {
 // Which network has claimed an interface.
 //
 // One of the two questions whose answer is a network, so it names
-// none. A caller whose scope does not reach the answer is refused
-// exactly as it would be for an interface no network has claimed,
-// because the difference between those two answers is the leak.
+// none; the explain query is the other. A caller whose scope does not
+// reach the answer is refused exactly as it would be for an interface
+// no network has claimed, because the difference between those two
+// answers is the leak.
 message InterfaceOwnerRequest {
   string namespace = 1;
   string ifname = 2;
@@ -926,13 +927,29 @@ message LookupBindingRequest {
   ClientIdentity identity = 2;
 }
 
-// The same question, asked the way a packet arrives: an interface
-// rather than a network. The other of the two questions whose answer
-// is a network, and scoped the same way.
+// The same question, asked the way a packet arrives: a client on an
+// interface, inside the network the caller believes that interface
+// belongs to.
+//
+// The network is a field here, and it is the point of the operation
+// rather than ceremony. The caller supplies it -- out of whatever
+// context it is answering in -- while the interface's own network
+// comes from the store, so the two can disagree. A request whose
+// interface resolves to one network while the answer would come from
+// another is refused and counted, and that disagreement is the only
+// thing that can move the counter which should always be zero. A
+// message naming no network could not express it, and the guard would
+// then only ever fire on a defect inside the store, which is the half
+// of this failure class least likely to happen.
 message LookupBindingOnInterfaceRequest {
   string namespace = 1;
   string ifname = 2;
   ClientIdentity identity = 3;
+  string network = 4;
+
+  // 5-9: held for the rest of what a front-end knows about an
+  // arriving packet and would have a lookup take into account -- what
+  // a relay reported about the client, and the address it asked for.
 }
 
 // What the daemon would answer this client on this interface, without

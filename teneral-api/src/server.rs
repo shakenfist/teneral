@@ -55,6 +55,7 @@ use tokio::sync::Semaphore;
 
 use crate::authz::Authenticated;
 use crate::error::{Error, Result};
+use crate::operations;
 use crate::proto::{self, Hello, HelloResult, Welcome, hello_result};
 use crate::refusal;
 use crate::{PROTOCOL_VERSION, wire};
@@ -98,6 +99,15 @@ pub struct ServerConfig {
     /// unbounded memory.
     pub max_connections: usize,
 
+    /// How many views of the store this daemon will hold at once.
+    ///
+    /// A view costs the store a thread for as long as it is held, so
+    /// this is the number that decides how much of the machine a
+    /// hundred consumers reading at once can take. The diagnostics
+    /// report it beside the store's own count of live views, which is
+    /// the arrangement that notices the day the two disagree.
+    pub max_live_views: usize,
+
     /// How long to wait for an answer when deciding whether something
     /// else is already serving the socket path.
     ///
@@ -117,9 +127,24 @@ impl ServerConfig {
             socket_path: socket_path.into(),
             owning_uid: owning_uid(),
             max_connections: 256,
+            max_live_views: 64,
             probe_timeout: Duration::from_secs(2),
         }
     }
+}
+
+/// What every connection on this listener answers from.
+///
+/// One of these per listener, shared by every connection task, so that
+/// the store and the credentials are opened once and the numbers a
+/// handler reports are the ones the daemon was configured with.
+struct Serving {
+    /// The store, which is the only thing an answer comes from.
+    store: Arc<dyn BindingStore>,
+    /// The credentials, which are not resources in that store.
+    tokens: Arc<dyn TokenStore>,
+    /// The bound the diagnostics report.
+    max_live_views: usize,
 }
 
 /// The socket, bound and ready to serve.
@@ -179,6 +204,11 @@ impl Listener {
     {
         let connections = Arc::new(Semaphore::new(self.config.max_connections));
         let owning_uid = self.config.owning_uid;
+        let serving = Arc::new(Serving {
+            store,
+            tokens,
+            max_live_views: self.config.max_live_views,
+        });
         let mut shutdown = std::pin::pin!(shutdown);
 
         loop {
@@ -208,15 +238,14 @@ impl Listener {
             let (stream, _) =
                 accepted.map_err(|error| Error::io("accepting a connection", error))?;
 
-            let store = Arc::clone(&store);
-            let tokens = Arc::clone(&tokens);
+            let serving = Arc::clone(&serving);
             tokio::spawn(async move {
                 // The permit is moved into the task and dropped with
                 // it, so the bound counts connections that are open
                 // rather than connections that were accepted.
                 let _permit = permit;
 
-                serve_connection(stream, store, tokens, owning_uid).await;
+                serve_connection(stream, &serving, owning_uid).await;
             });
         }
 
@@ -348,12 +377,7 @@ fn set_mode(path: &Path, mode: u32) -> Result<()> {
 /// client's problem and the daemon goes on serving every other
 /// network; what a failure costs is a line in a log, which is the
 /// binary's to arrange.
-async fn serve_connection(
-    mut stream: UnixStream,
-    store: Arc<dyn BindingStore>,
-    tokens: Arc<dyn TokenStore>,
-    owning_uid: u32,
-) {
+async fn serve_connection(mut stream: UnixStream, serving: &Serving, owning_uid: u32) {
     let peer_uid = match stream.peer_cred() {
         Ok(credential) => credential.uid(),
         // The kernel declines to say who connected, so there is no
@@ -362,7 +386,15 @@ async fn serve_connection(
         Err(_) => return,
     };
 
-    let caller = match handshake(&mut stream, &*store, &*tokens, owning_uid, peer_uid).await {
+    let caller = match handshake(
+        &mut stream,
+        &*serving.store,
+        &*serving.tokens,
+        owning_uid,
+        peer_uid,
+    )
+    .await
+    {
         Ok(Some(caller)) => caller,
         // Refused, and the refusal has been sent. The connection ends
         // here deliberately: a caller whose credential was refused has
@@ -371,7 +403,7 @@ async fn serve_connection(
         Err(_) => return,
     };
 
-    serve_requests(&mut stream, &caller).await;
+    let _ = serve_requests(&mut stream, serving, &caller).await;
 }
 
 /// Settle who the connection is acting as, or refuse it.
@@ -508,13 +540,24 @@ async fn refuse_hello(stream: &mut UnixStream, refusal: proto::Refusal) -> Resul
 
 /// Read requests and answer them until the connection ends.
 ///
-/// No resource operation is served on this socket yet. What is in
-/// place is the part every operation will go through: the framing, the
-/// bound on a frame, and the authorisation decision -- so a request
-/// without the capability its operation needs is refused here, and a
-/// request this build has no answer for is refused as an operation
-/// this daemon does not serve rather than left unanswered.
-async fn serve_requests(stream: &mut UnixStream, caller: &Authenticated) {
+/// Three things happen to every request, in this order, and the order
+/// is what makes the two checks structural rather than a thing each
+/// handler remembers: the capability its operation needs, then the
+/// network it names against the caller's scope, and only then the
+/// operation itself. Both checks are one exhaustive function in
+/// [`crate::authz`], where an operation added to the schema without a
+/// decision about either does not compile.
+///
+/// A collection is answered as a sequence of messages ended by a
+/// marker, which is why one request can produce more than one
+/// response. Nothing is buffered on the connection: each is written as
+/// it is produced, and a write that fails ends the connection, there
+/// being nowhere else to report it.
+async fn serve_requests(
+    stream: &mut UnixStream,
+    serving: &Serving,
+    caller: &Authenticated,
+) -> Result<()> {
     loop {
         let request: proto::Request = match wire::read_message(stream).await {
             Ok(request) => request,
@@ -523,21 +566,35 @@ async fn serve_requests(stream: &mut UnixStream, caller: &Authenticated) {
                 // left to resynchronise on: the refusal goes out and
                 // the connection closes.
                 let _ = refuse_request(stream, refusal::message_too_large(length)).await;
-                return;
+                return Ok(());
             }
-            Err(_) => return,
+            Err(_) => return Ok(()),
         };
 
-        let refusal = match request.kind.as_ref() {
-            Some(kind) => match caller.require_capability(kind) {
-                Ok(()) => refusal::unknown_operation(),
-                Err(refusal) => *refusal,
-            },
-            None => refusal::unknown_operation(),
+        let Some(kind) = request.kind.as_ref() else {
+            refuse_request(stream, refusal::unknown_operation()).await?;
+            continue;
         };
 
-        if refuse_request(stream, refusal).await.is_err() {
-            return;
+        if let Err(refusal) = caller.require_capability(kind) {
+            refuse_request(stream, *refusal).await?;
+            continue;
+        }
+
+        if let Err(refusal) = caller.require_scope(kind) {
+            refuse_request(stream, *refusal).await?;
+            continue;
+        }
+
+        let context = operations::Context {
+            store: &*serving.store,
+            tokens: &*serving.tokens,
+            caller,
+            max_live_views: serving.max_live_views,
+        };
+
+        for response in operations::answer(&context, kind).await {
+            wire::write_message(stream, &response).await?;
         }
     }
 }

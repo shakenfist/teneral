@@ -1,157 +1,22 @@
 //! What a connection to the control plane is allowed to be.
 //!
-//! Every test here runs against a real store in a directory of its
-//! own and a real socket inside that directory, because what is being
-//! checked is the behaviour of a listener and the kernel's own report
-//! of who connected to it. A credential comes from a real mint for the
-//! same reason: there is deliberately no way to construct one outside
-//! the store, so a credential in a test is one the store issued.
+//! The handshake, the credential, and the refusals a connection can be
+//! met with before it has asked for anything. What a connection may
+//! then ask for is the subject of the resource suite beside this one;
+//! the harness both share is in `support`.
 //!
 //! Each test stops the listener it started. The socket goes with it.
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+mod support;
+
 use std::time::Duration;
 
+use support::{Daemon, TempDirectory};
 use teneral_api::client::Connection;
 use teneral_api::proto::{self, Hello, HelloResult, RefusalCode, hello_result, request};
 use teneral_api::{Authenticated, Error, Listener, PROTOCOL_VERSION, ServerConfig, wire};
-use teneral_store::{
-    BindingStore, Caller, Capability, MintedToken, SqliteStore, TokenScope, TokenStore,
-};
+use teneral_store::{Capability, TokenScope};
 use tokio::net::UnixStream;
-use tokio::task::JoinHandle;
-
-/// Distinguishes the directories of tests running at the same time in
-/// the same process.
-static NEXT: AtomicU32 = AtomicU32::new(0);
-
-/// A directory holding one test's store and socket, removed when the
-/// test finishes.
-///
-/// Rolled by hand rather than taken from a crate, as the store's own
-/// suite does: a dependency whose only consumer is a temporary
-/// directory would not survive a reading of the dependency list.
-struct TempDirectory {
-    path: PathBuf,
-}
-
-impl TempDirectory {
-    fn new(label: &str) -> Self {
-        let mut path = std::env::temp_dir();
-        path.push(format!(
-            "teneral-api-{label}-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-
-        std::fs::create_dir_all(&path).expect("a temporary directory for a test");
-
-        Self { path }
-    }
-
-    /// Where this test's socket goes. Inside the directory the test
-    /// owns, so that nothing of one test's is reachable from
-    /// another's.
-    fn socket(&self) -> PathBuf {
-        self.path.join("teneral.sock")
-    }
-
-    fn store(&self) -> PathBuf {
-        self.path.join("store.sqlite")
-    }
-}
-
-impl Drop for TempDirectory {
-    fn drop(&mut self) {
-        // The directory rather than the files: the write-ahead log
-        // leaves a `-wal` and a `-shm` beside the database. A failure
-        // to clean up is not the test's verdict and is not reported.
-        let _ = std::fs::remove_dir_all(&self.path);
-    }
-}
-
-/// A listener serving a store, and the handle that stops it.
-struct Daemon {
-    socket: PathBuf,
-    store: Arc<SqliteStore>,
-    serving: JoinHandle<()>,
-    stop: tokio::sync::oneshot::Sender<()>,
-}
-
-impl Daemon {
-    /// Start a daemon on `directory`'s socket, serving as `owning_uid`.
-    ///
-    /// The uid is a parameter because the only way to check that a
-    /// caller which is not the owning peer is refused is to serve as a
-    /// uid the test is not running as. The kernel reports the test's
-    /// own uid for every connection it makes, which is the whole point
-    /// of reading it from the kernel.
-    async fn start(directory: &TempDirectory, owning_uid: u32) -> Self {
-        let store = Arc::new(
-            SqliteStore::open(directory.store())
-                .await
-                .expect("a store in the test's own directory"),
-        );
-
-        let mut config = ServerConfig::new(directory.socket());
-        config.owning_uid = owning_uid;
-        config.probe_timeout = Duration::from_millis(250);
-
-        let listener = Listener::bind(config)
-            .await
-            .expect("a listener on the test's own socket");
-        let socket = listener.path().to_owned();
-
-        let (stop, stopped) = tokio::sync::oneshot::channel();
-        let binding: Arc<dyn BindingStore> = Arc::clone(&store) as Arc<dyn BindingStore>;
-        let tokens: Arc<dyn TokenStore> = Arc::clone(&store) as Arc<dyn TokenStore>;
-
-        let serving = tokio::spawn(async move {
-            let _ = listener
-                .serve(binding, tokens, async {
-                    let _ = stopped.await;
-                })
-                .await;
-        });
-
-        // The accept loop is in another task, so a connection made the
-        // instant this returns would race it. One yield is enough for
-        // the spawned task to reach its first await.
-        tokio::task::yield_now().await;
-
-        Self {
-            socket,
-            store,
-            serving,
-            stop,
-        }
-    }
-
-    fn socket(&self) -> &Path {
-        &self.socket
-    }
-
-    /// Mint a credential through the store, as the owning peer does.
-    async fn mint(
-        &self,
-        name: &str,
-        scope: TokenScope,
-        capabilities: &[Capability],
-    ) -> MintedToken {
-        self.store
-            .mint(&Caller::OwningPeer(0), name, &scope, capabilities)
-            .await
-            .expect("the owning peer may mint anything")
-    }
-
-    /// Stop serving, and wait until it has.
-    async fn stop(self) {
-        let _ = self.stop.send(());
-        let _ = self.serving.await;
-    }
-}
 
 /// The refusal a handshake was answered with, or a panic naming what
 /// arrived instead.
@@ -338,6 +203,11 @@ async fn an_operator_operation_is_refused_to_a_credential_without_the_admin_capa
     let (mut stream, _) = connection.into_parts();
 
     for kind in [
+        // The diagnostics are among these because they are the
+        // operator's own: every value they carry is store-wide, and
+        // one of them names the credential that last replaced the
+        // store's epoch.
+        request::Kind::Diagnostics(Default::default()),
         request::Kind::MintToken(Default::default()),
         request::Kind::DeleteToken(Default::default()),
         request::Kind::ListTokens(Default::default()),

@@ -178,11 +178,55 @@ pub fn no_address(detail: &str) -> Refusal {
     }
 }
 
-/// The request named no operation this build serves.
+/// The request named no operation at all, which is what a client
+/// built from a newer schema sends.
 pub fn unknown_operation() -> Refusal {
     Refusal {
         code: RefusalCode::UnknownOperation as i32,
         detail: "that request named no operation this daemon serves".to_owned(),
+        ..Refusal::default()
+    }
+}
+
+/// The caller asked about one network for an interface another holds.
+///
+/// Named in full, which is why this is the one function here that
+/// takes two network names: it is built only for a caller whose scope
+/// is every network, where there is no network outside the scope for a
+/// name to leak and the disagreement itself is the thing somebody has
+/// to look at. A caller with a scope is refused through
+/// [`no_such_resource`] instead, identically to an interface no
+/// network has claimed -- the handler that chooses between the two
+/// carries the reasoning.
+///
+/// The code is the one [`for_store_error`] gives every other
+/// cross-network failure, because that is what this is: the daemon
+/// cannot serve the answer it was asked for and nobody should go
+/// looking for a request to fix.
+pub fn cross_network(kind: &str, id: &str, asked: &str, found: &str) -> Refusal {
+    Refusal {
+        code: RefusalCode::Internal as i32,
+        detail: format!(
+            "the {kind} {id} was asked about in {asked} and belongs to {found}, so the daemon              refused the answer rather than serving one network's configuration to another"
+        ),
+        resource_kind: Some(kind.to_owned()),
+        resource_id: Some(id.to_owned()),
+        held_by: Some(found.to_owned()),
+        ..Refusal::default()
+    }
+}
+
+/// The request named an operation the schema carries and this build
+/// does not serve.
+///
+/// The same code as the refusal above, because from the caller's side
+/// the two are one thing -- it asked for something that is not there
+/// -- and the detail is what says which. `operation` completes "this
+/// daemon does not serve ...".
+pub fn not_served(operation: &str) -> Refusal {
+    Refusal {
+        code: RefusalCode::UnknownOperation as i32,
+        detail: format!("this daemon does not serve {operation}"),
         ..Refusal::default()
     }
 }
