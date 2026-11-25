@@ -1,0 +1,132 @@
+[package]
+name = "teneral-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Teneral's control plane: the schema both ends are generated from, the server over the binding store, and the client a consumer links"
+
+# Not a crates.io artifact today. The consumer in view links this out
+# of the tree rather than out of a registry, and a crate that is not
+# published is one whose path dependency on the store needs no version
+# requirement beside it -- which keeps this project's release number in
+# the single place the release tooling knows how to move. Publishing
+# this is a decision somebody can make deliberately by removing this
+# line and answering the version question with it.
+publish = false
+
+# Inherit the workspace lint table rather than restating it. Without
+# this the workspace `[workspace.lints]` block applies to nothing at
+# all, which fails quietly: the lints look configured and are not.
+[lints]
+workspace = true
+
+[dependencies]
+# The binding store, which is the only thing this crate answers from.
+# Its path and its version requirement are in the workspace manifest,
+# where the reason for both is recorded.
+teneral-store = { workspace = true }
+
+# Protobuf encoding and decoding, and the derives the generated types
+# carry.
+#
+# `prost` rather than a hand-written encoder because the schema file
+# is the point: both halves of the wire are generated from
+# `proto/teneral.v1.proto`, so a field this server writes and a field
+# that client reads cannot drift apart. The defaults are what is
+# wanted here and are left on -- `derive`, which the generated code
+# needs because it is ordinary source compiled in this crate, and
+# `std`, since this is a daemon.
+#
+# Not `tonic`, and so not gRPC. gRPC means HTTP/2, which means a
+# protocol stack inside the process that holds every network's
+# bindings in one address space; a varint length prefix in front of a
+# generated message is a framing layer that can be read in an
+# afternoon. It also keeps the door open for the consumer that is
+# written in Python, where the generated message classes are a wheel
+# nobody has to add.
+prost = "0.14.6"
+
+# The runtime, for the socket and the tasks that serve it.
+#
+# Each feature is here because something cannot be written without it,
+# and the list is short on purpose: this crate runs inside the most
+# privileged process on the box.
+#
+#   `net`       the Unix listener and stream, and `peer_cred`, which
+#               is where the owning peer's identity comes from -- read
+#               from the kernel rather than claimed by the client.
+#   `io-util`   the read and write traits the framing is written
+#               against, so that a length prefix can be read and
+#               judged before the body it describes is.
+#   `rt`        a connection is a task.
+#   `macros`    `select!`, for a stream that waits on an event and on
+#               its connection going away at the same time.
+#   `sync`      the channels a watch stream is fed from, which is the
+#               same feature the store takes and the only one it does.
+#   `time`      the heartbeat, and the bound on how long startup waits
+#               for an answer when it is deciding whether something
+#               else is already serving its socket path.
+#
+# Deliberately absent: `rt-multi-thread`, because the runtime flavour
+# belongs to the binary, and `fs`, because the only file this crate
+# touches is the socket it creates, which `net` and the standard
+# library cover between them.
+tokio = { version = "1.54.1", default-features = false, features = [
+    "net",
+    "io-util",
+    "rt",
+    "macros",
+    "sync",
+    "time",
+] }
+
+# The uid this process runs as, which is the owning peer's whole
+# identity: a connection is the owning peer when the uid the kernel
+# reports for it equals this one.
+#
+# `libc` rather than a read of `/proc/self`'s ownership, because the
+# system call is the question being asked and procfs is a proxy for it
+# that a container can hide or remount. The crate is already in this
+# tree beneath the storage engine, so it adds nothing to the
+# dependency graph the licence gate reads.
+libc = "0.2.191"
+
+# Deserialisation of the state the store puts in an event.
+#
+# The store builds that state as JSON text inside the database engine,
+# deliberately, so that it needs no serialisation dependency of its
+# own; this is the layer that has to turn it into a typed message, and
+# it is allowed a serialiser where the store still is not. `derive` is
+# what makes each kind's mirror struct a declaration rather than a
+# hand-written visitor.
+serde = { version = "1.0.229", default-features = false, features = ["derive", "std"] }
+
+# The parser for that text, with its default feature set written out
+# rather than inherited, so that a later release adding a default
+# feature to a JSON parser in this process is a decision somebody
+# makes here instead of one that arrives with a lockfile bump.
+serde_json = { version = "1.0.154", default-features = false, features = ["std"] }
+
+[build-dependencies]
+# Compiles the schema into `OUT_DIR` when the crate is built. Nothing
+# generated is committed: a generated file in the tree is a second
+# copy of the schema that can disagree with the first, and `OUT_DIR`
+# makes that impossible rather than merely detectable.
+#
+# It shells out to `protoc`, which is why the build image carries
+# `protobuf-compiler`. It needs nothing else -- no network and no
+# registry -- which is what lets every compile target go on running
+# with `--network none`.
+prost-build = "0.14.6"
+
+[dev-dependencies]
+# The runtime, to drive the tests, and only the tests. `rt` and
+# `macros` are dependencies above already, so what this adds is
+# `test-util`: a test about a timeout pauses the clock instead of
+# sleeping, because a suite with real waits in it is one somebody
+# later makes faster, shortening exactly the margin the test was
+# measuring.
+tokio = { version = "1.54.1", default-features = false, features = ["test-util"] }

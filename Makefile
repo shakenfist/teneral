@@ -169,17 +169,31 @@ test: fetch
 		cargo test --frozen --workspace
 
 # The lint gate: formatting, then clippy over every target in the
-# workspace with warnings as errors. --all-targets reaches tests,
-# benches and examples, which the default build does not, and
-# -D warnings is what promotes a `warn` lint to a gate -- so a lint
-# left at `warn` in Cargo.toml still blocks here. This target is also
-# the only place clippy runs at all: `make build` invokes rustc,
-# which does not evaluate clippy's lints however they are set in
-# Cargo.toml.
+# workspace with warnings as errors, then the store on its own.
+#
+# --all-targets reaches tests, benches and examples, which the default
+# build does not, and -D warnings is what promotes a `warn` lint to a
+# gate -- so a lint left at `warn` in Cargo.toml still blocks here.
+# This target is also the only place clippy runs at all: `make build`
+# invokes rustc, which does not evaluate clippy's lints however they
+# are set in Cargo.toml.
+#
+# The last step is the store compiled by itself, and it is here because
+# it cannot be anywhere else. The store depends on tokio for its
+# channels and takes no runtime feature, which is what makes
+# `spawn_blocking` not exist inside it -- the rule that the store owns
+# the threads its blocking happens on, enforced by a feature list
+# rather than by vigilance. Cargo unifies a dependency's features
+# across everything it is building at once, so a sibling crate that
+# does take a runtime feature puts `spawn_blocking` back within the
+# store's reach in a --workspace build. Built alone the crate gets only
+# its own features, so this is the one invocation where writing one in
+# the store fails. It is in this target rather than a target of its own
+# so that pre-commit and CI run it without being told to.
 lint: fetch
 	$(DOCKER_RUN_OFFLINE) \
 		$(TENERAL_IMAGE) \
-		sh -c "cargo fmt --all --check && cargo clippy --frozen --workspace --all-targets -- -D warnings"
+		sh -c "cargo fmt --all --check && cargo clippy --frozen --workspace --all-targets -- -D warnings && cargo check --frozen -p teneral-store"
 
 # The supply-chain gate, in two halves, because only one of them is
 # deterministic.

@@ -8,6 +8,14 @@ authors.workspace = true
 repository.workspace = true
 description = "A DHCP and DNS daemon for many networks in one process"
 
+# Not a crates.io artifact. This is a binary, built from the libraries
+# beside it and installed by whatever packages the daemon, so there is
+# nothing for a registry to serve. It also means its path dependencies
+# on those libraries need no version requirement beside them, which
+# keeps this project's release number in the single place the release
+# tooling knows how to move.
+publish = false
+
 # Inherit the workspace lint table rather than restating it. Without
 # this the workspace `[workspace.lints]` block applies to nothing at
 # all, which fails quietly: the lints look configured and are not.

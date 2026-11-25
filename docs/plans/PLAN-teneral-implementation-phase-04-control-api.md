@@ -876,9 +876,17 @@ rather than ticking it.
    `git ls-files | grep -c '\.rs$'` over the API crate matches
    the hand-written files, and `teneral.v1.rs` is absent from the
    tree.
-9. `teneral-store` still has no tokio runtime feature, so
-   `spawn_blocking` still cannot compile there -- the phase-3
-   guarantee, re-checked rather than assumed.
+9. `teneral-store` still declares no tokio runtime feature in its
+   own `[dependencies]`, **and** `make lint` compiles that crate on
+   its own as well as the workspace, so `spawn_blocking` still
+   cannot compile in it. Both halves are required, and the second is
+   this phase's finding rather than an extra precaution: cargo
+   unifies a dependency's features across everything it builds at
+   once, so once a sibling crate takes a runtime feature the feature
+   list alone no longer holds the phase-3 guarantee in a
+   `--workspace` build. Checked by writing a `spawn_blocking` call
+   in the store and confirming the per-crate check refuses it while
+   the workspace build accepts it.
 10. Every mutating store method takes an actor, and a write's
     actor is readable from the resource after its event has been
     evicted.
@@ -1020,6 +1028,25 @@ this file now names what was built. Two extras of the agent's were
 kept: the sentence in `ARCHITECTURE.md` that this step made false,
 and a table count in `docs/binding-store.md` that said seven while
 listing eight before this phase touched it.
+
+**4c found that the phase-3 tokio guarantee was weaker than it
+read.** The rule that the store owns the threads its blocking
+happens on was said to be enforced by tokio's feature list -- the
+store takes `sync`, so `spawn_blocking` does not exist in it. Cargo
+unifies a dependency's features across everything it builds at
+once, so `teneral-api` taking `rt` for its connection tasks puts
+`spawn_blocking` back within the store's reach in any
+`--workspace` build. The step proved both halves: with a
+`spawn_blocking` call written into the store, `cargo check -p
+teneral-store` refuses it and `cargo check --workspace` accepts it.
+The remedy is mechanical rather than a note asking for care --
+`make lint` now compiles the store on its own as well as the
+workspace, which is the one invocation where the crate gets only
+its own features. `AGENTS.md`'s invariant and item 9 of the
+definition of done above were both rewritten to say what is now
+true, including the trap, because an invariant that claims an
+enforcement it does not have is worse than one that asks for
+vigilance.
 
 **Not a phase-4 change, recorded here because it landed on this
 branch.** `bluecatengineering/dhcproto#111`, the `hlen` clamp this

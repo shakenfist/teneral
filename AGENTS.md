@@ -55,12 +55,18 @@ and each of them has already been decided:
   `tokio::task::spawn_blocking` around a store call has misread the
   interface: there is nothing left for such a helper to move, and
   wrapping one would put the work on the runtime's shared blocking
-  pool, which is the arrangement the design exists to avoid. The
-  dependency's feature list is what enforces it rather than
-  anybody's vigilance: `spawn_blocking` does not exist without a
-  tokio runtime feature, and `teneral-store` has only `sync`. A
-  runtime feature appearing outside that crate's dev-dependencies
-  has broken the rule and should fail review.
+  pool, which is the arrangement the design exists to avoid. Two
+  things enforce it rather than anybody's vigilance, and it takes
+  both: `spawn_blocking` does not exist without a tokio runtime
+  feature and `teneral-store` has only `sync`, and `make lint`
+  compiles that crate on its own as well as the workspace. The
+  second exists because of the trap in the first -- cargo unifies a
+  dependency's features across everything it builds at once, so a
+  sibling crate's runtime feature puts `spawn_blocking` back within
+  the store's reach in a `--workspace` build. The workspace build is
+  therefore not where this rule is enforced. A runtime feature
+  appearing in that crate's own `[dependencies]` has broken it and
+  should fail review.
 - **A panic is a cluster-wide outage.** One process serves every
   network, so `unwrap()`, `expect()`, slice indexing and
   unchecked arithmetic on anything derived from a packet are

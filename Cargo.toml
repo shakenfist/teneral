@@ -1,11 +1,20 @@
 [workspace]
-# Two members. `teneral` is the daemon; `teneral-store` is the binding
-# store, and it is a crate rather than a module inside the daemon for
-# two reasons that are not tidiness.
+# Three members. `teneral` is the daemon; `teneral-store` is the
+# binding store and `teneral-api` is the control plane over it. Each
+# of the two libraries is a crate rather than a module inside the
+# daemon for two reasons that are not tidiness.
 #
 # The first is that this repository is teneral's core libraries, so
 # the store's public surface is an interface another repository links
 # rather than an internal arrangement this one is free to reshape.
+# `teneral-api` is that same argument one layer up, and it has a
+# consumer in view already: the product whose interface is a browser
+# is a separate binary in a separate repository, and what it links is
+# this crate's client. Were the control plane written inside the
+# daemon, that consumer would hold a second model of the resources and
+# the scopes -- which is a second implementation of the rules that
+# keep one network's answers out of another's, in the component least
+# likely to be tested with two networks.
 #
 # The second is enforcement. The store's rule is that the network is a
 # parameter of every operation, not a column an implementation is
@@ -13,8 +22,11 @@
 # cannot reach the SQL. Inside one crate it is a convention somebody
 # polices in review; across a crate boundary with the connection type
 # private, a front-end that wants to skip the network has to add a
-# public method to do it, which is a diff a reviewer sees.
-members = ["teneral", "teneral-store"]
+# public method to do it, which is a diff a reviewer sees. The API
+# crate sits on the far side of that boundary like any other consumer:
+# it reaches the store only through the trait, so a handler cannot
+# answer from anything the store would not have scoped.
+members = ["teneral", "teneral-api", "teneral-store"]
 
 # The MSRV-aware resolver: it prefers the newest dependency version
 # whose own `rust-version` the floor declared below can still build,
@@ -27,6 +39,24 @@ members = ["teneral", "teneral-store"]
 # dependency that needs more makes that visible at resolution time,
 # and the floor is then raised deliberately.
 resolver = "3"
+
+# How this workspace's own crates depend on each other, written once
+# here rather than in each member that links one.
+#
+# A path and no version, which is a statement about publishing rather
+# than a shortcut. A path dependency carrying no version requirement
+# reads as a requirement on any version at all, and the supply-chain
+# gate denies a wildcard -- but it allows one on a path belonging to a
+# crate that is not published, such a dependency never being resolved
+# from a registry. The members that link this are therefore
+# `publish = false`, each saying why.
+#
+# The alternative was a version requirement here, and it was declined:
+# it would put this project's release number in a second place that
+# `tools/release-version.sh` does not set, that tool reading and
+# writing `[workspace.package]` and nothing else.
+[workspace.dependencies]
+teneral-store = { path = "teneral-store" }
 
 [workspace.lints.clippy]
 # A panic is a cluster-wide outage here: one process serves every

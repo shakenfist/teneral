@@ -1,0 +1,1375 @@
+// Teneral's control plane.
+//
+// This file is the whole of the wire. Both halves -- the daemon's
+// server and the client a consumer links -- are generated from it, so
+// a field one writes and the other reads cannot drift apart, and the
+// resource model is a thing a reviewer can read rather than a
+// convention spread across handlers.
+//
+// # How these messages travel
+//
+// Length-delimited, in both directions, on a SOCK_STREAM Unix socket:
+// a varint byte count and then the encoded message. A connection opens
+// with a Hello answered by a HelloResult, and is then a sequence of
+// Request and Response pairs in order, with no multiplexing and no
+// request ids -- the handshake is paid once per connection rather than
+// once per read, and in-order pairs need no correlation machinery.
+//
+// A Watch request is terminal: the connection becomes a stream of
+// WatchEvent and nothing else follows, which removes the question of
+// what a request means while a stream is running.
+//
+// A collection is a sequence of Response messages ended by a marker,
+// not one message holding a list. That keeps the message size bound a
+// bound on one item rather than a ceiling on how large a network may
+// grow, and it makes a collection read and a watch snapshot one code
+// path instead of two.
+//
+// # Field numbers are permanent
+//
+// Nothing here may be renumbered, and a field that goes away is
+// `reserved` rather than reused. Where a message is expected to grow,
+// the numbering stops short of the next thing and a comment says what
+// the gap is being held for; a gap with no comment is an accident and
+// should be reported as one.
+//
+// # What is deliberately absent
+//
+// Five resources exist, and they are the five the store holds:
+// networks, attachments, address ranges, bindings and leases. There is
+// no message here for a zone, a record or a content blob. Those are
+// real parts of the design and they have no storage, no identity in
+// the store and no event kind, so a message for one would be a guess
+// at an interface somebody else will design -- and an empty message
+// standing in for it would be a guess that a consumer could compile
+// against. An unknown resource kind is refused rather than ignored,
+// which turns a consumer built against a fuller vocabulary into a
+// mismatch it hears about instead of a stream that is silently empty.
+//
+// # Spellings
+//
+// Enum values carry their type's name as a prefix, because protobuf
+// enum values share a namespace with their siblings, and every enum
+// has an UNSPECIFIED zero so that a field nobody set is distinguishable
+// from a field somebody set deliberately. The one wildcard in the
+// vocabulary -- every network -- is a typed value a caller had to
+// write, never an empty field, because the commonest way to widen a
+// scope by accident is to leave one blank.
+
+syntax = "proto3";
+
+package teneral.v1;
+
+// ---------------------------------------------------------------------
+// The values that travel inside everything else.
+// ---------------------------------------------------------------------
+
+// A position in the store's one order of mutations.
+//
+// Both halves are load-bearing. The sequence is the position, assigned
+// when a mutation commits and never issued twice. The epoch says whose
+// sequence numbers these are, so a consumer presenting a remembered
+// position is told to carry on from it rather than handed a different
+// history's events under numbers it recognises.
+//
+// Two cursors are comparable only once their epochs are known to
+// match, and the order they describe is not causality between
+// networks: two networks' events are interleaved by nothing more than
+// when they arrived.
+message Cursor {
+  // Whose sequence numbers these are. Opaque; compare for equality
+  // and nothing else.
+  string epoch = 1;
+
+  // The position in that order.
+  uint64 sequence = 2;
+}
+
+// Which networks something reaches.
+//
+// The every-network form is a message rather than an empty list or a
+// reserved name, because a wildcard is typed and never defaulted: a
+// scope that forgot to say what it covered would otherwise cover
+// everything, and a reserved name would collide with a real network
+// the day an operator names one after it.
+message Scope {
+  oneof reach {
+    EveryNetwork every_network = 1;
+    NetworkNames networks = 2;
+  }
+}
+
+// Every network in the store, including the ones created after this
+// scope was written.
+//
+// Empty of fields on purpose: it carries no information beyond its own
+// presence, and that presence is the whole point. A boolean would make
+// the unset case and the "no, not every network" case the same bytes.
+message EveryNetwork {}
+
+// Exactly these networks, by name, and no others.
+//
+// The names need not exist. A scope is a statement about names rather
+// than a reference to resources, and the first token is minted before
+// any network has been created.
+message NetworkNames {
+  repeated string names = 1;
+}
+
+// Something a caller may do.
+//
+// Three of these are the kinds of thing a consumer does with the
+// resources in the networks it may reach. ADMIN is the operator's own
+// operations -- the credentials and the store's epoch -- which are
+// gated by this capability rather than by a second socket whose file
+// mode the kernel would have enforced. That makes the strongest
+// boundary in the design a comparison rather than a permission on a
+// file, which is why the capability a request needs is decided in one
+// exhaustive place and why a minted credential can never exceed the
+// one that minted it.
+//
+// 6 onwards is held for the capabilities a later resource needs,
+// reading a content blob being the one already foreseen: a blob holds
+// credentials, so reading one is not the same permission as reading a
+// lease.
+enum Capability {
+  CAPABILITY_UNSPECIFIED = 0;
+  CAPABILITY_READ = 1;
+  CAPABILITY_WRITE = 2;
+  CAPABILITY_WATCH = 3;
+  CAPABILITY_ADMIN = 4;
+}
+
+// One attribute a client presents, and its value.
+//
+// A selector means nothing outside a network: the same hardware
+// address in two networks is two unrelated clients, legitimately. So
+// it travels beside a network and never as an identity of its own.
+enum SelectorKind {
+  SELECTOR_KIND_UNSPECIFIED = 0;
+  SELECTOR_KIND_CLIENT_ID = 1;
+  SELECTOR_KIND_DUID_IAID = 2;
+  SELECTOR_KIND_MAC = 3;
+  SELECTOR_KIND_USER_CLASS = 4;
+  SELECTOR_KIND_VENDOR_CLASS = 5;
+}
+
+// An attribute and the value of it, which together are a binding's
+// identity within its network and the answer to which selector a
+// lookup matched.
+message Selector {
+  SelectorKind kind = 1;
+  string value = 2;
+}
+
+// Everything a client presents at once.
+//
+// A list rather than a field per kind, so that the published
+// precedence between kinds is applied in one place and reported back
+// rather than implied by the order a caller happened to fill fields
+// in. A kind given twice is refused: the daemon is not the place to
+// decide which of two values for one attribute was meant.
+message ClientIdentity {
+  repeated Selector presents = 1;
+}
+
+// The kinds of resource a watch can ask for and an event can describe.
+//
+// Five, because five is what the store holds. 6 onwards is held for
+// the kinds a later phase adds -- zones, static records, projected
+// records and content blobs -- and until then a request naming an
+// unknown kind is refused rather than quietly dropped from the
+// subscription.
+enum ResourceKind {
+  RESOURCE_KIND_UNSPECIFIED = 0;
+  RESOURCE_KIND_NETWORK = 1;
+  RESOURCE_KIND_ATTACHMENT = 2;
+  RESOURCE_KIND_ADDRESS_RANGE = 3;
+  RESOURCE_KIND_BINDING = 4;
+  RESOURCE_KIND_LEASE = 5;
+}
+
+// ---------------------------------------------------------------------
+// The handshake.
+//
+// Its own pair of messages rather than a request kind, so that "a
+// Hello is the first frame and only the first frame" is a property of
+// the types instead of a check each side has to remember to make.
+// ---------------------------------------------------------------------
+
+// The first frame a client sends.
+message Hello {
+  // The protocol version the client speaks. A version this daemon does
+  // not speak is refused naming both, so a mismatch is a sentence an
+  // operator can read rather than a decode failure.
+  uint32 protocol_version = 1;
+
+  // The secret of the token the connection acts as.
+  //
+  // Absent only for the peer the daemon runs as, whose uid the kernel
+  // reports and who therefore presents nothing. That exception is what
+  // makes the first token mintable at all: there is no initial
+  // password, no token file and no first-run secret on disk, because
+  // the only path that needs no credential is the one the socket's
+  // permissions already gate. Present, it is verified whoever sends
+  // it -- omission is the exception, not identity.
+  optional string token_secret = 2;
+
+  // 3-7: held for what a client says about itself at connection time.
+  // A name for the daemon's log is the obvious candidate and is not
+  // here yet, because a string from an unauthenticated frame that
+  // lands in a log wants more thought than a spare field number.
+}
+
+// The answer to a Hello: either the connection is open or it is
+// refused, and the refusal is the same vocabulary every other refusal
+// uses.
+message HelloResult {
+  oneof outcome {
+    Welcome welcome = 1;
+    Refusal refusal = 2;
+  }
+}
+
+// What the daemon tells a caller about itself and about the caller.
+message Welcome {
+  // The version this connection speaks, which is the version the
+  // daemon speaks: there is no negotiation, only agreement or a
+  // refusal.
+  uint32 protocol_version = 1;
+
+  // Where the store's order had reached when the connection opened.
+  // Its epoch is the store's epoch -- carried here once rather than
+  // twice, because two copies of one value are two values that can
+  // disagree.
+  Cursor position = 2;
+
+  // The version of the store's own schema, so that a consumer which
+  // cares can refuse to run against a store it was not written for.
+  uint32 schema_version = 3;
+
+  // The networks this caller may reach and what it may do in them,
+  // resolved -- not what it asked for. A client that compares these
+  // with what it believes it holds catches a wrong credential before
+  // it acts on an answer rather than after.
+  Scope scope = 4;
+  repeated Capability capabilities = 5;
+
+  // How the caller was identified, which is a different question from
+  // what it may do. Told plainly because the only caller that may act
+  // without a credential is the owning peer, and a consumer that
+  // believes it presented a token and was in fact served as the owning
+  // peer is a consumer running with more reach than it thinks.
+  Identification identified_as = 6;
+
+  // 7-15: held for what else a connection needs to know up front --
+  // the daemon's own version, and the bounds it will refuse against.
+}
+
+// Which of the two ways a caller was identified.
+message Identification {
+  oneof identity {
+    OwningPeer owning_peer = 1;
+    TokenIdentity token = 2;
+  }
+}
+
+// A local process connecting as the uid the daemon runs as, read from
+// the kernel rather than claimed.
+message OwningPeer {
+  uint32 uid = 1;
+}
+
+// The token the connection presented, without its secret.
+message TokenIdentity {
+  // The token's id, which is also what its writes are recorded
+  // against.
+  string id = 1;
+
+  // What an operator calls it. Not unique.
+  string name = 2;
+}
+
+// ---------------------------------------------------------------------
+// Refusals.
+// ---------------------------------------------------------------------
+
+// Why the daemon will not do what was asked.
+//
+// A code and then whichever of the fields below the code makes
+// meaningful, rather than a sentence a consumer would have to parse.
+// The sentence is there as well, for a person, and nothing should be
+// decided by reading it.
+//
+// One rule governs every one of these: a refusal never names a
+// resource outside the caller's scope. "That interface belongs to a
+// network you may not see" and "no network has claimed that interface"
+// are therefore the same refusal with the same detail, because the
+// difference between those two answers is itself the thing being kept
+// from the caller.
+message Refusal {
+  RefusalCode code = 1;
+
+  // A sentence an operator can act on. For a person, and never the
+  // thing a consumer branches on.
+  string detail = 2;
+
+  // What kind of resource the request was about, and which one, as
+  // its identity reads inside its network.
+  optional string resource_kind = 3;
+  optional string resource_id = 4;
+
+  // What stands in the way of a CONFLICT, named. Naming it is the
+  // point: an operator told only that a claim failed has to go looking
+  // for what holds it, which is the moment they are most likely to
+  // guess.
+  optional string held_by = 5;
+
+  // For CHANGED: the position the caller expected the resource to be
+  // at, and the one it is actually at, as the store renders them.
+  // Rendered rather than structured because they are read, not
+  // computed with -- a caller that wants to proceed re-reads the
+  // resource -- and a second parse of a position is a second thing
+  // that can disagree about one.
+  optional string expected_position = 6;
+  optional string found_position = 7;
+
+  // For MISSING_CAPABILITY: the capability the request needs. A
+  // caller holding a credential it did not mint cannot otherwise tell
+  // which of several it is short of.
+  optional Capability required_capability = 8;
+
+  // For TOO_MANY_VIEWS: how long to wait before asking again. The
+  // bound is on concurrent readers and clears as they finish, so this
+  // is a refusal a consumer retries rather than an error it reports.
+  optional uint32 retry_after_seconds = 9;
+
+  // For VERSION_MISMATCH: both sides' versions, so that the sentence
+  // an operator reads names what was presented and what is spoken.
+  optional VersionMismatch versions = 10;
+
+  // 11-19: held for the structured halves of refusals not yet
+  // distinguished -- the bound a request exceeded, and the selector a
+  // precedence rejected.
+}
+
+// What was presented and what this daemon speaks.
+message VersionMismatch {
+  uint32 presented = 1;
+
+  // Every version this daemon serves, so that a client can choose one
+  // rather than guess from a single number.
+  repeated uint32 supported = 2;
+}
+
+// The kinds of refusal.
+//
+// The first seven are the control plane's own vocabulary. The rest
+// exist because the store refuses things no one of those describes,
+// and a refusal mapped on to a code that does not fit it is worse than
+// a code more: a consumer would retry what it cannot retry, or report
+// a defect where it made an ordinary mistake.
+enum RefusalCode {
+  REFUSAL_CODE_UNSPECIFIED = 0;
+
+  // The caller's credential does not hold the capability this request
+  // needs. `required_capability` says which.
+  REFUSAL_CODE_MISSING_CAPABILITY = 1;
+
+  // The request named a network outside the caller's scope, or asked a
+  // question whose answer turned out to be one. The detail names
+  // nothing the caller may not already see.
+  REFUSAL_CODE_OUTSIDE_SCOPE = 2;
+
+  // There is no such resource. A lookup that matched nothing answers
+  // this too: "no binding applies to that client" and "that binding
+  // does not exist" are the same answer to a caller, and the detail
+  // says which was asked.
+  REFUSAL_CODE_NO_SUCH_RESOURCE = 3;
+
+  // Something is already there, and `held_by` names it. A conflict is
+  // reported and never resolved: nothing here silently merges two
+  // writers' intentions.
+  REFUSAL_CODE_CONFLICT = 4;
+
+  // The daemon is already holding as many concurrent views of the
+  // store as it will. `retry_after_seconds` is a hint, and this is a
+  // refusal a consumer is expected to retry.
+  REFUSAL_CODE_TOO_MANY_VIEWS = 5;
+
+  // The request named a resource kind this daemon does not serve.
+  // Refused rather than ignored, so that a consumer written against a
+  // fuller vocabulary learns it is talking to an older daemon instead
+  // of watching a stream that never carries what it wanted.
+  REFUSAL_CODE_UNKNOWN_RESOURCE_KIND = 6;
+
+  // The protocol version presented is not one this daemon speaks.
+  // `versions` names both sides.
+  REFUSAL_CODE_VERSION_MISMATCH = 7;
+
+  // The connection presented no credential and is not the peer the
+  // daemon runs as, or presented one the daemon does not know.
+  //
+  // Distinct from a missing capability, which is an answer to an
+  // identified caller. The two are different fixes: one is a
+  // credential to mint, the other a credential to replace.
+  REFUSAL_CODE_UNAUTHENTICATED = 8;
+
+  // The resource moved on between the caller reading it and asking for
+  // it to be changed. `expected_position` and `found_position` say
+  // where it was and where it is.
+  //
+  // Not a conflict: nothing else holds the thing the caller wanted, so
+  // the repair is to read it again and decide, where a conflict's
+  // repair is to take what is in the way or to give up.
+  REFUSAL_CODE_CHANGED = 9;
+
+  // The request was not one the daemon can act on at all: a name it
+  // will not store, a selector kind it does not know, a scope that
+  // said nothing, a field a message cannot be understood without.
+  REFUSAL_CODE_INVALID_REQUEST = 10;
+
+  // The network had no address to give. Distinct from a conflict
+  // because nothing is in the way: a network with no range allocates
+  // nothing by design, and a network whose pool is full is an
+  // operational problem with an operational fix.
+  REFUSAL_CODE_NO_ADDRESS = 11;
+
+  // The request named no operation this daemon serves: either no
+  // operation at all, which is what a client built from a newer schema
+  // sends, or one this build does not answer. One code for both,
+  // because the two are the same thing from the caller's side -- it
+  // asked for something that is not there -- and the detail says
+  // which.
+  REFUSAL_CODE_UNKNOWN_OPERATION = 12;
+
+  // The frame's length prefix is over the bound, so the body was never
+  // read. The connection closes after this: a stream whose body was
+  // skipped has nothing to resynchronise on.
+  REFUSAL_CODE_MESSAGE_TOO_LARGE = 13;
+
+  // The daemon failed rather than refused. Its detail says what it was
+  // doing and deliberately not what it found, because the thing it
+  // found can name a network the caller may not see.
+  REFUSAL_CODE_INTERNAL = 14;
+}
+
+// ---------------------------------------------------------------------
+// The resources.
+//
+// Each carries the network it belongs to, including when it was asked
+// for through a question that already named one, and the position it
+// was last written at. Repeating the network costs a string and
+// removes a class of bug: a consumer that learned to infer the network
+// from the question it asked is wrong the day somebody widens the
+// question, and a cache keyed by address instead of by network and
+// address is caught by the mismatch.
+//
+// Each also carries who wrote it last, as the daemon recorded it. It
+// is a rendered value and not a structure because nothing parses it
+// back: it is read by a person asking who moved something.
+//
+// An IPv4 address is a 32-bit number, most significant octet first --
+// the form `Ipv4Addr::from(u32)` reads -- rather than dotted-quad
+// text. The conversion is total in both directions, so no address on
+// this wire can fail to parse, and an IPv6 address will arrive as a
+// field of its own rather than by widening this one.
+// ---------------------------------------------------------------------
+
+// A network: the scope everything else lives inside.
+//
+// Its identity is a name the caller chose and the daemon treats as
+// opaque, so a UUID and the word for a room are equally valid. A
+// network is not a subnet: it owns zero or more address ranges as
+// children, which is how a network that only ever matches what was
+// configured and one with a dynamic pool are the same resource with
+// different children rather than two kinds of thing.
+message Network {
+  string name = 1;
+  Cursor cursor = 2;
+  string written_by = 3;
+
+  // 4-11: held for what a network configures beyond its children --
+  // upstream forwarders, the zone suffix its names live under, and the
+  // lease duration it offers.
+}
+
+// An interface, in a namespace, belonging to exactly one network.
+//
+// The namespace is part of the identity because an interface name is
+// unique only within one, and every consumer in view puts each network
+// in a namespace of its own. The other half of this resource is a
+// constraint rather than a field: an interface belongs to exactly one
+// network, and claiming an attached interface for a second is refused.
+// That refusal is the one place a cross-network leak would be
+// configured rather than coded.
+message Attachment {
+  string network = 1;
+  string namespace = 2;
+  string ifname = 3;
+  Cursor cursor = 4;
+  string written_by = 5;
+
+  // 6-9: held for what the datapath needs to know about an interface
+  // it is answering on, the address the daemon answers as being the
+  // candidate.
+}
+
+// A contiguous span of addresses a network may allocate from.
+//
+// The ends are inclusive, which is how an operator writes a pool. A
+// network may own several or none, and one with none allocates nothing
+// and only ever answers from what was configured.
+message AddressRange {
+  string network = 1;
+  string name = 2;
+  fixed32 first = 3;
+  fixed32 last = 4;
+  Cursor cursor = 5;
+  string written_by = 6;
+
+  // 7-14: held for the IPv6 half -- a prefix and its length rather
+  // than a first and a last, which is a different shape and belongs in
+  // fields of its own rather than in a reinterpretation of these.
+}
+
+// What an operator configured for one client identity in one network.
+//
+// The selector is the binding's identity inside its network, and so is
+// also the answer to which selector a lookup matched. Because the
+// matched selector *is* the identity, a lookup cannot answer without
+// saying -- which matters because the precedence between selector
+// kinds is this project's own choice, and a consumer can only check
+// that its understanding matches the daemon's by being told.
+message Binding {
+  string network = 1;
+  Selector selector = 2;
+  fixed32 address = 3;
+
+  // The name this binding contributes to its network's zones, if the
+  // operator gave it one. Explicitly optional: a binding with no name
+  // and a binding named with an empty string are different states, and
+  // only one of them is legal.
+  optional string hostname = 4;
+
+  Cursor cursor = 5;
+  string written_by = 6;
+
+  // 7-14: held for what else a binding answers with -- an option set,
+  // and the content a metadata front-end serves for this client.
+}
+
+// An address a client is using in a network, as against one an
+// operator configured for it.
+//
+// Keyed by network and address rather than by client, because within
+// one network an address has at most one holder at a time while a
+// client may legitimately hold two as it moves between them. So the
+// holder is a field here, and "what does this client hold" is a query
+// with a list for an answer.
+message Lease {
+  string network = 1;
+  fixed32 address = 2;
+
+  // The attribute the holder was identified by when it acquired the
+  // address: one selector rather than everything the client presented,
+  // because a holder has to be a single comparable value.
+  Selector holder = 3;
+
+  // The opaque id that changes when and only when the address changes
+  // holder, so a consumer can tell a renewal from a reassignment
+  // without comparing timestamps. It is a position rather than a
+  // random value, which makes it deterministic in a test and already
+  // comparable against a stream.
+  Cursor lease_id = 4;
+
+  // Seconds since the Unix epoch, both of them. The expiry is absolute
+  // rather than a duration and a start, so that expiry is a comparison
+  // against a clock rather than an arithmetic every reader repeats.
+  int64 acquired_at = 5;
+  int64 expires_at = 6;
+
+  // Whether the instant above had passed when this answer was
+  // produced. The fact is the field above; this is the fact evaluated,
+  // at the instant the answer was read, and a consumer holding the
+  // answer for longer should use the fact.
+  bool expired = 7;
+
+  Cursor cursor = 8;
+  string written_by = 9;
+
+  // 10-17: held for the IPv6 half -- the address association a v6
+  // client holds rather than a single address -- and for what a relay
+  // reported about the client when it acquired.
+}
+
+// A resource, whichever kind it is.
+//
+// One message says what a resource can be, and both a read's answer
+// and a stream's event carry it. That is deliberate: the day a sixth
+// kind exists, it is added here once and both grow together, where two
+// lists would be two lists to keep in step. It is also what makes "the
+// message a read returns equals the message an event carries" a thing
+// that can be asserted rather than hoped for.
+message Resource {
+  oneof state {
+    Network network = 1;
+    Attachment attachment = 2;
+    AddressRange address_range = 3;
+    Binding binding = 4;
+    Lease lease = 5;
+  }
+
+  // 6-12: held for the resources a later phase designs -- zones,
+  // static and projected records, and content blobs. Nothing stands in
+  // for them here: a message reserved for an interface that has not
+  // been designed is a guess a consumer could compile against.
+}
+
+// A credential, without its secret.
+//
+// Returned by a listing and by the one response that mints one. There
+// is no field for the secret, which is the structural half of
+// "returned exactly once": a caller that wanted to keep it would have
+// to keep what it was handed.
+message Token {
+  string id = 1;
+  string name = 2;
+  Scope scope = 3;
+  repeated Capability capabilities = 4;
+
+  // The actor that minted it, as recorded. A string rather than a
+  // structure because the minter may be a credential that has since
+  // been removed, and because nothing parses an actor back.
+  string minted_by = 5;
+  int64 minted_at = 6;
+
+  // When it was last presented successfully. Absent is a different
+  // fact from an instant at the start of the epoch, which is why it is
+  // not stamped at minting.
+  optional int64 last_used_at = 7;
+
+  // 8-13: held for what a credential may come to carry -- an expiry,
+  // and a note saying what it was issued for.
+}
+
+// A credential and its secret, as a mint answers.
+//
+// The one and only time the secret exists anywhere but in the caller
+// that will present it. It is not stored and not readable again: a
+// consumer that loses it is minted another, which is the behaviour
+// wanted of a credential.
+message MintedToken {
+  Token token = 1;
+  string secret = 2;
+}
+
+// Where the new order starts, after the store's epoch was replaced.
+//
+// Every position from the old order then fails to match, so every
+// consumer holding one is told the epoch changed and reconverges --
+// which is what should happen to a consumer holding positions in a
+// history that has been rewound. The sequence counter does not
+// restart, so a position from the old order is never issued again.
+message MintedEpoch {
+  Cursor position = 1;
+}
+
+// What the daemon would answer a client, and how it got there, with no
+// packet involved.
+//
+// Every field is here because its absence is a distinct diagnosis. No
+// network at all means no network has claimed the interface, which is
+// a different fault from a network that has claimed it and configured
+// nothing. No match under a network that is present means the client
+// would fall through to whatever the front-end does with a client it
+// does not know. And the considered list is what the lookup would have
+// looked for, in the order it would have looked, which turns "this
+// matched" into "these lost, in this order" -- the only complete check
+// of a precedence this project invented.
+message Explanation {
+  string namespace = 1;
+  string ifname = 2;
+
+  // The network the interface resolved to, absent if none has claimed
+  // it.
+  optional string network = 3;
+
+  // The binding that would answer, if any. Its selector is the one
+  // that matched.
+  optional Binding matched = 4;
+
+  repeated Selector considered = 5;
+
+  // 6-11: held for the rest of what a front-end would answer -- the
+  // address it would offer a client with no binding, and the options
+  // that would travel with it.
+}
+
+// A cheap value that changes when a network's configuration changes.
+//
+// A consumer holding a mirror compares one of these instead of diffing
+// everything, and a mismatch means resync rather than investigate. It
+// is opaque: compare two for equality and nothing else. Two are
+// comparable only when they are the same network's, and it covers what
+// an operator configured rather than the leases over it -- a digest
+// that moved whenever a client appeared would answer "has anything
+// happened" instead of "do we agree".
+message Digest {
+  string value = 1;
+}
+
+// What the daemon says about itself.
+//
+// The store's epoch and its current position arrive in the envelope
+// this answer travels in, which is where every answer's position is.
+message Diagnostics {
+  // The version of the store's schema, and of this protocol.
+  uint32 schema_version = 1;
+  uint32 protocol_version = 2;
+
+  // Who replaced the store's epoch and when, or the recorded word for
+  // an epoch nobody has replaced. This is how an operator tells a
+  // store that has been minted since a restore from one that has not.
+  string epoch_minted_by = 3;
+  optional int64 epoch_minted_at = 4;
+
+  // Concurrent views of the store, and the bound this daemon refuses
+  // at. Two numbers rather than one because they count different
+  // things: the bound is enforced on the views this daemon opened,
+  // and the count is the store's own across every opener in the
+  // process. An arrangement that notices the day they disagree.
+  uint64 live_views = 5;
+  uint64 max_live_views = 6;
+
+  // The number of answers the store refused for having come from the
+  // wrong network. By construction it cannot move, which is the point:
+  // a counter that is always zero in a correct system is a better
+  // alarm than any dashboard, because one non-zero reading is
+  // unambiguous and needs no baseline to read.
+  uint64 cross_network_answers = 7;
+
+  // 8-15: held for the rest of what an operator asks a running daemon
+  // -- how much history it is holding, how far it has truncated, and
+  // how many connections and streams it is serving.
+}
+
+// ---------------------------------------------------------------------
+// Requests.
+//
+// One message per operation even where it would fit in a field, so
+// that an operation can grow a parameter without touching its
+// neighbours.
+//
+// A request that changes something carries the position it expects the
+// resource to be at. That is not ceremony: expressed as a read
+// followed by a write it is correct only until something gets in
+// between, and two writers resizing one pool from the same stale read
+// is how a network comes to answer from addresses something else was
+// told it owned.
+// ---------------------------------------------------------------------
+
+// Every network the caller may reach.
+//
+// No fields today. A message rather than nothing so that the filters a
+// listing will want -- and the paging it may need, though a collection
+// streams rather than pages -- arrive without changing the operation.
+message ListNetworksRequest {}
+
+message GetNetworkRequest {
+  string name = 1;
+}
+
+message CreateNetworkRequest {
+  string name = 1;
+
+  // 2-5: held for the configuration a network carries beyond its
+  // name, so that creating one and then configuring it does not have
+  // to be two writes a consumer can get half-way through.
+}
+
+message DeleteNetworkRequest {
+  string name = 1;
+  Cursor expected = 2;
+}
+
+message ListAttachmentsRequest {
+  string network = 1;
+}
+
+message GetAttachmentRequest {
+  string network = 1;
+  string namespace = 2;
+  string ifname = 3;
+}
+
+message AttachInterfaceRequest {
+  string network = 1;
+  string namespace = 2;
+  string ifname = 3;
+}
+
+message DetachInterfaceRequest {
+  string network = 1;
+  string namespace = 2;
+  string ifname = 3;
+  Cursor expected = 4;
+}
+
+// Which network has claimed an interface.
+//
+// One of the two questions whose answer is a network, so it names
+// none. A caller whose scope does not reach the answer is refused
+// exactly as it would be for an interface no network has claimed,
+// because the difference between those two answers is the leak.
+message InterfaceOwnerRequest {
+  string namespace = 1;
+  string ifname = 2;
+}
+
+message ListAddressRangesRequest {
+  string network = 1;
+}
+
+message GetAddressRangeRequest {
+  string network = 1;
+  string name = 2;
+}
+
+message CreateAddressRangeRequest {
+  string network = 1;
+  string name = 2;
+  fixed32 first = 3;
+  fixed32 last = 4;
+}
+
+message UpdateAddressRangeRequest {
+  string network = 1;
+  string name = 2;
+  Cursor expected = 3;
+  fixed32 first = 4;
+  fixed32 last = 5;
+}
+
+message DeleteAddressRangeRequest {
+  string network = 1;
+  string name = 2;
+  Cursor expected = 3;
+}
+
+message ListBindingsRequest {
+  string network = 1;
+}
+
+message GetBindingRequest {
+  string network = 1;
+  Selector selector = 2;
+}
+
+// Configure a network's answer for one client, and be told what stood
+// in the way if anything did.
+//
+// This is the path a consumer that chooses its own addresses wants and
+// has never had: the answer either confirms the binding or reports the
+// lease that holds the address, named, and the instruction below takes
+// that lease in the same operation. The two together remove the repair
+// of killing a server and deleting its lease file, because the
+// condition that repair existed for is refused at the point of writing
+// instead of discovered later by parsing a file.
+message CreateBindingRequest {
+  string network = 1;
+  Selector selector = 2;
+  fixed32 address = 3;
+  optional string hostname = 4;
+
+  // Take the lease that holds this address away from its holder as
+  // part of writing the binding, if that lease is still the one
+  // carrying this id.
+  //
+  // The id rather than the lease's last position, because the id
+  // changes when and only when the address changes holder: a renewal
+  // in between does not invalidate the instruction and a reassignment
+  // does, which is exactly the distinction an operator taking an
+  // address from a named client cares about. Absent means a lease in
+  // the way is a conflict to report rather than one to take.
+  optional Cursor revoke_lease = 5;
+}
+
+message UpdateBindingRequest {
+  string network = 1;
+
+  // The selector cannot be changed, being the binding's identity: a
+  // binding whose selector moved is a different binding, and a
+  // consumer watching has to be told that one resource went away and
+  // another arrived rather than that one changed shape.
+  Selector selector = 2;
+
+  Cursor expected = 3;
+  fixed32 address = 4;
+  optional string hostname = 5;
+}
+
+message DeleteBindingRequest {
+  string network = 1;
+  Selector selector = 2;
+  Cursor expected = 3;
+}
+
+// Which binding applies to a client presenting this identity, in this
+// network.
+//
+// The answer names the selector that matched, that being the binding's
+// identity, so an operator who configured one reservation and is told
+// another matched has found a precedence problem before a user does.
+message LookupBindingRequest {
+  string network = 1;
+  ClientIdentity identity = 2;
+}
+
+// The same question, asked the way a packet arrives: an interface
+// rather than a network. The other of the two questions whose answer
+// is a network, and scoped the same way.
+message LookupBindingOnInterfaceRequest {
+  string namespace = 1;
+  string ifname = 2;
+  ClientIdentity identity = 3;
+}
+
+// What the daemon would answer this client on this interface, without
+// a packet being sent.
+//
+// The most valuable diagnostic here, because it converts the failure
+// this whole project is arranged against -- a silently wrong answer,
+// noticed hours later inside somebody's guest -- into a question an
+// operator or a test can ask directly. It is cheap because it is not a
+// second implementation of anything: it is the front-end's own path
+// with the packet replaced by its parameters.
+message ExplainRequest {
+  string namespace = 1;
+  string ifname = 2;
+  ClientIdentity identity = 3;
+}
+
+message ListLeasesRequest {
+  string network = 1;
+}
+
+message GetLeaseRequest {
+  string network = 1;
+  fixed32 address = 2;
+}
+
+// What this client holds in this network.
+//
+// A query of its own rather than a filter a caller applies to a
+// listing, because this is the question the existing consumer cannot
+// ask today and the reason it reads a file instead.
+message LeasesHeldByRequest {
+  string network = 1;
+  ClientIdentity identity = 2;
+}
+
+// Take a lease away.
+//
+// The only write to a lease on this wire. Derived state is not
+// writable: a lease is produced by the daemon answering a client, so a
+// caller may read one, watch one and revoke one, and cannot invent
+// one. That is what keeps the store the single source of truth rather
+// than one of two.
+message RevokeLeaseRequest {
+  string network = 1;
+  fixed32 address = 2;
+  Cursor expected = 3;
+}
+
+message DigestRequest {
+  string network = 1;
+}
+
+// What the daemon says about itself. No fields: the answer is the
+// whole of it, and a diagnostics call a caller has to configure is one
+// whose answer depends on the asking.
+message DiagnosticsRequest {}
+
+message MintTokenRequest {
+  string name = 1;
+
+  // What the new credential may reach and do. Both are refused if they
+  // exceed what the caller holds itself: a credential that could mint
+  // a wider one is the whole boundary defeated in one call.
+  Scope scope = 2;
+  repeated Capability capabilities = 3;
+
+  // 4-7: held for the limits a credential may carry when it is minted
+  // -- an expiry being the obvious one.
+}
+
+message DeleteTokenRequest {
+  string id = 1;
+}
+
+// Every credential inside the caller's own scope.
+//
+// Filtered rather than refused, and filtered by the store: a listing
+// that showed a credential scoped to a network the caller may not
+// reach would say that the network exists, which is the same class of
+// leak as answering a read outside a scope.
+message ListTokensRequest {}
+
+// Replace the store's epoch.
+//
+// The most consequential write an operator can make: every consumer
+// holding a position is told to start again. It is the remedy for a
+// store restored from a file-level backup, which brings its epoch back
+// with it along with a sequence counter wound back to the backup --
+// so every position a consumer remembers is one the store may issue
+// again, which is the one case the epoch cannot catch by itself.
+// Minting *is* "everybody resync", expressed as data rather than as an
+// instruction nobody can enforce.
+message MintEpochRequest {}
+
+// Watch a scope, and be told what changes in it.
+//
+// Terminal: nothing follows this on the connection but the stream.
+message WatchRequest {
+  // Which networks. A watch with no scope is refused rather than
+  // treated as a watch over everything.
+  Scope scope = 1;
+
+  // Which kinds of resource. Empty is refused for the same reason an
+  // empty scope is, and a kind this daemon does not know is refused
+  // rather than dropped.
+  repeated ResourceKind kinds = 2;
+
+  // Where to carry on from. Absent means a new consumer, which gets a
+  // snapshot of its whole scope read at one position, an in-sync
+  // marker carrying that position, and then the stream from exactly
+  // it. Present, it is answered with a resume or with a resync naming
+  // which of the three things was wrong with it.
+  optional Cursor after = 3;
+
+  // 4-9: held for what a consumer may come to ask of a stream -- a
+  // filter narrower than a kind, and a buffer size it would rather
+  // choose than inherit.
+}
+
+// One request on a connection.
+//
+// The numbers are grouped by resource, with a gap after each group, so
+// that an operation added to one does not take a number beside
+// another's. The capability each one needs is decided in exactly one
+// exhaustive place in the server: an operation added here without a
+// decision about who may call it does not compile.
+message Request {
+  oneof kind {
+    // Networks. 5-7 held for the operations a configured network
+    // grows -- setting its forwarders, and reading them back.
+    ListNetworksRequest list_networks = 1;
+    GetNetworkRequest get_network = 2;
+    CreateNetworkRequest create_network = 3;
+    DeleteNetworkRequest delete_network = 4;
+
+    // Attachments. 13-15 held for the questions a datapath asks about
+    // an interface it is about to answer on.
+    ListAttachmentsRequest list_attachments = 8;
+    GetAttachmentRequest get_attachment = 9;
+    AttachInterfaceRequest attach_interface = 10;
+    DetachInterfaceRequest detach_interface = 11;
+    InterfaceOwnerRequest interface_owner = 12;
+
+    // Address ranges. 21-23 held for the IPv6 half, which is a
+    // different shape and so a different operation rather than a
+    // reinterpretation of these.
+    ListAddressRangesRequest list_address_ranges = 16;
+    GetAddressRangeRequest get_address_range = 17;
+    CreateAddressRangeRequest create_address_range = 18;
+    UpdateAddressRangeRequest update_address_range = 19;
+    DeleteAddressRangeRequest delete_address_range = 20;
+
+    // Bindings, and the two lookups over them. 31-35 held for the
+    // option sets and the content a binding will come to carry, which
+    // are resources of their own and not fields on this one.
+    ListBindingsRequest list_bindings = 24;
+    GetBindingRequest get_binding = 25;
+    CreateBindingRequest create_binding = 26;
+    UpdateBindingRequest update_binding = 27;
+    DeleteBindingRequest delete_binding = 28;
+    LookupBindingRequest lookup_binding = 29;
+    LookupBindingOnInterfaceRequest lookup_binding_on_interface = 30;
+
+    // Leases, read and revoked and never created. 40-43 held for the
+    // IPv6 half's address associations.
+    ListLeasesRequest list_leases = 36;
+    GetLeaseRequest get_lease = 37;
+    LeasesHeldByRequest leases_held_by = 38;
+    RevokeLeaseRequest revoke_lease = 39;
+
+    // Diagnostics. 47-49 held for the questions a running daemon will
+    // be asked that it cannot answer yet.
+    DigestRequest digest = 44;
+    ExplainRequest explain = 45;
+    DiagnosticsRequest diagnostics = 46;
+
+    // The operator's own operations, which are about the store rather
+    // than about any network in it. 54-59 held for the rest of them.
+    MintTokenRequest mint_token = 50;
+    DeleteTokenRequest delete_token = 51;
+    ListTokensRequest list_tokens = 52;
+    MintEpochRequest mint_epoch = 53;
+
+    // The stream. 61 onwards is held for the resources a later phase
+    // designs: zones and records, and the content blobs whose reading
+    // is a capability of its own.
+    WatchRequest watch = 60;
+  }
+}
+
+// ---------------------------------------------------------------------
+// Responses.
+// ---------------------------------------------------------------------
+
+// What a write confirms.
+//
+// Empty of fields: the position it was assigned is in the envelope,
+// where every answer's position is, and there is nothing else to say.
+// A message rather than an unset answer, because an answer
+// distinguished by a field nobody set is one a consumer cannot tell
+// from a response its build did not understand.
+message Confirmation {}
+
+// The end of a collection, which is how a caller knows it has the
+// whole of one rather than as much of one as arrived before something
+// went wrong.
+message CollectionEnd {
+  // How many items preceded this marker, as a check a consumer can
+  // make cheaply against what it kept.
+  uint64 count = 1;
+}
+
+// One answer on a connection.
+//
+// The position and the network travel in the envelope rather than in
+// each answer, which is what makes "every answer says what it was true
+// of, and when" a property of the shape instead of a rule each handler
+// has to remember. A consumer that asked about one network and is
+// handed a body naming another has caught a bug in the daemon, in its
+// own client, or in something between them -- and the position lets a
+// consumer that is also watching refuse to apply a read older than its
+// streamed state, which is the race that otherwise reverts a correct
+// view to a stale one.
+message Response {
+  // Where this answer sits in the store's order: the position it was
+  // read at, or the position the write it confirms was assigned.
+  // Absent on a refusal, which is not a position in anything.
+  optional Cursor position = 1;
+
+  // The network this answer is about. Absent for an answer that is
+  // about the store rather than about a network, and for a refusal,
+  // which must not name a network to a caller who may not see it.
+  optional string network = 2;
+
+  oneof answer {
+    Refusal refusal = 3;
+    Confirmation confirmation = 4;
+    CollectionEnd collection_end = 5;
+    Resource resource = 6;
+    Explanation explanation = 7;
+    Digest digest = 8;
+    Diagnostics diagnostics = 9;
+    MintedToken minted_token = 10;
+    Token token = 11;
+    MintedEpoch minted_epoch = 12;
+
+    // The stream. Everything after the first of these on a connection
+    // is another of these.
+    WatchEvent event = 13;
+
+    // 14-23: held for the answers a later resource needs that are not
+    // a Resource -- a zone's transfer, and the bytes of a content
+    // blob.
+  }
+}
+
+// ---------------------------------------------------------------------
+// The watch stream.
+//
+// Everything about this is about what happens when a consumer has been
+// away, because that is where a push interface quietly becomes wrong.
+// A consumer that resumes and silently misses the event in which an
+// address changed holds a wrong answer forever, and nothing will tell
+// it. So a gap is never silent: it is a resync, named, in band as data
+// on the stream rather than as a connection error, because a
+// connection error is the thing every client retries blindly and that
+// retry is what turns a gap into permanent divergence.
+// ---------------------------------------------------------------------
+
+// Whether an event describes a resource as it currently stands or a
+// change that has just happened.
+//
+// A snapshot's events say "this exists" and a stream's say "this
+// changed", and the difference matters to a consumer deciding whether
+// to log something an operator will read.
+enum EventOrigin {
+  EVENT_ORIGIN_UNSPECIFIED = 0;
+  EVENT_ORIGIN_SNAPSHOT = 1;
+  EVENT_ORIGIN_CHANGE = 2;
+}
+
+// One resource, as it stands after the change being reported.
+//
+// The whole post-state rather than a delta, which is what makes
+// applying an event idempotent and so makes at-least-once delivery
+// enough: exactly-once delivery is not on offer from anything, and
+// designing for it is how a system acquires a defect it cannot
+// reproduce.
+message ResourceEvent {
+  Cursor cursor = 1;
+
+  // The network, always, including on a stream watching only one. A
+  // handler that learned to infer it from the subscription is a
+  // handler that will be wrong the day somebody widens the
+  // subscription, and the cost of repeating it is a few bytes.
+  string network = 2;
+
+  ResourceKind kind = 3;
+
+  // The resource's identity within its network, as its own kind
+  // renders it: a name, a namespace and interface, a selector, or an
+  // address.
+  string resource_id = 4;
+
+  EventOrigin origin = 5;
+
+  // The resource as it now stands, or absent if it is gone -- a
+  // deletion being the same shape with no state, that being the
+  // post-state of something removed.
+  Resource state = 6;
+
+  // When the change was recorded. Absent for a snapshot's events: a
+  // resource row records the position it was last written at and not
+  // the instant, and a snapshot is a statement about now rather than
+  // about when each resource last changed. A consumer ordering events
+  // uses the position, which both kinds carry.
+  optional int64 recorded_at = 7;
+
+  // Who made the change, as recorded. Present on both kinds, unlike
+  // the instant, and not redundant with the state: a deletion has no
+  // state, so this is the only place a consumer can learn who removed
+  // something.
+  string actor = 8;
+
+  // 9-15: held for what an event may come to carry about itself -- the
+  // request that caused it, for a consumer correlating its own writes
+  // with the stream.
+}
+
+// The consumer now holds the whole of its scope, at this position.
+//
+// Not a nicety. Without it a consumer cannot tell "I have seen the
+// whole world" from "I have seen some of it", so it cannot safely do
+// the one thing it most wants to do after connecting, which is to
+// delete local state for resources the daemon did not mention.
+message InSync {
+  Cursor cursor = 1;
+}
+
+// Why a presented position could not be resumed from.
+//
+// Three values and not one message, in the store and here both. A
+// consumer logs them differently and an operator reads them
+// differently: an epoch that changed is a different store, an evicted
+// position is a consumer that was away too long, and a position never
+// issued is a store that has gone backwards -- which is the only one
+// of the three that means somebody should go and look at the daemon.
+enum ResyncReason {
+  RESYNC_REASON_UNSPECIFIED = 0;
+  RESYNC_REASON_EPOCH_CHANGED = 1;
+  RESYNC_REASON_EVICTED = 2;
+  RESYNC_REASON_NEVER_ISSUED = 3;
+}
+
+// The stream cannot carry on from where the consumer was, so what
+// follows is a snapshot, an in-sync marker, and the stream from there.
+//
+// A consumer that treats this as fatal is a correct consumer; one that
+// silently continues cannot exist, because this arrives as data it has
+// to parse in order to keep reading.
+message Resync {
+  ResyncReason reason = 1;
+
+  // What the consumer presented.
+  Cursor presented = 2;
+
+  // For EVICTED: the highest position whose event has been truncated.
+  // Everything at or before it is gone for good.
+  optional Cursor evicted_through = 3;
+
+  // For EPOCH_CHANGED: the epoch this store issues positions in. What
+  // was presented is in the position above, which carries its own.
+  optional string store_epoch = 4;
+
+  // For NEVER_ISSUED: the last position this store has issued, which
+  // is what makes a store that has gone backwards legible rather than
+  // merely refused.
+  optional Cursor latest = 5;
+}
+
+// An idle stream, saying so, and carrying the position the store has
+// reached.
+//
+// Two reasons, and the second is the one that is not obvious. A
+// consumer can tell "nothing has happened" from "my connection is a
+// black hole", which in a system whose failures are silent is worth
+// the bytes. And the position lets a consumer advance its resume point
+// during a quiet period, so a stream idle for hours still resumes --
+// without it, a quiet network is the case most likely to fall out of
+// the retained history.
+message Heartbeat {
+  Cursor cursor = 1;
+}
+
+// Why the daemon is about to close this stream.
+enum DisconnectReason {
+  DISCONNECT_REASON_UNSPECIFIED = 0;
+
+  // The consumer fell behind the buffer this daemon holds for it.
+  // Disconnection rather than dropping events: these carry
+  // authoritative state, so a dropped lease event leaves a consumer
+  // holding an address that has moved, and a count of how many
+  // unspecified things were dropped gives it no way back.
+  // Disconnection is kinder, because it is the one failure every
+  // client already handles and the position makes the recovery exact.
+  DISCONNECT_REASON_LAGGED = 1;
+
+  // The daemon is shutting down.
+  DISCONNECT_REASON_SHUTTING_DOWN = 2;
+}
+
+// The last event on a stream.
+//
+// Sent rather than simply closing the socket, because a closed socket
+// is indistinguishable from a network that went away, and the two want
+// different behaviour from a consumer.
+message Disconnecting {
+  DisconnectReason reason = 1;
+  string detail = 2;
+
+  // The position the consumer has been delivered up to, which is where
+  // it resumes from. Absent only where nothing was delivered.
+  optional Cursor cursor = 3;
+}
+
+// One event on a watch stream.
+message WatchEvent {
+  oneof event {
+    ResourceEvent change = 1;
+    InSync in_sync = 2;
+    Resync resync = 3;
+    Heartbeat heartbeat = 4;
+    Disconnecting disconnecting = 5;
+  }
+
+  // 6-11: held for what a stream may come to carry besides events
+  // about resources -- a mark saying the daemon's configuration
+  // changed under it being the candidate.
+}

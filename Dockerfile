@@ -33,6 +33,27 @@ RUN rustup component add rustfmt clippy
 # fresh dependency tree at image build time.
 RUN cargo install --locked --root /usr/local cargo-deny
 
+# The protobuf compiler, which the control plane's build script calls
+# to turn its schema into Rust. It is installed here, when the image
+# is built, because this is the one place in this repository allowed
+# to reach the network: every compile target runs with --network none
+# and against a read-only cargo cache, so a build script that had to
+# fetch a compiler would fail there and should.
+#
+# The distribution's package rather than a release downloaded from
+# upstream: an apt package is signed, pinned by the base image's
+# suite, and reproducible without this file holding a checksum that
+# somebody has to remember to bump. What it costs is that the protobuf
+# version is the distribution's choice, which is acceptable for a
+# schema using nothing newer than proto3.
+#
+# --no-install-recommends keeps the documentation and the development
+# headers out, and the apt lists go afterwards so they are not carried
+# in the layer.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
 # A writable HOME for the build user. Containers run as the invoking
 # user's uid so that target/ and Cargo.lock come out owned by them,
 # and that uid does not exist in /etc/passwd here, so it gets no home
