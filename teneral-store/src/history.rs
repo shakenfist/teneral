@@ -435,6 +435,11 @@ impl Retention {
     /// a consumer: the resume path is best-effort by construction, and
     /// resync is the normal answer rather than the error path, which is
     /// what makes these numbers safe to change later.
+    /// A deployment sets its own, and sets the age bound tighter than
+    /// this: the daemon's flag defaults to six hours, which bounds the
+    /// log of a quiet store and means the resync path is reached
+    /// outside a test suite. So this is the number a library caller
+    /// gets by asking for none, not the number a running teneral uses.
     pub const DEFAULT: Retention = Retention {
         events: 50_000,
         seconds: 7 * 24 * 60 * 60,

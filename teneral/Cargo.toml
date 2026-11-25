@@ -22,6 +22,54 @@ publish = false
 [lints]
 workspace = true
 
+[dependencies]
+# The control plane: the listener the daemon serves and the client
+# the subcommands speak through. Its path and the reason it carries no
+# version requirement are in the workspace manifest.
+teneral-api = { workspace = true }
+
+# The store the daemon opens. The daemon names it directly, rather
+# than reaching it through the control plane, because opening it with
+# the operator's retention is the one thing that happens before any
+# listener exists.
+teneral-store = { workspace = true }
+
+# The command line, for the daemon's flags and the client's
+# subcommands.
+#
+# `derive` is the point: a flag is a field with a default and a doc
+# comment, and `--help` is generated from them, which is what makes
+# "every flag is listed with its default" a property of the code
+# rather than of somebody remembering to update a help string. There
+# is no configuration file and will not be one, so this is the whole
+# of how the daemon is configured and its help text is the reference.
+#
+# Defaults are off and the rest is chosen: `std` is required, `help`
+# and `usage` are what `--help` and a usage error print, and
+# `error-context` is what lets a rejected value say which flag it was
+# given to. Deliberately absent are `color` and `suggestions`, which
+# pull in terminal-colour crates and a string-distance crate to make
+# an error message friendlier on a daemon whose output is read in a
+# journal, and `env`, because a credential is the one value this
+# program reads from the environment and it does so by hand, in one
+# place, so that a flag cannot quietly start taking one.
+clap = { version = "4.6.10", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+
+# The runtime, which the binary owns: the libraries below it pick no
+# flavour, so the choice is made here.
+#
+#   `rt-multi-thread`  connections are tasks and the daemon serves
+#                      many of them; the store does its blocking on
+#                      threads of its own, so this is not a pool
+#                      anything blocks.
+#   `signal`           SIGINT and SIGTERM, which are how a daemon is
+#                      asked to stop, by an operator and by systemd
+#                      respectively.
+#   `macros`           `select!`, to wait for whichever arrives first.
+#   `time`             the bound on how long shutdown lets open
+#                      streams finish before giving up on them.
+tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-thread", "signal", "macros", "time"] }
+
 # Only the differential rig reads these. `toml` is the format cargo
 # itself reads, which is the reason a case's metadata is written in
 # it: the alternative was a bespoke key-value file and a hand-written

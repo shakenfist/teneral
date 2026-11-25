@@ -759,7 +759,7 @@ There is no configuration file and will not be one
 | `--store` | `/var/lib/teneral/store.sqlite` | the one piece of durable state |
 | `--socket` | `/run/teneral/teneral.sock` | the one listener, mode 0660; the group is the deployment's, and admin is a capability rather than a second path |
 | `--history-events` | 50000 | the operative bound; a fleet at ten events a second resumes after eighty minutes away |
-| `--history-age` | 21600 | six hours; a consumer down since yesterday resyncs, which is the behaviour the design wants rather than tolerates |
+| `--history-age` | 21600 | six hours, and a ceiling rather than a resume window: the count above is the operative bound. Tighter than the store's own default of a week, which bounds the log of a quiet store and means a quiet deployment reaches the resync path at all. Evicting history a consumer could have resumed from is a cost rather than a goal, which an earlier draft of this row had backwards |
 | `--max-live-views` | 64 | decision 10 |
 | `--max-connections` | 256 | a connection is a task; this is the bound that stops an accept loop becoming unbounded memory |
 | `--heartbeat-seconds` | 15 | decision 8 |
@@ -1130,3 +1130,14 @@ work's disposition table both said it was unreviewed and
 unmerged, and now say otherwise. The guard phase 5 owes is
 unchanged, because 0.15.0 is still the only release and still
 carries the defect.
+
+**4f chose where the daemon logs, and phase 7 revisits it.** The
+daemon writes one line per message to standard error and uses no
+logging crate. A systemd unit captures standard error into the
+journal, which supplies the timestamps and the filtering, and which
+logging framework to carry is a packaging decision rather than a
+reason to add a dependency to a daemon that can already be run and
+read. Phase 7 owns packaging and so owns the revisit. The daemon is
+the `serve` subcommand rather than the bare binary, because the
+client subcommands share the binary and a bare invocation that
+started a daemon would be one typo from a second one.
