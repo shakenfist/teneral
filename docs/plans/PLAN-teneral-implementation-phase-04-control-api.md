@@ -31,8 +31,9 @@ where a defect is silent and cross-network.
   reader that falls behind.
 - Authentication: the socket's mode and its peer as the outer
   gate, bearer tokens that narrow and never widen, token minting
-  over the operator's socket, and a token recorded against every
-  write.
+  by a peer the socket's mode already trusts, an `admin`
+  capability for the operator's operations, and a token recorded
+  against every write.
 - The diagnostics `docs/api-design.md:748-805` asks for: the
   explain query, the per-network digest, the scope and cursor on
   every answer, the selector that matched, and the counter that
@@ -375,8 +376,9 @@ a bespoke header.
   `AGENTS.md` says. A length over the bound is refused and the
   connection closed, without reading the body.
 - **A connection opens with `Hello` and is answered with
-  `Welcome`.** `Hello` carries the protocol version and, on the
-  client socket, the token secret. `Welcome` carries the store's
+  `Welcome`.** `Hello` carries the protocol version and the
+  token secret, which only the peer the daemon runs as may omit
+  (decision 4). `Welcome` carries the store's
   epoch, its schema version, the current cursor and the effective
   scope the caller has been granted. A version this daemon does
   not speak is refused naming both versions, which is what makes
@@ -402,37 +404,75 @@ a bespoke header.
   watch snapshot share one code path, which is the path most
   worth having only one of.
 
-### 4. Two sockets, because two trust models are not one listener
+### 4. One socket, and admin is a capability on a token
 
-`docs/api-design.md:846-854` requires that a header-trusting
-listener and a token-trusting listener be separate, and that the
-daemon refuse to start if it cannot tell them apart. Under
-decision 1 there are no headers, so the rule is restated in the
-form the ruling leaves:
+**Reversed by the operator on 2026-11-25, in the back brief.**
+This decision first specified two sockets -- an admin one at mode
+`0600` whose peer was its credential, and a client one at `0660`
+where a token was required -- restating
+`docs/api-design.md:846-854`, which requires that two trust models
+not share a listener and that the daemon refuse to start if it
+cannot tell them apart. The ruling is one socket, with the
+operator's operations gated by a capability on the token rather
+than by a file mode. What follows is that arrangement, including
+what it gives up, because a reversal recorded without its cost is
+a reversal nobody can revisit.
 
-- **The admin socket**, mode `0600`, owner only. Its peer is its
-  credential, read from the kernel rather than claimed, and it
-  takes no token. It is the only socket that mints and deletes
-  tokens, and the only one that mints an epoch.
-- **The client socket**, mode `0660`, for programmatic clients. A
-  token is required, verified once at `Hello`, and **a token
-  narrows and never widens**: it cannot reach a network outside
-  its scope, and there is no token that grants an admin
-  operation. An admin operation asked for here is refused as not
-  available on this socket, which is a different refusal from
-  "you may not", because the two send the caller to different
-  places.
-- **The daemon refuses to start** if the two paths name the same
-  file, if either path is already being served by something that
-  answers a `Hello`, or if it cannot set the mode it intends. A
-  stale socket file with nothing behind it is removed and
-  recreated; one with a live daemon behind it is a reason to
+- **One socket**, `--socket`, mode `0660`. The mode is what
+  decides who may connect at all, and the group is the
+  deployment's lever: setting group ownership needs a privilege
+  the daemon should not spend, so a systemd unit with
+  `RuntimeDirectory=` and `Group=` is where phase 7 puts it.
+- **A token is required, verified once at `Hello`**, with exactly
+  one exception, and the exception is not a convenience. A peer
+  whose uid is the one the daemon runs as may act without a
+  token, as the owning peer, read from the kernel rather than
+  claimed. `docs/api-design.md:871-875` requires that: the first
+  token is minted over the socket by a peer the socket's
+  permissions already trust, and there is no initial password, no
+  token file and no first-run secret to leak. Remove that
+  exception and the first token has to come from a secret printed
+  at startup or written to disk, which is the one thing that
+  paragraph rules out.
+- **Four capabilities, and `admin` is one of them**: read, write,
+  watch, admin. Minting and deleting tokens, listing them, and
+  minting an epoch each require `admin` or the owning peer.
+  Decision 7 carries the vocabulary.
+- **A token narrows and never widens, and that now has a second
+  half.** The first half is scope: a token cannot reach a network
+  outside its own. The second half only exists because admin is a
+  capability -- **a minted token's scope and capabilities are a
+  subset of its minter's.** Without that rule, a token with
+  `admin` on one network could mint itself an all-networks token,
+  which is the whole boundary defeated in one call. The owning
+  peer has no scope, so it may mint anything; every token may
+  mint only downwards.
+- **The authorisation decision is not defaultable.** Every
+  request kind maps to the capability it requires through one
+  exhaustive `match` in one function that every handler calls, so
+  an operation added without a decision about its capability does
+  not compile. This is the "a wildcard is typed, never
+  defaulted" rule (`docs/api-design.md:198-204`) applied to
+  authorisation, and it is the mitigation for what the ruling
+  gives up.
+- **The daemon refuses to start** if something already answers a
+  `Hello` on its socket path, or if it cannot set the mode it
+  intends. A stale socket file with nothing behind it is removed
+  and recreated; one with a live daemon behind it is a reason to
   stop, not to take over.
 
-Group ownership of the client socket is the deployment's, not the
-daemon's: setting it needs a privilege the daemon should not
-spend, and a systemd unit with `RuntimeDirectory=` and `Group=`
-is where phase 7 will put it.
+**What this gives up, stated plainly.** The strongest boundary in
+the design stops being a thing the kernel enforces and becomes a
+check in the code: with two sockets, a client process could not
+reach the minting path at all, because the filesystem would not
+let it open the file; with one, it can reach the path and is
+turned away by a comparison. A defect in that comparison is a
+token that can mint tokens. Three things hold it: the exhaustive
+match above, the subset rule, and a test per admin operation
+asserting refusal for a token without the capability -- all three
+in the definition of done. The trade bought for it is real: one
+path to deploy, one listener to document, and no second socket
+whose mode a packaging step can get wrong.
 
 ### 5. One new crate, `teneral-api`, carrying server, client and schema
 
@@ -448,7 +488,7 @@ finding 10. The home IPAM is a separate product in a separate
 repository that links these libraries; what it needs is a client,
 and what phase 8 needs is a server it can mount in a process that
 also holds a datapath. The `teneral` binary becomes the thin
-thing: parse flags, open the store, serve the two sockets, shut
+thing: parse flags, open the store, serve the socket, shut
 down cleanly.
 
 The client owns the reconnect that the ruling took away: a
@@ -530,10 +570,18 @@ attack nobody can mount. Verification hashes the presented secret
 and looks the hash up, so the plaintext never reaches a
 comparison and the API layer never holds hashing logic.
 
-Capabilities are three: read, write, watch. The fourth that
-`docs/api-design.md:816-825` names -- reading content blobs --
-arrives with blobs in phase 10, and because capabilities are rows
-of `TEXT` that is an insert rather than a migration. Scope is
+Capabilities are four: read, write, watch and admin. The first
+three are `docs/api-design.md:816-825`'s; the fourth is decision
+4's, and exists because the operator's ruling made the operator's
+operations a capability rather than a second socket. The fifth
+that note names -- reading content blobs -- arrives with blobs in
+phase 10, and because capabilities are rows of `TEXT` that is an
+insert rather than a migration. Minting is subject to decision
+4's subset rule, which the store enforces rather than trusts the
+server to: `mint` refuses a scope or a capability set that its
+minter does not itself hold, because an authorisation rule
+checked only in the layer that calls it is one a second caller
+will skip. Scope is
 either a list of networks or the explicit all-networks form,
 carried as its own column, because a wildcard is typed and never
 defaulted.
@@ -663,9 +711,10 @@ network against the caller's scope, and **refuses without naming
 the network** when it is outside. Not "that interface belongs to
 `guest`, which you may not see" -- the refusal is the same one a
 caller gets for an interface no network has claimed, because the
-difference between those two answers is itself the leak. On the
-admin socket, whose peer the socket's mode already trusts, both
-answer in full.
+difference between those two answers is itself the leak. For the
+owning peer, and for a token whose scope is the explicit
+all-networks form, both answer in full -- there is no network
+outside the caller's scope for the answer to leak.
 
 This is the one place in the phase where the project's central
 failure mode arrives in the control plane rather than in the
@@ -681,8 +730,7 @@ There is no configuration file and will not be one
 | Flag | Default | Why that |
 |------|---------|----------|
 | `--store` | `/var/lib/teneral/store.sqlite` | the one piece of durable state |
-| `--admin-socket` | `/run/teneral/admin.sock` | operator operations, mode 0600 |
-| `--client-socket` | `/run/teneral/api.sock` | programmatic clients, mode 0660 |
+| `--socket` | `/run/teneral/teneral.sock` | the one listener, mode 0660; the group is the deployment's, and admin is a capability rather than a second path |
 | `--history-events` | 50000 | the operative bound; a fleet at ten events a second resumes after eighty minutes away |
 | `--history-age` | 21600 | six hours; a consumer down since yesterday resyncs, which is the behaviour the design wants rather than tolerates |
 | `--max-live-views` | 64 | decision 10 |
@@ -725,13 +773,13 @@ to redo, and every later step is generated from it.
 
 | Step | Effort | Model | Isolation | Brief for sub-agent |
 |------|--------|-------|-----------|---------------------|
-| 4a | high | opus | none | Tokens in the store, and write attribution. Read decisions 6, 7 and 13 and findings 5, 6 and 14 first. **Do the dependency gate before anything else**: add `sha2` to `teneral-store`, run `make lock` then `make deny`, and record the resolved versions in the manifest comment with the reason each dependency is there, as `teneral-store/Cargo.toml` does for its existing three. If `cargo deny` reports a licence this tree may not take, stop and report rather than adding an exception -- `exceptions = []` is a decision, not a default. Then: (1) migration `0006_tokens.sql` adding `tokens`, `token_networks` and `token_capabilities` as `STRICT` tables, with the all-networks form a column on `tokens` rather than a sentinel row, and the secret stored only as a SHA-256 hash; bump the schema version constant in `teneral-store/src/schema.rs`. (2) An `actor` column on the event log and a `written_by` column on every resource row, in the same migration, with the comment saying why it is kept on the resource as well as in the log -- the log is evicted and the question outlives it. (3) `Actor` in a new module: a token id, a peer uid, or a named part of the daemon, rendered to one `TEXT` value by a method, never parsed back. (4) An `actor: &Actor` parameter on every mutating method of `BindingStore` and every call site, stamped into both columns in the same statement as the write. (5) A `TokenStore` trait in `teneral-store/src/tokens.rs` with mint, delete, list and authenticate, and the doc comment explaining why tokens are not `BindingStore` resources and why their mutations are not events -- decision 7 has the argument; do not restate it as fact without the reasoning. (6) Add a sentence to `scripts/check-store-trait.sh`'s header naming the traits it governs and why `TokenStore` is outside them. Tests: a minted token's secret verifies once and its hash is what the table holds; a token scoped to one network does not authenticate into another's; every write records its actor and the actor survives on the resource after its event is evicted. Run `scripts/check-store-trait.sh` and `make test`. Commit subject: "Record who made each write, and mint tokens." |
+| 4a | high | opus | none | Tokens in the store, and write attribution. Read decisions 6, 7 and 13 and findings 5, 6 and 14 first. **Do the dependency gate before anything else**: add `sha2` to `teneral-store`, run `make lock` then `make deny`, and record the resolved versions in the manifest comment with the reason each dependency is there, as `teneral-store/Cargo.toml` does for its existing three. If `cargo deny` reports a licence this tree may not take, stop and report rather than adding an exception -- `exceptions = []` is a decision, not a default. Then: (1) migration `0006_tokens.sql` adding `tokens`, `token_networks` and `token_capabilities` as `STRICT` tables, with the all-networks form a column on `tokens` rather than a sentinel row, and the secret stored only as a SHA-256 hash; bump the schema version constant in `teneral-store/src/schema.rs`. (2) An `actor` column on the event log and a `written_by` column on every resource row, in the same migration, with the comment saying why it is kept on the resource as well as in the log -- the log is evicted and the question outlives it. (3) `Actor` in a new module: a token id, a peer uid, or a named part of the daemon, rendered to one `TEXT` value by a method, never parsed back. (4) An `actor: &Actor` parameter on every mutating method of `BindingStore` and every call site, stamped into both columns in the same statement as the write. (5) A `TokenStore` trait in `teneral-store/src/tokens.rs` with mint, delete, list and authenticate. Four capabilities -- read, write, watch, admin -- because the operator reversed decision 4 in the back brief and admin is now a capability rather than a second socket, and `mint` enforces decision 4's subset rule itself: a scope or a capability its minter does not hold is refused in the store rather than merely checked by the server, because an authorisation rule checked only in the caller is one a second caller will skip. Its doc comment explains why tokens are not `BindingStore` resources and why their mutations are not events -- decision 7 has the argument; do not restate it as fact without the reasoning. (6) Add a sentence to `scripts/check-store-trait.sh`'s header naming the traits it governs and why `TokenStore` is outside them. Tests: a minted token's secret verifies once and its hash is what the table holds; a token scoped to one network does not authenticate into another's; a token holding `admin` on one network cannot mint a token scoped to every network, nor one carrying a capability it lacks; every write records its actor and the actor survives on the resource after its event is evicted. Run `scripts/check-store-trait.sh` and `make test`. Commit subject: "Record who made each write, and mint tokens." |
 | 4b | high | opus | none | The three remaining debts the store owes the control plane. Read decisions 6, 8 and 9 and findings 3, 4 and 7. Four changes. (1) `epoch()` returns `Epoch` by value; the concrete store holds it behind a lock because minting replaces it. (2) `live_views()` moves from `SqliteStore`'s inherent impl (`teneral-store/src/sqlite.rs:320`) on to `BindingStore`, and is added to the enumerated store-global paragraph at `teneral-store/src/store.rs:84` that the gate script reads out of the trait's doc comment (`ReadHandle` has its own at `:471`) -- a name enumerated that is not a method, or a method that is not enumerated, both fail the gate, so check it rather than assuming. (3) `subscribe()` returning a `tokio::sync::watch::Receiver<Cursor>` that moves on every mutation, fed from wherever the writer assigns the position so that a receiver cannot see a cursor before the transaction that issued it has committed -- a notification that outran its own commit would send every stream to read a position that is not there yet. (4) `mint_epoch()` returning the first `Cursor` of the new order, updating the single `store_identity` row, and adding `mint` to the verb list at `scripts/check-store-trait.sh:155` in the same commit, because that script's header says a write whose verb is unknown gets only the weaker check. Tests, each with two networks where the store is read: a cursor taken before a mint is reported `EpochChanged` after it, naming both epochs; the sequence counter does not restart, so a position from the old order is not confusable with one from the new; `subscribe()` fires once per mutation and its value is readable by `history_everywhere` the instant it arrives; `live_views()` through `dyn BindingStore` agrees with the concrete count. Run `scripts/check-store-trait.sh` and `make test`. Commit subject: "Let the store be watched and its epoch minted." |
-| 4c | high | opus | none | The crate, the schema and the connection. Read decisions 1, 2, 3, 4 and 5 and findings 1, 12 and 15, and `docs/api-design.md:882-1038` for the transport the ruling overturned -- you are building the alternative that note argued against, so read its argument and do not reproduce its conclusion in a comment. **Dependency gate first**, as in 4a: add `teneral-api` to `members`, with `prost`, `prost-build` (build-dependency), `tokio` with the runtime features it needs, `serde` and `serde_json` for decision 11, and `clap` 4 derive in `teneral`; add `protobuf-compiler` to the `Dockerfile`; `make image`, `make lock`, `make deny`. The tokio feature rule in `AGENTS.md:53-65` is about `teneral-store`, which still may not have a runtime feature -- check that your change did not give it one through the workspace. Then: (1) `teneral-api/proto/teneral.v1.proto`, the whole resource and request vocabulary for the five resources that exist, the handshake, the watch events and the refusals, with no message for zones, records or blobs -- an empty message reserved for a resource phase 6 will design is a guess, and `EventKind` has five variants. Field numbering is permanent, so leave gaps where a resource will grow. (2) `build.rs` running `prost-build` into `OUT_DIR`; nothing generated is committed. (3) The `wire` module: length-delimited read and write with the 1 MiB bound checked against the prefix before the body is read, and a refusal rather than an allocation when it is exceeded. No `unwrap`, no slice indexing, no unchecked arithmetic on a length that came off a socket. (4) The two listeners, their modes, the peer credential read through `UnixStream::peer_cred`, the `Hello`/`Welcome` handshake with version negotiation, the token verified once per connection against `TokenStore::authenticate`, and the startup refusals in decision 4 -- same path twice, something already answering, a mode that cannot be set. (5) A refusal vocabulary: not available on this socket, outside your scope, no such resource, conflict with the holder named, too many views, unknown resource kind, version mismatch. Tests: a connection with no token on the client socket is refused; a token is refused on the admin socket rather than ignored; a length prefix over the bound closes the connection without allocating; two sockets at one path refuse to start; a `Hello` for version 2 is refused naming 1 and 2. **Stop here and report.** Do not implement a single resource operation: the schema is reviewed before 4d is briefed. Commit subject: "Put a protobuf schema on two Unix sockets." |
+| 4c | high | opus | none | The crate, the schema and the connection. Read decisions 1, 2, 3, 4 and 5 and findings 1, 12 and 15, and `docs/api-design.md:882-1038` for the transport the ruling overturned -- you are building the alternative that note argued against, so read its argument and do not reproduce its conclusion in a comment. **Dependency gate first**, as in 4a: add `teneral-api` to `members`, with `prost`, `prost-build` (build-dependency), `tokio` with the runtime features it needs, `serde` and `serde_json` for decision 11, and `clap` 4 derive in `teneral`; add `protobuf-compiler` to the `Dockerfile`; `make image`, `make lock`, `make deny`. The tokio feature rule in `AGENTS.md:53-65` is about `teneral-store`, which still may not have a runtime feature -- check that your change did not give it one through the workspace. Then: (1) `teneral-api/proto/teneral.v1.proto`, the whole resource and request vocabulary for the five resources that exist, the handshake, the watch events and the refusals, with no message for zones, records or blobs -- an empty message reserved for a resource phase 6 will design is a guess, and `EventKind` has five variants. Field numbering is permanent, so leave gaps where a resource will grow. (2) `build.rs` running `prost-build` into `OUT_DIR`; nothing generated is committed. (3) The `wire` module: length-delimited read and write with the 1 MiB bound checked against the prefix before the body is read, and a refusal rather than an allocation when it is exceeded. No `unwrap`, no slice indexing, no unchecked arithmetic on a length that came off a socket. (4) The one listener at mode 0660, the peer credential read through `UnixStream::peer_cred`, the `Hello`/`Welcome` handshake with version negotiation, the token verified once per connection against `TokenStore::authenticate`, the owning-peer exception that makes bootstrap possible, the single exhaustive request-kind-to-capability function every handler calls, and the startup refusals in decision 4 -- something already answering, a mode that cannot be set, a stale socket file removed rather than inherited. Decision 4 was reversed in the back brief, and this file holds the version that stands; do not build two sockets. (5) A refusal vocabulary: missing capability, outside your scope, no such resource, conflict with the holder named, too many views, unknown resource kind, version mismatch. Tests: a connection whose peer is not the daemon's own uid and which presents no token is refused; the owning peer is served without one; an admin operation is refused to a token without `admin`; a length prefix over the bound closes the connection without allocating; a live daemon on the path stops a second one; a `Hello` for version 2 is refused naming 1 and 2. **Stop here and report.** Do not implement a single resource operation: the schema is reviewed before 4d is briefed. Commit subject: "Put a protobuf schema on a Unix socket." |
 | 4d | high | opus | none | The resource operations. Read decisions 3, 11 and 12, `docs/api-design.md:236-440` for the resource model and every identity, `:411-500` for the three paths a consumer learns an address by, and `:718-775` for the diagnostics. Implement, over `dyn BindingStore`: reads and writes for networks, attachments and address ranges; bindings including the assert-and-be-told form that reports a conflict with the holder named and the variant that revokes the conflicting lease in one operation (`create_binding_revoking_lease`, `teneral-store/src/store.rs:324`); leases read and revoked but never created, because derived state is not writable; the lookup by selector and the lookup on an interface; `leases_held_by` as a first-class query rather than a filter over a list; the per-network digest; the explain query; and a diagnostics call carrying the epoch, the schema version, the current cursor, the live view count, the bound, and the cross-network counter that should always be zero. Every collection streams, ended by a marker (decision 3). Every response repeats the network it was true of and the cursor it was read at -- not because a caller cannot remember what it asked, but because a body naming another network is how a consumer catches a cache keyed by address instead of by `(network, address)`. Both store-global reads get the scope check in decision 12, refusing without naming the network. Use one converter per resource kind, written here and reused by 4e (decision 11). Tests: two networks holding the same address, every read and write asserted to answer from its own; a token scoped to one network refused on the other for each operation in turn, including the two store-global ones; a conflict names the holder; a revoke-in-one-operation leaves no state in which the address was taken and the binding not written. Commit subject: "Serve the store's resources over the socket." |
 | 4e | xhigh | opus | none | The watch primitive, and the view bound. The hardest step in the phase: a defect here is a consumer holding a wrong answer forever with nothing to tell it. Read `docs/api-design.md:531-747` in full -- it specifies this almost completely -- and decisions 8 and 10, and finding 2, which is the reason this step translates rather than invents: `History`'s four variants at `teneral-store/src/history.rs:276-345` are the wire's resume and three resync reasons. Build: (1) the pump, one task per daemon, waiting on `subscribe()`, reading `history_everywhere` once per movement, broadcasting on a channel of 1024. (2) The stream: subscribe to the broadcast **before** the snapshot or catch-up read, then discard any broadcast event at or below the last cursor delivered. Write the comment that says why that order and not the other, because the reverse order is the natural way to write it and leaves a gap. (3) A new client gets a snapshot of each network in its scope read on **one** read handle, so a multi-network scope is one consistent view rather than several, then an in-sync marker carrying that cursor, then the stream from exactly it. (4) A returning client gets resume or one of the three resyncs, each named, in band as data on the stream and never as a connection error. (5) A lagging receiver is disconnected with a final event; `RecvError::Lagged` is the trigger and nothing drops an event silently. (6) The heartbeat with the current cursor. (7) Unknown resource kinds rejected, not ignored. (8) The semaphore of `--max-live-views` permits around every `read()` in the crate, with the named refusal and a retry hint. Tests, all with two networks: a stream scoped to one network sees none of the other's events, including on the snapshot; a lease created and released while a consumer was away produces both events on resume, not neither; a cursor from before a mint resyncs with the epoch reason; an evicted cursor resyncs with the eviction reason and a position never issued with its own; no event is delivered twice and none is missing across the snapshot-to-stream join, asserted by a mutation that makes the comparison off by one and a test that catches it; the bound refuses the 65th view and the count returns to zero afterwards. Then run the `mutation-check` skill over the join and the dedupe comparison, and report the script's path and which test killed each mutant. Commit subject: "Deliver the watch stream and bound the views." |
-| 4f | medium | sonnet | none | The daemon, and the debugging client. Read decisions 5, 9 and 13. (1) `teneral/src/main.rs` becomes a daemon: `clap` 4 derive for the flags in decision 13's table, open the store with `SqliteStore::with_clock_and_retention` (`teneral-store/src/sqlite.rs:239`) using the retention flags, serve both sockets, and shut down on SIGINT and SIGTERM by stopping the accept loops, closing the streams with a final event, and dropping the store -- whose `Drop` joins its threads (`teneral-store/src/sqlite.rs:403`), so the order matters. Log the epoch, the schema version and the latest cursor at startup, for the reason decision 9 gives. (2) The client subcommands: get a resource, explain an identity on an interface, show the diagnostics, mint a token, mint an epoch, watch a scope and print events. Each is one call over `teneral-api`'s client and a printing of the response; none of them holds logic the server should hold. (3) `--help` names every flag and its default. Tests: the daemon refuses to start with both sockets at one path; it refuses a store path it cannot open rather than creating one silently in the wrong place; a round trip through the real client over a real socket in a temporary directory, with two networks, asserting each answer names its own network. No sweeper: phase 5 chooses that interval, and the master plan's *Future work* says why. Commit subject: "Make teneral a daemon that serves its sockets." |
-| 4g | medium | sonnet | none | Documentation and fold-back. This step writes no server code. (1) `docs/control-api.md`: the transport and its framing, the handshake, the two sockets and what each accepts, every operation with its scope rules, the watch's full contract including the three resync reasons, the token model and its capabilities, the epoch-mint operation and the restore procedure it belongs to, and the numbers in decision 13's table with what each one trades. Write it as a reference for somebody who has no plan in hand. (2) Correct finding 10 at both sources: `ARCHITECTURE.md:79-82` and `docs/api-design.md:102-112`, which say this repository's daemon serves the web interface, when open question 3's 2026-11-23 amendment put that binary in the home IPAM's own repository. Check `docs/api-design.md:1008-1017`, which leans on the same claim to uphold a recommendation that decision 1 has now overturned, and make both facts true at once rather than fixing one. (3) The ruling in `docs/api-design.md` was recorded by the planning commit at all four sites that state the recommendation; check that and do not record it twice. (4) `ARCHITECTURE.md`: the control plane exists, as a crate, with what it serves and what it does not. This is a shape change, so it belongs there. (5) `AGENTS.md`: only the conventions that changed -- three crates rather than two, the actor on every write, tokens narrow and never widen, the admin socket is the only path to minting, and the rule that a generated protobuf file is never committed. Nothing else; every line there costs context on every task. (6) The "two crates" sweep in all four places from finding 13: `Cargo.toml:2`, `AGENTS.md:9`, `docs/development.md:13`, `ARCHITECTURE.md:43`. (7) `docs/development.md`: `protobuf-compiler` in the image and what regenerates the schema. (8) `README.md` only if the pitch or the links changed -- a new crate is not a pitch change, a daemon that now does something may be. (9) `docs/provenance.md`: the one sentence in decision 14. (10) Fold back into the master plan: phase 4's row, open question 1 marked resolved with its date if the planning commit has not, and *Future work* entries for what this phase deferred -- the blob capability, the authenticated-identity-to-scope mapping, `update_binding_revoking_lease` with what this phase found, and the epoch-detection mechanism this phase declined with decision 9's reasoning. Commit subject: "Document the control API and close the phase." |
+| 4f | medium | sonnet | none | The daemon, and the debugging client. Read decisions 5, 9 and 13. (1) `teneral/src/main.rs` becomes a daemon: `clap` 4 derive for the flags in decision 13's table, open the store with `SqliteStore::with_clock_and_retention` (`teneral-store/src/sqlite.rs:239`) using the retention flags, serve the one socket at mode 0660, and shut down on SIGINT and SIGTERM by stopping the accept loops, closing the streams with a final event, and dropping the store -- whose `Drop` joins its threads (`teneral-store/src/sqlite.rs:403`), so the order matters. Log the epoch, the schema version and the latest cursor at startup, for the reason decision 9 gives. (2) The client subcommands: get a resource, explain an identity on an interface, show the diagnostics, mint a token, mint an epoch, watch a scope and print events. Each is one call over `teneral-api`'s client and a printing of the response; none of them holds logic the server should hold. (3) `--help` names every flag and its default. Tests: the daemon refuses to start when a live daemon already answers on its socket path, and removes a stale socket file rather than inheriting it; it refuses a store path it cannot open rather than creating one silently in the wrong place; a round trip through the real client over a real socket in a temporary directory, with two networks, asserting each answer names its own network. No sweeper: phase 5 chooses that interval, and the master plan's *Future work* says why. Commit subject: "Make teneral a daemon that serves its socket." |
+| 4g | medium | sonnet | none | Documentation and fold-back. This step writes no server code. (1) `docs/control-api.md`: the transport and its framing, the handshake, the one socket with its mode and the owning-peer exception, the four capabilities and which operation needs which, every operation with its scope rules, the watch's full contract including the three resync reasons, the token model and its capabilities, the epoch-mint operation and the restore procedure it belongs to, and the numbers in decision 13's table with what each one trades. Write it as a reference for somebody who has no plan in hand. (2) Correct finding 10 at both sources: `ARCHITECTURE.md:79-82` and `docs/api-design.md:102-112`, which say this repository's daemon serves the web interface, when open question 3's 2026-11-23 amendment put that binary in the home IPAM's own repository. Check `docs/api-design.md:1008-1017`, which leans on the same claim to uphold a recommendation that decision 1 has now overturned, and make both facts true at once rather than fixing one. (3) The ruling in `docs/api-design.md` was recorded by the planning commit at all four sites that state the recommendation; check that and do not record it twice. (4) `ARCHITECTURE.md`: the control plane exists, as a crate, with what it serves and what it does not. This is a shape change, so it belongs there. (5) `AGENTS.md`: only the conventions that changed -- three crates rather than two, the actor on every write, tokens narrow and never widen, minting needs the `admin` capability or the owning peer and a minted token cannot exceed its minter, and the rule that a generated protobuf file is never committed. Nothing else; every line there costs context on every task. (6) The "two crates" sweep in all four places from finding 13: `Cargo.toml:2`, `AGENTS.md:9`, `docs/development.md:13`, `ARCHITECTURE.md:43`. (7) `docs/development.md`: `protobuf-compiler` in the image and what regenerates the schema. (8) `README.md` only if the pitch or the links changed -- a new crate is not a pitch change, a daemon that now does something may be. (9) `docs/provenance.md`: the one sentence in decision 14. (10) Fold back into the master plan: phase 4's row, open question 1 marked resolved with its date if the planning commit has not, and *Future work* entries for what this phase deferred -- the blob capability, the authenticated-identity-to-scope mapping, `update_binding_revoking_lease` with what this phase found, and the epoch-detection mechanism this phase declined with decision 9's reasoning. Commit subject: "Document the control API and close the phase." |
 
 ## Risks and mitigations
 
@@ -859,29 +907,37 @@ rather than ticking it.
     and `live_views()` returns to zero afterwards.
 19. A length prefix over 1 MiB closes the connection without
     allocating the body.
-20. The daemon refuses to start with both sockets at one path,
-    and refuses a path something is already answering on.
-21. A streamed resource's message equals the message a read of
+20. The daemon refuses to start when something already answers
+    on its socket path, removes a stale socket file rather than
+    inheriting it, and creates the socket at mode 0660.
+21. Every admin operation is refused to a token without the
+    `admin` capability, a token cannot mint a scope or a
+    capability its minter lacks, and the request-kind-to-
+    capability function is exhaustive, so an operation added
+    without a capability does not compile. These three are what
+    stand in for the file mode the back brief's reversal
+    removed, which is why they are checked rather than assumed.
+22. A streamed resource's message equals the message a read of
     that resource returns, for all five kinds.
-22. `docs/control-api.md` exists and every operation in the
+23. `docs/control-api.md` exists and every operation in the
     `.proto` appears in it, checked by
     `scripts/check-api-docs.sh`, which fails when an operation is
     documented and absent or present and undocumented. The script
     is run both ways to prove it fails.
-23. No sentence in `README.md`, `ARCHITECTURE.md`, `AGENTS.md` or
+24. No sentence in `README.md`, `ARCHITECTURE.md`, `AGENTS.md` or
     `docs/` says the workspace has two crates, and
     `grep -rn 'two crates\|two members'` returns only accurate
     sentences.
-24. No document says this repository's daemon serves the web
+25. No document says this repository's daemon serves the web
     interface, and `docs/api-design.md` states the ruling at every
     place it states the transport recommendation.
-25. `docs/provenance.md` has 28 rows still, and its header scopes
+26. `docs/provenance.md` has 28 rows still, and its header scopes
     its rule to the protocols teneral did not invent.
-26. The master plan's phase 4 row, open question 1, and the
+27. The master plan's phase 4 row, open question 1, and the
     *Future work* entries this phase closes or rewrites are all
     updated, and every entry this phase defers is written in full
     rather than named.
-27. Nothing this phase started is still running: no teneral
+28. Nothing this phase started is still running: no teneral
     process, no container, no `cargo` on the host.
 
 ## Back brief
@@ -914,3 +970,42 @@ to agree now and expensive to redo.
 5. **Phase 4 ships no sweeper**, so an expired lease is never
    removed until phase 5. Confirm that is the right place for the
    interval, given it is also the address-stickiness knob.
+
+## Execution notes
+
+**Back brief answered 2026-11-25 (Australia/Melbourne).** Four
+questions, three of which confirmed the plan and one of which
+reversed it.
+
+- **The 4c schema gate stays.** The step stops with the `.proto`
+  written and only the handshake generated from it, and the
+  management session reports the schema before 4d is briefed.
+- **Decision 4 is reversed: one socket, with admin as a
+  capability on a token**, rather than an admin socket and a
+  client socket distinguished by file mode. The decision is
+  rewritten in full above rather than annotated, because a step
+  that read the old text would build the wrong thing. Three
+  checks were added to the definition of done to stand in for the
+  boundary the kernel used to enforce: an exhaustive
+  request-kind-to-capability function, the subset rule on minting
+  enforced in the store, and a refusal test per admin operation.
+  Decisions 3, 5, 7, 12 and 13 and the briefs for 4a, 4c, 4f and
+  4g were corrected in the same commit, and the capability
+  vocabulary grew from three to four.
+- **The decline in decision 9 is confirmed**: the daemon does not
+  try to detect a restored database file, and 4g rewrites the
+  master plan's *Future work* entry to record that this phase
+  considered and declined the mechanism.
+- **The defaults in decision 13 stand as planned**, including
+  that this phase ships no sweeper, so nothing removes an expired
+  lease until phase 5 chooses that interval knowing it is also
+  the address-stickiness knob.
+
+**Not a phase-4 change, recorded here because it landed on this
+branch.** `bluecatengineering/dhcproto#111`, the `hlen` clamp this
+project filed on 2026-11-22, merged upstream on 2026-11-24 as
+`6194561`. The master plan's *Future work* entry and the staged
+work's disposition table both said it was unreviewed and
+unmerged, and now say otherwise. The guard phase 5 owes is
+unchanged, because 0.15.0 is still the only release and still
+carries the defect.
