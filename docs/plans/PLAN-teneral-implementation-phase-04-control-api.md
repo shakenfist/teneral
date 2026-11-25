@@ -164,8 +164,9 @@ assumed.
 6. **"Every write records the token that made it" has nothing to
    hang on.** `docs/api-design.md:877-880` asks for it and the
    event log records only `recorded_at`. Doing it means an actor
-   argument on every mutating method of the trait -- twenty of
-   them. The operator ruled on 2026-11-25 that this phase does
+   argument on every mutating method of the trait -- sixteen of
+   them, counted from the gate script's own output rather than
+   estimated. The operator ruled on 2026-11-25 that this phase does
    it, and the timing is the argument: the only callers today are
    the store's own tests, and phase 5 is what adds the
    `acquire`, `allocate` and `renew` call sites that would make
@@ -516,8 +517,8 @@ store's own tests, which is the cheapest this will ever be.
    normalised, because nothing reads it back as structure. It is
    stamped on the event log row and on the resource row, so
    "who moved this binding, and when" is answerable from the
-   resource after the event has been evicted. Twenty signatures
-   change; `scripts/check-store-trait.sh` is the guard that the
+   resource after the event has been evicted. Sixteen signatures
+   change, from `create_network` to `sweep_expired_leases`; `scripts/check-store-trait.sh` is the guard that the
    edit did not drop a network parameter along the way.
 2. **`epoch()` returns an `Epoch` rather than a borrow of one.**
    Finding 7. A one-line change that makes minting expressible.
@@ -767,8 +768,8 @@ management session reviewing each diff before it is committed.
 
 **There is a gate between 4c and 4d.** 4c ends with the `.proto`
 written and nothing generated from it but the handshake, and the
-management session reviews that schema before 4d writes twenty
-operations against it. A schema is cheap to propose and expensive
+management session reviews that schema before 4d writes two
+dozen operations against it. A schema is cheap to propose and expensive
 to redo, and every later step is generated from it.
 
 | Step | Effort | Model | Isolation | Brief for sub-agent |
@@ -796,8 +797,8 @@ can see. The management session records the risk in the master
 plan's *Future work* so that the IPAM's own plan inherits it as a
 requirement rather than as a hope.
 
-**Twenty signatures change in 4a, and the gate is the only thing
-watching.** An actor parameter inserted across every mutating
+**Sixteen signatures change in 4a, and the gate is the only
+thing watching.** An actor parameter inserted across every mutating
 method is mechanical, and the mechanical edit that drops a
 `network` parameter on the way through is the defect this project
 exists to prevent. *Mitigation:* `scripts/check-store-trait.sh`
