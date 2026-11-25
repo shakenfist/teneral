@@ -629,15 +629,37 @@ then read leaves an *overlap* (events in both), which comparing two positions
 removes, while read then subscribe leaves a *gap* (events in neither), which
 nothing removes and nothing reports.
 
-### What the client library does and does not do
+### What the client library does with all of this
 
 `teneral-api`'s client opens a connection, performs the handshake, makes
 requests (`request`, and `request_collection` for a collection read through
 to its marker) and turns a connection into a `Stream` whose `next` returns
-events. **It does not reconnect.** A consumer keeps the last position it
-was delivered, and reconnects and presents it itself; a refused watch
-arrives from `next` as an error, and the final `Disconnecting` event is an
-ordinary event followed by the connection closing.
+events. A `Stream` is one connection's worth of stream and ends when that
+connection does: a refused watch arrives from `next` as an error, and the
+final `Disconnecting` event is an ordinary event followed by the connection
+closing.
+
+Above it is `client::Watch`, which is the same stream across connections,
+and it is the thing a consumer should use. A transport carrying protobuf
+gives a consumer none of the replay a browser's event-source client performs
+by itself, so the position, the backoff and the resync are written once here
+rather than once per consumer -- this being the one mechanism whose failure
+nobody notices. It is driven like a stream, `next` until it answers nothing,
+and each answer is either an event exactly as the daemon sent it or this
+library's own account of a connection that went away.
+
+| What it does | Why |
+|--------------|-----|
+| Holds the position a reconnection presents, advanced from a change, from `InSync` and **from a heartbeat** | The heartbeat exists to carry it, and a helper that ignored one would fall out of retention on exactly the quiet network the heartbeat was added for. `position()` is also what a consumer persists so that its own restart is a resume. |
+| Never advances that position inside a snapshot it has not seen the `InSync` for | A snapshot's events carry the position each resource was last written at, which is not a place in the stream. Resuming from the highest of them asks the daemon to carry on from a point the consumer never reached, and every resource whose last write was earlier is never sent again -- a consumer holding part of the world believing it holds all of it, reported to nobody. A connection lost mid-snapshot therefore presents the position held before it began and is answered with another snapshot. |
+| Reconnects after a disconnection or a transport failure, and presents that position | It never reconnects with no position, and so never silently starts from the present. |
+| Waits `first_delay` before the first attempt and doubles it to `max_delay` | A daemon being restarted should not look like an outage, and a daemon that is gone should not be a busy loop. The defaults are 100 ms and 30 s; both are configurable, and the tests need them short. |
+| Hands the caller a resync, and the final `Disconnecting`, as themselves | A consumer that treats a resync as fatal is correct, and one that cannot see it cannot exist. The helper may reconnect after a `Disconnecting` -- the caller is still told what the daemon said. |
+| Surfaces a refusal instead of retrying it | A refusal is an answer: a credential the daemon does not hold will be refused in the same terms on every attempt. The watch hands the error over and finishes. `retry_refusals` turns that off, for the one deployment it suits -- a consumer started before its credential was minted -- and nowhere else. |
+
+It reports a reconnection rather than absorbing it because that moment is
+the one at which a consumer's state is of an unknown age, and a consumer
+told nothing cannot report that it spent four minutes reconnecting.
 
 ## Minting an epoch, and restoring a backup
 

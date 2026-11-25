@@ -1141,3 +1141,40 @@ read. Phase 7 owns packaging and so owns the revisit. The daemon is
 the `serve` subcommand rather than the bare binary, because the
 client subcommands share the binary and a bare invocation that
 started a daemon would be one typo from a second one.
+
+**The reconnecting watch arrived after 4g, because no step row had
+been given it.** Decision 5 names it as the client's job and the
+ruling in decision 1 counts it as one of the three debts the phase
+owes, and then the step table hands it to nobody: 4c builds the
+connection, 4e builds the server's half of the stream, 4f writes a
+`watch` subcommand that reads one connection's worth, and 4g writes
+documentation. So the phase reached its documentation step with the
+helper missing and the page saying so, and the master plan's *Future
+work* carried its absence as a debt. It is now built, that entry is
+removed, and the page says what the client does rather than what it
+does not. The lesson is about the step table rather than about the
+work: a decision that names a deliverable should be checked against
+the table that assigns one, because every step did what it was
+briefed to do and the gap was between the briefs.
+
+Building it found one thing neither this plan nor
+`docs/api-design.md` had said, and it is the defect a consumer
+writing this for itself would ship. The last position a stream
+*delivered* is not always a position the next connection may
+*present*: a snapshot's events carry the position each resource was
+last written at, which is not a place in the stream at all, so a
+helper that took the highest of them would ask a later daemon to
+carry on from a point it never reached and every resource whose last
+write was earlier would never be sent again. That is the project's
+signature failure -- a consumer holding part of the world believing
+it holds all of it, with nothing to tell it -- produced by the
+recovery mechanism rather than prevented by it. The helper therefore
+holds the position only while a snapshot is not in flight, and the
+in-sync marker is what makes one whole. Both guards are checked by
+unit tests on the bookkeeping rather than over a socket, deliberately:
+today's daemon sends nothing but a snapshot's own events inside a
+snapshot, so over a socket each guard hides the other's absence, and
+a mutation run proved exactly that -- the mutant that treats a
+snapshot's events as resumable positions **survived** until the unit
+tests were added. The wire promises neither ordering, so the client
+does not depend on it.

@@ -1262,16 +1262,6 @@ chosen to defer to here, so that we do not forget them.
   journal, which supplies the timestamps and the filtering. Whether
   to carry a framework is a packaging decision and belongs with the
   rest of the deployment, so the packaging phase should make it.
-* **The client library has no reconnecting watch helper.** The phase
-  4 plan specified one: a watch that holds the last position it was
-  delivered, reconnects with backoff, presents it, and surfaces a
-  resync to its caller as a distinct event. What exists is a
-  connection, requests, collection reads and a stream whose `next`
-  returns events, and the reconnect bookkeeping is the consumer's.
-  Every consumer that hand-rolls it is liable to get it subtly wrong
-  in the same way, and the failure is silent divergence, so it
-  should be written once, in the client, before a second consumer
-  needs it -- the home IPAM being the first.
 
 ### Bugs fixed during this work
 

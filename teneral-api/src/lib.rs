@@ -17,7 +17,12 @@
 //! [`wire`] is the framing the two halves share -- a varint length and
 //! then a message, with a bound checked against the length before any
 //! body is read. [`server`] is the one listener. [`client`] is what a
-//! consumer links. [`authz`] decides which capability a request needs
+//! consumer links, and it carries the reconnect as well as the
+//! connection: a socket carrying protobuf gives a consumer none of the
+//! replay a browser's event-source client performs by itself, so
+//! [`client::Watch`] holds the position, the backoff and the resync
+//! once here rather than once per consumer.
+//! [`authz`] decides which capability a request needs
 //! and which network it is scoped by, one exhaustive function each,
 //! and [`refusal`] is the vocabulary everything is refused with.
 //!

@@ -12,11 +12,11 @@
 //! that is this project's central correctness property and one network
 //! proves nothing about it.
 
-// A harness shared by two test binaries, each of which uses the part
-// of it that its own subject needs. Without this, whichever helper one
-// suite does not call is dead code in that suite's compilation, and
-// the lint gate -- which compiles every target with warnings as errors
-// -- fails for a helper the other suite depends on.
+// A harness shared by every test binary in this crate, each of which
+// uses the part of it that its own subject needs. Without this,
+// whichever helper a suite does not call is dead code in that suite's
+// compilation, and the lint gate -- which compiles every target with
+// warnings as errors -- fails for a helper another suite depends on.
 #![allow(dead_code)]
 
 use std::net::Ipv4Addr;
@@ -147,7 +147,23 @@ impl Daemon {
         Self::started(directory, teneral_api::owning_uid(), retention, |_| {}).await
     }
 
-    /// The whole of starting one, which the four above differ from
+    /// A daemon whose store keeps only `retention`, serving with the
+    /// numbers `adjust` leaves.
+    ///
+    /// Both at once, for the tests about a consumer that stays inside
+    /// a short history by advancing its position from heartbeats.
+    /// Neither number can be left at its default there: the default
+    /// history outlasts any test, and the default heartbeat is longer
+    /// than a test should take.
+    pub async fn retaining_tuned(
+        directory: &TempDirectory,
+        retention: Retention,
+        adjust: impl FnOnce(&mut ServerConfig),
+    ) -> Self {
+        Self::started(directory, teneral_api::owning_uid(), retention, adjust).await
+    }
+
+    /// The whole of starting one, which the five above differ from
     /// only in what they pass.
     async fn started(
         directory: &TempDirectory,
