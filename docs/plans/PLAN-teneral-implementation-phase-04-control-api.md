@@ -1122,6 +1122,42 @@ reader and the view bound -- because the socket versions would be
 timing-dependent; a socket test covers the bound's refusal reaching
 a caller with its retry hint.
 
+**Definition of done, run 2026-11-26.** Every item was run rather
+than ticked. `make test` 229 passed, `make lint` clean with the
+per-crate store check included, `make deny` reports advisories, bans,
+licences and sources ok with `exceptions` still empty, `pre-commit
+run --all-files` passes, both scripts are clean, and the trait gate
+reports 45 methods and still fails a copy with one network parameter
+removed. Four items are worth their own sentence.
+
+Item 13 asks for two networks holding one address in every test that
+touches the store. `teneral-api/tests/connection.rs` has none, and
+that is correct rather than an omission: it tests the handshake and
+the framing, which no network is a parameter of.
+
+Items 17 and 18 -- the lagging reader and the view bound -- are
+proved in-crate rather than over the socket, because the end-to-end
+versions would be timing-dependent. A socket test covers the bound's
+refusal reaching a caller with its retry hint, and the two in-crate
+tests are `a_consumer_that_fell_behind_is_disconnected_with_a_final_event`
+and `the_view_after_the_last_permit_is_refused_and_the_store_is_let_go_of`.
+
+Item 16's mutation runs happened in scratch directories, which do not
+survive, so the durable record is here. The join: `<=` to `<` killed
+by `an_event_at_the_position_the_join_was_made_at_is_not_delivered_twice`,
+`<=` to `<= +1` killed by `the_first_event_after_the_join_is_delivered`,
+and moving the subscription after the read killed by
+`an_event_written_while_a_stream_was_opening_is_delivered_rather_than_lost`
+-- the last of those only after a deterministic window replaced a
+concurrent-writes test that could not tell the defect from the
+repair. The client's reconnect: eight mutants, all killed, the
+snapshot-origin one by
+`nothing_inside_an_unfinished_snapshot_moves_the_position` and only
+once the bookkeeping had in-crate tests, because over a socket the
+snapshot guard and the monotonic guard hide each other. The
+management session reproduced one mutant from each run on a copy of
+the tree.
+
 **Not a phase-4 change, recorded here because it landed on this
 branch.** `bluecatengineering/dhcproto#111`, the `hlen` clamp this
 project filed on 2026-11-22, merged upstream on 2026-11-24 as
