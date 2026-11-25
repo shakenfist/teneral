@@ -1081,17 +1081,23 @@ chosen to defer to here, so that we do not forget them.
   rather than invent a rig of its own, and the measurements it
   takes should land in `docs/provenance.md` as the phase 1 ones
   did.
-* **The `dhcproto` defect is fixed in an upstream pull request,
-  and that fix is not released.** `Message::chaddr()` panics on
-  a DISCOVER whose `hlen` exceeds 16, and the zero-copy path
-  over-reads into attacker-chosen bytes instead. The patch
-  staged under `upstream/dhcproto/` was filed as
+* **The `dhcproto` defect is fixed upstream and the fix is not
+  released.** `Message::chaddr()` panics on a DISCOVER whose
+  `hlen` exceeds 16, and the zero-copy path over-reads into
+  attacker-chosen bytes instead. The patch staged under
+  `upstream/dhcproto/` was filed as
   bluecatengineering/dhcproto#111 on 2026-11-22, with minor
-  edits; the drafted issue was not filed, because that project
-  has not used its issue tracker since 2023. Phase 5 must still
-  reject `hlen > 16` at ingress, because #111 is unreviewed,
-  unmerged and unpublished, and 0.15.0 remains the only
-  release.
+  edits, and **merged on 2026-11-24** as `6194561`; the drafted
+  issue was not filed, because that project has not used its
+  issue tracker since 2023. Phase 5 must still reject
+  `hlen > 16` at ingress, and the merge does not soften that:
+  0.15.0, published 2026-05-19, is still the only release and
+  still carries the defect, so every version this project can
+  resolve panics on that packet. What the merge does change is
+  what to watch for -- the next release, rather than a review --
+  and whether the guard can eventually be dropped is then a
+  question about the floor in `Cargo.toml` rather than about
+  upstream.
 * **Renovate cannot see the Rust toolchain tag, so the base image
   will never be bumped automatically.** The tag lives once, in the
   `Makefile`, as `RUST_IMAGE` passed to a default-less `ARG` in

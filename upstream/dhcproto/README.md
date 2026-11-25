@@ -2,8 +2,10 @@
 
 Work prepared for <https://github.com/bluecatengineering/dhcproto>.
 The patch has since been sent, as [pull request
-#111](https://github.com/bluecatengineering/dhcproto/pull/111).
-The drafted issue was not sent. Nothing else in this directory
+#111](https://github.com/bluecatengineering/dhcproto/pull/111),
+and was merged on 2026-11-24. It is not in a release: 0.15.0
+remains the newest, so the fix is upstream's and not yet
+anybody's dependency. The drafted issue was not sent. Nothing else in this directory
 has been submitted, and nothing here should be submitted without
 Michael deciding to do it.
 
@@ -12,7 +14,7 @@ Michael deciding to do it.
 | Item | Disposition | State |
 |------|-------------|-------|
 | [ISSUE-hlen-chaddr.md](ISSUE-hlen-chaddr.md) | not sent | drafted, then declined |
-| [PR-hlen-chaddr.md](PR-hlen-chaddr.md) + [the patch](0001-clamp-chaddr-to-the-field.patch) | **sent** | filed, with minor edits, as [#111](https://github.com/bluecatengineering/dhcproto/pull/111) on 2026-11-22 |
+| [PR-hlen-chaddr.md](PR-hlen-chaddr.md) + [the patch](0001-clamp-chaddr-to-the-field.patch) | **sent** | filed, with minor edits, as [#111](https://github.com/bluecatengineering/dhcproto/pull/111) on 2026-11-22; **merged** 2026-11-24 as `6194561`, unreleased |
 
 **The pull request went; the issue did not.** Both were drafted
 on the assumption they went together, the issue describing the
