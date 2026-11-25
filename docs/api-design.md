@@ -11,9 +11,17 @@ of operations; those belong to the phase that writes them.
 
 ## The short version
 
+**Read the transport bullet below with the ruling at the end of
+this section in hand: the operator overruled it on 2026-11-25,
+and the project builds protobuf on the socket instead.** The rest
+of this note -- the resource model, every identity, the watch
+primitive's whole contract, the authentication model and the six
+diagnostics -- is unaffected and is what phase 4 implements.
+
 - **One transport: HTTP with JSON bodies, served on a Unix
   domain socket, with watch delivered as a long-lived
   event-stream response.** No TCP listener in the daemon.
+  **Overruled; see below.**
 - The sentence that decides it: *a browser does not need TCP, it
   needs HTTP -- an ordinary reverse proxy bridges a Unix socket
   to a browser for nothing, but only if what is on the socket is
@@ -30,6 +38,28 @@ of operations; those belong to the phase that writes them.
   It never silently starts streaming from the present, and it
   never silently drops events: a client that cannot keep up is
   disconnected so that its cursor still means something.
+
+**The transport ruling, 2026-11-25.** The operator ruled for the
+master plan's standing default -- protobuf messages over a Unix
+domain socket -- and against the recommendation this note makes
+below. Open question 1 is closed by that ruling. The argument
+below is left standing rather than rewritten, because a note that
+quietly agreed with whatever was decided would be worth nothing
+the next time a transport is argued about, and because what the
+project now owes is only legible against what the note predicted.
+Three things follow, and
+[the control API phase plan](plans/PLAN-teneral-implementation-phase-04-control-api.md)
+carries each of them as work rather than as a caveat: something
+has to translate for the browser, and it is the home IPAM's own
+binary in its own repository, linking teneral's client rather
+than reimplementing its model; the browser's free reconnect is
+gone, so the cursor bookkeeping is written once in that client
+crate instead of in every consumer; and the store's
+engine-built JSON event state has to be parsed and re-encoded as
+a typed message, which is a cost the HTTP form would not have
+paid. One thing the ruling buys, which this note never disputed:
+the resource model becomes a schema file both ends are generated
+from rather than a documentation convention.
 
 ## Prior art, read as an interface
 
@@ -915,6 +945,12 @@ the proxy a byte mover instead of a second implementation.
 
 ### The recommendation
 
+**Overruled by the operator on 2026-11-25, for protobuf on the
+socket.** What follows is the recommendation as it was made, kept
+intact because the reasoning is what a future argument will be
+measured against; the ruling and what it costs are in *The
+transport ruling* at the top of this note.
+
 **HTTP with JSON bodies, served on a Unix domain socket, with
 watch delivered as a long-lived event-stream response. One
 listener, one implementation, no TCP port in the daemon.**
@@ -957,6 +993,14 @@ bookkeeping as the stream and loses the browser's built-in
 reconnect, so it is the same work with less of it done for you.
 
 ### What would change the recommendation
+
+These four were written while the recommendation stood. Three of
+them now read the other way round -- they are what would reopen
+the ruling -- and the fourth is answered. Item 2 is the one worth
+keeping in view: it asked for a measurement of JSON's cost, and
+protobuf is the thing that measurement would have argued for, so
+nobody now needs to take it. Item 3 is unchanged by the ruling,
+because a consumer on another host needs a listener either way.
 
 Four things, each stated so that it can be checked rather than
 argued:

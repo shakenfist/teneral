@@ -236,7 +236,12 @@ Each carries the decision the plan takes by default if nobody
 answers, so that no phase blocks waiting for one.
 
 1. **Control-plane transport: HTTP REST, or protobuf over a Unix
-   domain socket?** Phase 1e decides it with the API design note.
+   domain socket?** **Resolved 2026-11-25, for the default and
+   against phase 1e's recommendation: protobuf over a Unix
+   socket.** The reasoning each way is below and is kept, because
+   the recommendation was argued at length and the ruling is
+   better understood against it than alone.
+   Phase 1e was asked to decide it with the API design note.
    *Default: protobuf over UDS*, matching `ryll` and Shaken Fist,
    on the grounds that the control plane is local-only and needs a
    cheap streaming channel for watch/subscribe. The thing that
@@ -249,9 +254,21 @@ answers, so that no phase blocks waiting for one.
    a second implementation of cross-network scoping in the
    component least likely to be tested with two networks. Phase
    1e therefore recommends HTTP with JSON bodies on the Unix
-   socket, keeping the socket and discarding the encoding; the
-   operator has not yet ruled on it, so this question stays open
-   and the default above stands until he does. The encoding
+   socket, keeping the socket and discarding the encoding. The
+   operator ruled against that on 2026-11-25 and phase 4 builds
+   protobuf on the socket, which means the project takes the cost
+   the recommendation was written to avoid rather than discovering
+   it later: something must translate for the browser, and that is
+   now the home IPAM's own binary in its own repository, linking
+   teneral's client rather than holding a second model of the
+   resources. Two smaller debts come with it -- the browser's free
+   reconnect is gone, so the cursor bookkeeping is written once in
+   teneral's client crate, and the store's engine-built JSON event
+   state is parsed and re-encoded as a typed message on the way
+   out. All three are carried as work in
+   [the phase 4 plan](PLAN-teneral-implementation-phase-04-control-api.md),
+   and `docs/api-design.md` records the ruling at each place it
+   states the recommendation. The encoding
    matters much less than the watch/subscribe primitive, which
    is required either way -- though not for the reason first
    written here. Shaken Fist does not learn an address from
@@ -337,7 +354,7 @@ by the time it was executed.
 | 1. Research spikes | [PLAN-teneral-implementation-phase-01-research-spikes.md](PLAN-teneral-implementation-phase-01-research-spikes.md) | Complete | `homelab-deployments-lfs 658caab (!12)`, teneral `fa77a8e..1337e79` |
 | 2. Repository foundations | [PLAN-teneral-implementation-phase-02-foundations.md](PLAN-teneral-implementation-phase-02-foundations.md) | Complete | teneral `482edf7..8fa1b4b` |
 | 3. The binding store | [PLAN-teneral-implementation-phase-03-binding-store.md](PLAN-teneral-implementation-phase-03-binding-store.md) | Complete | teneral `a6189fc..190425f` |
-| 4. The control API | PLAN-teneral-implementation-phase-04-control-api.md | Proposed | |
+| 4. The control API | [PLAN-teneral-implementation-phase-04-control-api.md](PLAN-teneral-implementation-phase-04-control-api.md) | Not started | |
 | 5. DHCPv4 front-end | PLAN-teneral-implementation-phase-05-dhcpv4.md | Proposed | |
 | 6. DNS front-end | PLAN-teneral-implementation-phase-06-dns.md | Proposed | |
 | 7. Home IPAM v1 | PLAN-teneral-implementation-phase-07-home-ipam.md | Proposed | |
@@ -350,7 +367,8 @@ Phases 1 to 3 are complete. The first two said that they were the
 only ones that would be scheduled, because the operator had other
 projects in flight and had said this one should not proceed past
 the prototype until those were further along; he resumed it on
-2026-11-23. Phases 4 to 11 remain `Proposed` rather than
+2026-11-23. Phase 4 is planned and `Not started` as of
+2026-11-25. Phases 5 to 11 remain `Proposed` rather than
 `Not started`, which is the honest status and should not be
 promoted to make the table look busier.
 
@@ -453,8 +471,23 @@ redeploys it.
   deferred to phase 6 -- a resource whose requirements are known
   only to its consumer is a migration waiting to happen. Tokens
   wait for phase 4 for the same reason.
-- **Phase 4: The control API.** The transport chosen in 1e, CRUD
-  over the store, watch/subscribe, authentication.
+- **Phase 4: The control API.** The transport, CRUD over the
+  store, watch/subscribe, authentication.
+
+  Now planned, and its own file is the specification. Two
+  corrections to this sketch, both of which a reader would
+  otherwise trip over. The transport is not the one phase 1e
+  chose: 1e recommended HTTP with JSON bodies and the operator
+  ruled for protobuf on the socket on 2026-11-25, which is open
+  question 1 above. And "CRUD over the store" is a quarter of the
+  phase -- `docs/api-design.md`, which 1e wrote after this
+  paragraph, fixes every identity, the watch primitive's behaviour
+  across a reconnect, two trust models that may not share a
+  listener and six diagnostics, and that note rather than this
+  sketch is what the phase file is written against. Two of this
+  plan's *Future work* entries are also phase 4's by name: minting
+  an epoch after a restore, and bounding how many read handles are
+  live at once.
 - **Phase 5: DHCPv4 front-end.** The socket datapath without
   namespaces. DISCOVER, REQUEST, ACK, NAK, RELEASE, INFORM.
   Static reservations and dynamic pools. Option encoding. The
