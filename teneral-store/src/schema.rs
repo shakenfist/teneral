@@ -23,7 +23,7 @@ use crate::error::{Error, Result};
 /// above it is refused. Adding a migration raises this, in the same
 /// commit, and the test at the foot of this file is what notices if
 /// only one of the two happened.
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// One step from the version below it to its own.
 struct Migration {
@@ -63,6 +63,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 6,
         sql: include_str!("migrations/0006_tokens.sql"),
+    },
+    Migration {
+        version: 7,
+        sql: include_str!("migrations/0007_epoch_attribution.sql"),
     },
 ];
 
@@ -192,6 +196,77 @@ mod tests {
         let database = Database::open(store.path()).unwrap();
         assert_eq!(database.epoch(), &epoch);
         assert_eq!(database.schema_version().unwrap(), SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn a_populated_database_from_the_version_below_keeps_its_identity_row() {
+        // The upgrade path, built the only way it can be: every
+        // migration but the last applied with the engine, which is
+        // the database a build before this one would have left, and
+        // then opened through the code that carries the last one.
+        let store = TempStore::new("upgrade");
+        let previous = SCHEMA_VERSION - 1;
+
+        let epoch = {
+            let connection = Connection::open(store.path()).unwrap();
+            connection
+                .execute_batch("PRAGMA foreign_keys = ON;")
+                .unwrap();
+
+            for migration in MIGRATIONS.iter().filter(|m| m.version <= previous) {
+                connection.execute_batch(migration.sql).unwrap();
+            }
+            connection
+                .execute_batch(&format!("PRAGMA user_version = {previous};"))
+                .unwrap();
+
+            // Populated, and with two networks using the same
+            // addresses, because what has to survive a migration is a
+            // database in use rather than a fresh one: a migration
+            // that rebuilt a table would take these with it.
+            connection
+                .execute_batch(
+                    "INSERT INTO network (name, cursor_seq) VALUES ('alpha', 0), ('beta', 0);
+                     INSERT INTO address_range
+                         (network, name, first_address, last_address, cursor_seq)
+                     VALUES ('alpha', 'pool', 167772170, 167772260, 0),
+                            ('beta', 'pool', 167772170, 167772260, 0);",
+                )
+                .unwrap();
+
+            connection
+                .query_row("SELECT epoch FROM store_identity WHERE id = 1", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap()
+        };
+
+        let database = Database::open(store.path()).unwrap();
+        assert_eq!(database.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(database.epoch().as_str(), epoch, "the epoch is the file's");
+
+        // The row was written before the store recorded who replaces
+        // an epoch, so what it says is that nobody has -- not that
+        // somebody did at the instant of the migration.
+        let connection = Connection::open(store.path()).unwrap();
+        let (minted_by, minted_at): (String, Option<i64>) = connection
+            .query_row(
+                "SELECT minted_by, minted_at FROM store_identity WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(minted_by, "unrecorded");
+        assert_eq!(minted_at, None);
+
+        // And both networks are still there, with their ranges.
+        let networks: i64 = connection
+            .query_row("SELECT count(*) FROM network", [], |row| row.get(0))
+            .unwrap();
+        let ranges: i64 = connection
+            .query_row("SELECT count(*) FROM address_range", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!((networks, ranges), (2, 2));
     }
 
     #[test]

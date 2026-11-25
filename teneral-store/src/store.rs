@@ -52,12 +52,13 @@
 //!    every consumer, which is the resume path wasted entirely.
 
 use async_trait::async_trait;
+use tokio::sync::watch;
 
 use crate::actor::Actor;
 use crate::cursor::Cursor;
 use crate::error::Result;
 use crate::history::{Digest, History, Snapshot};
-use crate::identity::Epoch;
+use crate::identity::{Epoch, StoreIdentity};
 use crate::model::{AddressRange, Attachment, Binding, Explanation, Lease, Network};
 use crate::selector::{ClientIdentity, Selector};
 
@@ -85,6 +86,10 @@ use crate::selector::{ClientIdentity, Selector};
 /// The actor is a parameter rather than something a store is
 /// configured with, because one store serves every connection: an
 /// actor held on the store would be whichever request set it last.
+/// [`BindingStore::mint_epoch`] appends no event and writes no
+/// resource row, so it stamps the identity row instead, and
+/// [`BindingStore::identity`] is what reads that back -- a column
+/// nothing selects answers nothing.
 ///
 /// Reads that name a network are on [`ReadHandle`] rather than here,
 /// so that the ordinary way to read several things is to read them
@@ -99,7 +104,8 @@ use crate::selector::{ClientIdentity, Selector};
 ///
 /// Store-global methods, enumerated so that a reader can tell them
 /// from an oversight: `epoch`, `schema_version`, `read`,
-/// `interface_owner`, `cross_network_answers`.
+/// `interface_owner`, `cross_network_answers`, `live_views`,
+/// `subscribe`, `identity`, `mint_epoch`.
 ///
 /// - `epoch` and `schema_version` describe the file. An epoch per
 ///   network would qualify nothing, because the sequence numbers it
@@ -122,6 +128,16 @@ use crate::selector::{ClientIdentity, Selector};
 ///   disagreement between two networks and attributing it to one of
 ///   them would hide which pair it was. The error names both, which
 ///   is where that detail belongs.
+/// - `live_views` counts the views held of the whole store. A view is
+///   scoped by a position rather than by a network, so the count of
+///   them cannot be attributed to one either.
+/// - `subscribe` reports where the one order has reached, and that
+///   order spans every network. A per-network signal would be a
+///   signal about a cursor whose other half is not per-network.
+/// - `mint_epoch` replaces the half of every cursor that qualifies
+///   every network's positions at once, so there is no network whose
+///   epoch it could be asked to replace, and `identity` reads back
+///   what that mint recorded.
 #[async_trait]
 pub trait BindingStore: Send + Sync {
     /// The epoch a consumer's remembered position has to match for
@@ -129,7 +145,28 @@ pub trait BindingStore: Send + Sync {
     ///
     /// Serves demand 1: it is the half of every cursor that is not a
     /// sequence number.
-    fn epoch(&self) -> &Epoch;
+    ///
+    /// A value rather than a borrow, because
+    /// [`BindingStore::mint_epoch`] replaces it. A borrow would be a
+    /// borrow of state another caller can change, and an
+    /// implementation keeping it behind a lock could not hand one out
+    /// at all. What this answers with is the epoch as it stood when
+    /// it was asked, which is the whole of what a comparison needs.
+    fn epoch(&self) -> Epoch;
+
+    /// What the store says about itself: the epoch it issues
+    /// positions in, and who replaced that epoch when.
+    ///
+    /// Not part of any demand, and the companion to
+    /// [`BindingStore::mint_epoch`]. A consumer told that the epoch
+    /// changed knows only that it has to start again; an operator
+    /// asking why wants the other two values, and wants them from the
+    /// database rather than from a log that may have rotated away.
+    ///
+    /// It reads the file rather than reporting what this process
+    /// remembers, so a store whose epoch another process minted
+    /// answers with the mint rather than with its own open.
+    async fn identity(&self) -> Result<StoreIdentity>;
 
     /// The schema version of the database behind this store.
     ///
@@ -151,6 +188,43 @@ pub trait BindingStore: Send + Sync {
     /// mechanism that noticed a cross-network leak and served it
     /// anyway would have converted a bug into a metric.
     fn cross_network_answers(&self) -> u64;
+
+    /// How many views of this store are held right now.
+    ///
+    /// Not part of any demand. It is on the trait rather than on an
+    /// implementation because the thing it is read for is a bound,
+    /// and the bound belongs to the layer above: a server holding a
+    /// `dyn BindingStore` has to be able to read the number it is
+    /// bounding. Each view costs a thread for as long as it is held,
+    /// which is what makes the number worth asking for, and it
+    /// returns to zero when every consumer has let go.
+    ///
+    /// It counts every view this store has handed out, whatever
+    /// opened it. A bound enforced on one layer's own count and
+    /// reported against this one is the arrangement that notices the
+    /// day the two disagree.
+    fn live_views(&self) -> usize;
+
+    /// A receiver that moves whenever the store's order advances.
+    ///
+    /// Serves demand 1 from the other side: the store assigns the
+    /// order, so the store is the only thing that can say when it
+    /// moved. Without this a consumer could only poll the history,
+    /// and a view is a thread -- polling would cost a thread per poll
+    /// per consumer, which makes this a matter of correctness and
+    /// cost rather than of convenience.
+    ///
+    /// It carries the latest position and not the events. A receiver
+    /// that missed three movements sees only the newest, and that is
+    /// wanted rather than tolerated: this is a signal to go and read,
+    /// and what to read is answered by the history after the position
+    /// the reader itself last reached.
+    ///
+    /// **The position it reports has already been committed.** A
+    /// notification that outran its own transaction would send every
+    /// reader to a position nothing can see yet, and the symptom
+    /// would be an intermittently empty read rather than an error.
+    fn subscribe(&self) -> watch::Receiver<Cursor>;
 
     /// Open a view of the store at a single position in its order.
     ///
@@ -489,6 +563,39 @@ pub trait BindingStore: Send + Sync {
         actor: &Actor,
         network: &str,
     ) -> Result<(Option<Cursor>, Vec<Lease>)>;
+
+    /// Give this store a new epoch, and say where the new order
+    /// starts.
+    ///
+    /// Serves demand 1, and it is the operator's remedy for a store
+    /// restored from a file-level backup. Such a restore brings the
+    /// old epoch back together with a sequence counter wound back to
+    /// the backup, so every position a consumer remembers is one this
+    /// store may issue again -- different events under numbers a
+    /// consumer has already seen, which is the failure the epoch is
+    /// named for and the one case it cannot catch by itself. Minting
+    /// makes the restored store honestly a different store: every
+    /// cursor from the old order stops matching, so every consumer is
+    /// told the epoch changed and reconverges from a snapshot.
+    /// Minting *is* "everybody resync", expressed as data rather than
+    /// as an instruction nobody can enforce.
+    ///
+    /// **The sequence counter does not restart.** What comes back is
+    /// the position this store has reached, now in the new epoch, and
+    /// the numbers carry on from there: a position from the old order
+    /// is never issued again in the new one, so the two cannot be
+    /// confused even by something that compared sequences and ignored
+    /// epochs.
+    ///
+    /// The actor and the instant are recorded on the identity row,
+    /// which is the one place a mint can be attributed: it appends no
+    /// event, and the history that would have carried one is bounded
+    /// anyway, while this answer has to outlive every consumer that
+    /// resynced because of it. It is the most consequential write an
+    /// operator can make -- every consumer holding a position is told
+    /// to start again -- and [`BindingStore::identity`] is what asks
+    /// the question back.
+    async fn mint_epoch(&self, actor: &Actor) -> Result<Cursor>;
 }
 
 /// A view of the store frozen at one position in its order.

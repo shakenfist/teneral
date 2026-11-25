@@ -163,8 +163,8 @@ async fn every_write_returns_a_position_later_than_the_last() {
         .await
         .unwrap();
 
-    assert_eq!(first.epoch(), fixture.store.epoch());
-    assert_eq!(second.epoch(), fixture.store.epoch());
+    assert_eq!(first.epoch(), &fixture.store.epoch());
+    assert_eq!(second.epoch(), &fixture.store.epoch());
     assert!(
         second.sequence() > first.sequence(),
         "{second} should be after {first}"
@@ -804,10 +804,10 @@ async fn the_epoch_and_the_schema_version_describe_the_whole_store() {
         .create_network(&OPERATOR, "gamma")
         .await
         .unwrap();
-    assert_eq!(written.epoch(), fixture.store.epoch());
+    assert_eq!(written.epoch(), &fixture.store.epoch());
 
     let view = fixture.store.read().await.unwrap();
-    assert_eq!(view.cursor().epoch(), fixture.store.epoch());
+    assert_eq!(view.cursor().epoch(), &fixture.store.epoch());
 }
 
 #[tokio::test]
@@ -2841,7 +2841,7 @@ const A_YEAR: u64 = 365 * 86_400;
 /// read the whole history from the beginning would have presented
 /// before the first write.
 fn start(fixture: &TwoNetworks) -> Cursor {
-    Cursor::new(fixture.store.epoch().clone(), 0)
+    Cursor::new(fixture.store.epoch(), 0)
 }
 
 /// A history that could be resumed, or a failure naming what came
@@ -3115,7 +3115,7 @@ async fn a_position_the_store_has_evicted_is_told_so_rather_than_handed_nothing(
                 view.cursor().sequence() - 2,
                 "the mark should name the last position that is gone"
             );
-            assert_eq!(evicted_through.epoch(), fixture.store.epoch());
+            assert_eq!(evicted_through.epoch(), &fixture.store.epoch());
         }
         other => panic!("expected the position to be reported as evicted, got {other:?}"),
     }
@@ -3133,7 +3133,7 @@ async fn a_position_the_store_has_evicted_is_told_so_rather_than_handed_nothing(
     let (events, _) = resumed(view.history(ALPHA, view.cursor()).await.unwrap());
     assert!(events.is_empty());
 
-    let at_the_mark = Cursor::new(fixture.store.epoch().clone(), view.cursor().sequence() - 2);
+    let at_the_mark = Cursor::new(fixture.store.epoch(), view.cursor().sequence() - 2);
     assert!(matches!(
         view.history(ALPHA, &at_the_mark).await.unwrap(),
         History::Resumed { .. }
@@ -3155,7 +3155,7 @@ async fn a_position_from_another_epoch_is_told_the_epoch_changed() {
     match view.history(ALPHA, &elsewhere).await.unwrap() {
         History::EpochChanged { presented, store } => {
             assert_eq!(&presented, elsewhere.epoch());
-            assert_eq!(&store, fixture.store.epoch());
+            assert_eq!(store, fixture.store.epoch());
         }
         other => panic!("expected the epoch to be reported as changed, got {other:?}"),
     }
@@ -3166,10 +3166,7 @@ async fn a_position_the_store_never_issued_is_not_reported_as_evicted() {
     let fixture = TwoNetworks::new("never-issued").await;
 
     let view = fixture.store.read().await.unwrap();
-    let ahead = Cursor::new(
-        fixture.store.epoch().clone(),
-        view.cursor().sequence() + 100,
-    );
+    let ahead = Cursor::new(fixture.store.epoch(), view.cursor().sequence() + 100);
 
     // The epoch matches and the position is ahead of everything this
     // store has issued, which is what a restore from a file-level
@@ -4586,4 +4583,391 @@ async fn a_listing_shows_only_the_tokens_the_caller_can_reach() {
         fixture.store.list(&Caller::Token(reader.token.id)).await,
         Err(Error::Unauthorised { .. })
     ));
+}
+
+// ---------------------------------------------------------------------
+// The epoch mint, the change signal, and the view count.
+//
+// The three things the store owes a consumer that watches it. Two of
+// them are about the same hazard from opposite ends: a cursor has an
+// epoch as well as a sequence, so anything that replaces the epoch
+// while a write is in flight can produce a position belonging to
+// neither order. The third is a number a bound is enforced against.
+// ---------------------------------------------------------------------
+
+/// Configure a binding and report the position it was written at.
+///
+/// `configure` above reads the binding back, which these tests do not
+/// want: what they compare is positions, and a read in between would
+/// open a view and move nothing but the thread count.
+async fn write_binding(
+    fixture: &TwoNetworks,
+    network: &str,
+    mac: &str,
+    address: Ipv4Addr,
+) -> Cursor {
+    fixture
+        .store
+        .create_binding(
+            &OPERATOR,
+            network,
+            &selector(SelectorKind::Mac, mac),
+            address,
+            None,
+        )
+        .await
+        .expect("a binding")
+}
+
+/// The two epochs a resync names, or a failure naming what came back
+/// instead.
+fn epoch_changed(history: History) -> (Epoch, Epoch) {
+    match history {
+        History::EpochChanged { presented, store } => (presented, store),
+        other => panic!("expected the epoch to be reported as changed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_position_from_before_a_mint_is_told_the_epoch_changed() {
+    let fixture = TwoNetworks::new("mint-resync").await;
+    let before = fixture.store.epoch();
+
+    let view = fixture.store.read().await.unwrap();
+    let remembered = view.cursor().clone();
+    drop(view);
+
+    let mut changes = fixture.store.subscribe();
+    let minted = fixture.store.mint_epoch(&OPERATOR).await.unwrap();
+
+    assert_ne!(minted.epoch(), &before);
+    assert_eq!(fixture.store.epoch(), *minted.epoch());
+
+    // Every watcher is told to go and look, which is what makes a
+    // mint "everybody resync" expressed as data rather than as an
+    // operational instruction nobody can enforce.
+    changes.changed().await.unwrap();
+    assert_eq!(*changes.borrow_and_update(), minted);
+
+    let view = fixture.store.read().await.unwrap();
+    assert_eq!(view.cursor().epoch(), minted.epoch());
+
+    // Both networks' own histories and the store-wide one all refuse
+    // the remembered position, and all of them name the two epochs:
+    // a consumer has to be able to say which store it thought it was
+    // holding a position in, and an operator reading the refusal has
+    // to be able to tell a mint from a store that went backwards.
+    for network in [ALPHA, BETA] {
+        let (presented, store) = epoch_changed(view.history(network, &remembered).await.unwrap());
+        assert_eq!(presented, before);
+        assert_eq!(&store, minted.epoch());
+    }
+
+    let (presented, store) = epoch_changed(view.history_everywhere(&remembered).await.unwrap());
+    assert_eq!(presented, before);
+    assert_eq!(&store, minted.epoch());
+
+    // And what a resync does next lands in the new order: the
+    // snapshot it takes carries a position the store will go on
+    // issuing numbers after, in each network it asks about.
+    for network in [ALPHA, BETA] {
+        let snapshot = view.snapshot(network).await.unwrap();
+        assert_eq!(snapshot.cursor.epoch(), minted.epoch());
+    }
+}
+
+#[tokio::test]
+async fn the_sequence_counter_does_not_restart_when_the_epoch_is_minted() {
+    let fixture = TwoNetworks::new("mint-sequence").await;
+
+    let last = write_binding(&fixture, ALPHA, MAC_ONE, in_pool(51)).await;
+    let minted = fixture.store.mint_epoch(&OPERATOR).await.unwrap();
+
+    // The mint says where the new order starts, and that is where the
+    // old one had reached rather than the beginning.
+    assert_eq!(minted.sequence(), last.sequence());
+
+    // A write in each network afterwards, because the counter is one
+    // order over both of them: a store that restarted it would be
+    // reissuing numbers for events neither network can see belong to
+    // the other.
+    let alpha = write_binding(&fixture, ALPHA, MAC_TWO, in_pool(52)).await;
+    let beta = write_binding(&fixture, BETA, MAC_TWO, in_pool(52)).await;
+
+    assert!(
+        alpha.sequence() > last.sequence(),
+        "{alpha} should be after {last}, which the old order had already issued"
+    );
+    assert!(beta.sequence() > alpha.sequence(), "{beta} after {alpha}");
+    assert_eq!(alpha.epoch(), minted.epoch());
+    assert_eq!(beta.epoch(), minted.epoch());
+
+    // Which is what keeps the two orders apart for anything that
+    // compared sequence numbers and ignored epochs: no position the
+    // old order issued is issued again by the new one. A second mint
+    // behaves the same way, so this is the mint's property and not
+    // something true only of the first one.
+    let again = fixture.store.mint_epoch(&OPERATOR).await.unwrap();
+    assert_eq!(again.sequence(), beta.sequence());
+    assert_ne!(again.epoch(), minted.epoch());
+    let after = write_binding(&fixture, BETA, MAC_THREE, in_pool(53)).await;
+    assert!(after.sequence() > again.sequence(), "{after} after {again}");
+}
+
+#[tokio::test]
+async fn a_write_in_flight_across_a_mint_belongs_to_one_order_or_the_other() {
+    let fixture = TwoNetworks::new("mint-in-flight").await;
+    let before = fixture.store.epoch();
+
+    // A write and a mint dispatched together, so that each is queued
+    // while the other is still unfinished. Writes are serialised on
+    // the store's writer thread rather than at the call site, so one
+    // of the two ran first and this test deliberately does not say
+    // which: what it asserts is the pair that has to hold either way.
+    //
+    // The failure it exists to catch is a write that read the epoch
+    // where it was built instead of where it ran. Such a write would
+    // stamp the old order's epoch on a position the new order issued
+    // -- a cursor belonging to no history at all, handed back as
+    // though it belonged to this one -- and nothing downstream could
+    // notice, because both halves of it look entirely plausible.
+    let (written, minted) = tokio::join!(
+        write_binding(&fixture, ALPHA, MAC_ONE, in_pool(61)),
+        fixture.store.mint_epoch(&OPERATOR),
+    );
+    let minted = minted.unwrap();
+    assert_ne!(minted.epoch(), &before);
+
+    // The mint's own cursor is the boundary: it names the position
+    // the new order starts at, so which side of the mint a write fell
+    // on is answered by its sequence number alone.
+    assert_epoch_matches_order(&written, &before, &minted);
+
+    // The same pair the other way round, in the other network, so
+    // that both orderings are exercised rather than whichever one the
+    // runtime happens to produce.
+    let (again, also_written) = tokio::join!(
+        fixture.store.mint_epoch(&OPERATOR),
+        write_binding(&fixture, BETA, MAC_ONE, in_pool(61)),
+    );
+    let again = again.unwrap();
+    assert_ne!(again.epoch(), minted.epoch());
+    assert_epoch_matches_order(&also_written, minted.epoch(), &again);
+
+    // Read back, each cursor is answered as what it is rather than
+    // quietly continued: a position in the current epoch resumes, and
+    // one from an order that has been replaced is refused and names
+    // both epochs. The one thing neither may be is served events
+    // under numbers from somebody else's history.
+    let view = fixture.store.read().await.unwrap();
+    for cursor in [&written, &also_written] {
+        if cursor.epoch() == view.cursor().epoch() {
+            assert!(matches!(
+                view.history_everywhere(cursor).await.unwrap(),
+                History::Resumed { .. }
+            ));
+        } else {
+            let (presented, reported) =
+                epoch_changed(view.history_everywhere(cursor).await.unwrap());
+            assert_eq!(&presented, cursor.epoch());
+            assert_eq!(&reported, view.cursor().epoch());
+        }
+    }
+}
+
+/// Assert that a write's cursor names the epoch its sequence number
+/// belongs to, given the mint it was racing.
+///
+/// `before` is the epoch the store had, and `minted` the mint's own
+/// cursor, which is the position the new order starts at. A write at
+/// or below that position was applied in the old order and a write
+/// above it in the new one, so the epoch each carries is decided
+/// rather than a matter of taste.
+fn assert_epoch_matches_order(written: &Cursor, before: &Epoch, minted: &Cursor) {
+    if written.sequence() > minted.sequence() {
+        assert_eq!(
+            written.epoch(),
+            minted.epoch(),
+            "{written} was issued after the mint at {minted} and should be in its epoch"
+        );
+    } else {
+        assert_eq!(
+            written.epoch(),
+            before,
+            "{written} was issued before the mint at {minted} and should be in the old epoch"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_change_signal_moves_once_per_mutation_and_its_position_reads_at_once() {
+    let fixture = TwoNetworks::new("subscribe").await;
+    let mut changes = fixture.store.subscribe();
+
+    // Nothing has moved since the receiver was taken. The fixture's
+    // own writes are behind it, and a receiver that reported them
+    // would be telling every new consumer to go and read before it
+    // had missed anything.
+    assert!(!changes.has_changed().unwrap());
+
+    let mut reached = start(&fixture);
+    for (network, address) in [(ALPHA, in_pool(71)), (BETA, in_pool(71))] {
+        let written = write_binding(&fixture, network, SHARED_MAC, address).await;
+
+        changes.changed().await.unwrap();
+        let announced = changes.borrow_and_update().clone();
+
+        // The signal carries the position the write was assigned
+        // rather than something near it.
+        assert_eq!(announced, written);
+
+        // And the position is readable the instant it arrives. A
+        // signal sent before its own transaction had committed would
+        // send this read to a position that is not there yet, and the
+        // symptom would be an intermittently empty answer rather than
+        // an error -- so the read happens here, on the signal, rather
+        // than after anything that might have let the commit catch
+        // up.
+        let view = fixture.store.read().await.unwrap();
+        let (events, cursor) = resumed(view.history_everywhere(&reached).await.unwrap());
+        assert!(
+            events.iter().any(|event| event.cursor == announced),
+            "the event at {announced} should be readable as soon as it is announced"
+        );
+        assert!(cursor.sequence() >= announced.sequence());
+        drop(view);
+
+        reached = announced;
+
+        // Once per mutation: the movement above was consumed, and
+        // nothing has written since.
+        assert!(!changes.has_changed().unwrap());
+    }
+
+    // A read is not a movement, in either shape the store answers one
+    // in. Both go through the same writer thread as a write, so a
+    // signal sent for every job rather than for every mutation would
+    // wake every watcher here.
+    let view = fixture.store.read().await.unwrap();
+    assert!(view.network(ALPHA).await.unwrap().is_some());
+    assert!(view.network(BETA).await.unwrap().is_some());
+    drop(view);
+    assert!(
+        fixture
+            .store
+            .interface_owner(ALPHA_NAMESPACE, IFNAME)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(!changes.has_changed().unwrap(), "a read moved the signal");
+
+    // A mint is a movement even though it issues no position, the
+    // epoch being half of what every watcher is holding.
+    let minted = fixture.store.mint_epoch(&OPERATOR).await.unwrap();
+    changes.changed().await.unwrap();
+    assert_eq!(*changes.borrow_and_update(), minted);
+}
+
+#[tokio::test]
+async fn the_view_count_through_the_trait_is_the_count_the_store_keeps() {
+    let fixture = TwoNetworks::new("live-views-trait").await;
+
+    // The census is the ground truth -- it is what the threads
+    // themselves count in and out of -- and the trait method is what
+    // a control plane holding a `dyn BindingStore` can reach. A bound
+    // enforced on one and reported from the other is only worth
+    // something while the two agree.
+    let census = fixture.store.census_for_test();
+    let store: &dyn BindingStore = &fixture.store;
+    assert_eq!(store.live_views(), census.views());
+    assert_eq!(store.live_views(), 0);
+
+    let view = store.read().await.unwrap();
+    // Read both networks through the one view, that being what a
+    // consumer mirroring a multi-network scope holds.
+    assert!(view.network(ALPHA).await.unwrap().is_some());
+    assert!(view.network(BETA).await.unwrap().is_some());
+    assert_eq!(store.live_views(), 1);
+    assert_eq!(store.live_views(), census.views());
+
+    let second = store.read().await.unwrap();
+    assert_eq!(store.live_views(), 2);
+    assert_eq!(store.live_views(), census.views());
+
+    // Dropping a view joins its thread, so the count is back
+    // deterministically rather than eventually.
+    drop(second);
+    assert_eq!(store.live_views(), 1);
+    drop(view);
+    assert_eq!(store.live_views(), 0);
+    assert_eq!(store.live_views(), census.views());
+}
+
+#[tokio::test]
+async fn a_mint_records_the_actor_that_made_it_and_when() {
+    let fixture = TwoNetworks::new("mint-attribution").await;
+
+    // The minter is named here rather than borrowed from the fixture,
+    // so that the row cannot be showing the fixture's own writes.
+    let minter = Actor::Peer(4242);
+    fixture.clock.advance(DAY);
+
+    let behind = fixture.behind_the_store();
+    let before = events(&behind);
+
+    let minted = fixture.store.mint_epoch(&minter).await.unwrap();
+    let identity = fixture.store.identity().await.unwrap();
+
+    assert_eq!(&identity.epoch, minted.epoch());
+    assert_eq!(identity.minted_by, minter.as_recorded());
+    assert_eq!(identity.minted_at, Some(FIXTURE_NOW + DAY));
+
+    // The row is where a mint can be attributed at all: it appends no
+    // event, so nothing in the history says who did it, and the
+    // history is bounded anyway while this answer has to outlive
+    // every consumer that resynced because of it.
+    assert_eq!(events(&behind), before);
+
+    // And both networks go on being written in the epoch the row
+    // names, the mint having replaced one epoch for all of them.
+    for network in [ALPHA, BETA] {
+        let written = write_binding(&fixture, network, MAC_FOUR, in_pool(81)).await;
+        assert_eq!(written.epoch(), &identity.epoch);
+    }
+}
+
+#[tokio::test]
+async fn a_store_whose_epoch_nobody_has_minted_says_so() {
+    let fixture = TwoNetworks::new("mint-never").await;
+    let identity = fixture.store.identity().await.unwrap();
+
+    // The epoch the database was created with was generated by the
+    // migration that made the file. No actor minted it and nothing
+    // recorded an instant for it, and saying that plainly is what
+    // keeps "has this store ever been minted" an answerable question.
+    assert_eq!(identity.epoch, fixture.store.epoch());
+    assert_eq!(identity.minted_by, "unrecorded");
+    assert_eq!(identity.minted_at, None);
+
+    // The word cannot be read as an actor: every actor this store
+    // records carries its kind and a colon.
+    assert!(!identity.minted_by.contains(':'));
+
+    // Both networks are readable at that epoch, which is what makes
+    // the sentinel a statement about the mint rather than about a
+    // store that has not been used.
+    let view = fixture.store.read().await.unwrap();
+    assert_eq!(view.cursor().epoch(), &identity.epoch);
+    for network in [ALPHA, BETA] {
+        assert!(view.network(network).await.unwrap().is_some());
+    }
+
+    // And once it is minted the same read answers the mint instead.
+    drop(view);
+    let minted = fixture.store.mint_epoch(&OPERATOR).await.unwrap();
+    let identity = fixture.store.identity().await.unwrap();
+    assert_eq!(&identity.epoch, minted.epoch());
+    assert_eq!(identity.minted_by, OPERATOR.as_recorded());
+    assert_eq!(identity.minted_at, Some(FIXTURE_NOW));
 }

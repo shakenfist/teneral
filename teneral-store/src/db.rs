@@ -12,6 +12,8 @@ use std::path::Path;
 
 use rusqlite::Connection;
 
+use crate::actor::Actor;
+use crate::cursor::Cursor;
 use crate::error::{Error, Result};
 use crate::identity::{self, Epoch};
 use crate::schema;
@@ -65,6 +67,34 @@ impl Database {
     /// mutations, so an epoch per network would describe nothing.
     pub fn epoch(&self) -> &Epoch {
         &self.epoch
+    }
+
+    /// The write connection and the epoch a write made through it
+    /// belongs to.
+    ///
+    /// Two values from one call because a write needs both and the
+    /// epoch has to be the one this database holds *now*. A caller
+    /// that captured an epoch somewhere else and carried it here
+    /// could stamp the old order's epoch on a position in the new
+    /// one -- a cursor that does not belong to this store's order,
+    /// handed back as though it did. Reading it here, on the thread
+    /// that is about to run the statements, is what makes that
+    /// unexpressible: the mint below runs on the same thread, so
+    /// either it has already happened or it has not.
+    pub(crate) fn for_write(&mut self) -> (&mut Connection, &Epoch) {
+        (&mut self.writer, &self.epoch)
+    }
+
+    /// Give the store a new epoch, recorded against `actor` at `now`,
+    /// and say where the new order starts.
+    ///
+    /// The copy held here moves with the file, because it is what
+    /// every write after this one reads its epoch from.
+    pub(crate) fn mint_epoch(&mut self, actor: &Actor, now: i64) -> Result<Cursor> {
+        let (minted, position) = identity::mint_epoch(&mut self.writer, actor, now)?;
+        self.epoch = minted.clone();
+
+        Ok(Cursor::new(minted, position))
     }
 
     /// The schema version this database is at, which after a

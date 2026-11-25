@@ -1,0 +1,38 @@
+-- Who minted this store's epoch, and when.
+--
+-- Applied to a database that already carries the identity row, the
+-- resources, the tokens and the actor columns the migration before it
+-- added. As with every migration here, this file is never edited once
+-- it has been released: a change to the shape of this table is a new
+-- file beside it, because an edit here describes a database that only
+-- a fresh install has ever had. That is also why these two columns
+-- are not folded into the migration that added every other actor
+-- column: a database that has already applied that one would diverge
+-- from an edited copy of it without anything saying so.
+--
+-- It is a file of its own for a plain reason. Replacing the epoch
+-- became something the store does, and the rule that every write
+-- records the actor that made it therefore reached a table that was
+-- written before the rule existed. Minting is also the most
+-- consequential write an operator can make -- every consumer holding
+-- a position is told to start again -- so "who did this, and when" is
+-- a question somebody asks of the database during an incident, when
+-- whatever log would have answered it may have rotated away.
+--
+-- `minted_by` takes the same rendering and the same default as every
+-- other actor column: one TEXT value in the store's own spelling, for
+-- a person to read, and a bare word rather than an empty string for a
+-- row written before the store recorded this. An empty value would
+-- read as a recorded fact -- an epoch minted by nobody -- and a real
+-- actor cannot be confused with the word, every rendering carrying
+-- its kind and a colon.
+--
+-- `minted_at` is nullable, and NULL is what the epoch generated when
+-- the database was created honestly reads as: no actor minted it and
+-- nothing recorded an instant, so there is no time to write. A zero
+-- would be an instant in 1970 and a backfilled "now" would be the
+-- instant of this migration rather than of a mint; both answer a
+-- question nobody asked, and both would make "this store has never
+-- been minted" unaskable.
+ALTER TABLE store_identity ADD COLUMN minted_by TEXT NOT NULL DEFAULT 'unrecorded';
+ALTER TABLE store_identity ADD COLUMN minted_at INTEGER;

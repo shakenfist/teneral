@@ -163,7 +163,7 @@ function check(signature,    name, returns, scope, mutating, verdict, at) {
     }
 
     scope = (signature ~ /[,(] ?network ?:/) ? "network" : "global"
-    mutating = (name ~ /^(create|delete|update|set|attach|detach|claim|release|acquire|revoke|renew|allocate|sweep|truncate|evict)([_A-Z]|$)/)
+    mutating = (name ~ /^(create|delete|update|set|attach|detach|claim|release|acquire|revoke|renew|allocate|mint|sweep|truncate|evict)([_A-Z]|$)/)
 
     verdict = "ok"
     if (scope == "global" && !(name in global)) {

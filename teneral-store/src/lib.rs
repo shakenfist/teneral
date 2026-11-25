@@ -45,7 +45,13 @@
 //! position, the events after a position together with the refusals a
 //! position can be met with instead, the bound that keeps the history
 //! finite, and the per-network digest that answers "do we still agree"
-//! in one value.
+//! in one value. Beside those are the two things a watcher needs that
+//! are not reads at all: the signal that says the order has moved, so
+//! that nothing has to poll a history whose every read costs a
+//! thread, and the mint that replaces the store's epoch, which is how
+//! a store restored from a backup is made honestly a different store
+//! and every consumer holding a position in the old one told to start
+//! again.
 //!
 //! Beside all of that, and not above it, are the credentials. Every
 //! write names the [`Actor`] that made it, and the store stamps that
@@ -91,7 +97,7 @@ pub use clock::{Clock, SystemClock};
 pub use cursor::Cursor;
 pub use error::{Error, Result};
 pub use history::{Digest, Event, EventKind, History, Retention, Snapshot};
-pub use identity::Epoch;
+pub use identity::{Epoch, StoreIdentity};
 pub use model::{AddressRange, Attachment, Binding, Explanation, Lease, Network};
 pub use schema::SCHEMA_VERSION;
 pub use selector::{ClientIdentity, Selector, SelectorKind};

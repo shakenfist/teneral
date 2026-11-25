@@ -42,6 +42,18 @@
 //! one-shot that the caller awaits; nothing else in the crate needs
 //! to know a runtime exists.
 //!
+//! There is a third channel, and where it is sent from is the whole
+//! of its correctness. The store says that its order has moved on the
+//! writer thread, between a job and that job's reply. On the writer
+//! thread, because that is where a position is assigned and where a
+//! mint replaces the epoch, so the two halves of the cursor a watcher
+//! is handed cannot come from two different states of the file. After
+//! the job, because the job is what commits: a notification sent from
+//! inside a write's transaction would send every reader to a position
+//! nothing else can see yet, and that shows up as an intermittently
+//! empty read rather than as an error. Before the reply, so that a
+//! caller holding its cursor knows the watchers hold it too.
+//!
 //! One place blocking does still happen on the caller's thread, and
 //! it is named here rather than left for somebody to find. Both
 //! `Drop` implementations below end a thread and then join it, and a
@@ -60,13 +72,13 @@
 //! thread's own teardown is not.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, PoisonError, RwLock};
 use std::thread::{self, JoinHandle};
 
 use async_trait::async_trait;
 use rusqlite::Connection;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::actor::Actor;
 use crate::clock::{Clock, SystemClock};
@@ -75,7 +87,7 @@ use crate::db::{self, Database};
 use crate::error::{Error, Result};
 use crate::guard::CrossNetworkGuard;
 use crate::history::{self, Digest, History, Retention, Snapshot};
-use crate::identity::Epoch;
+use crate::identity::{self, Epoch, StoreIdentity};
 use crate::lease;
 use crate::model::{AddressRange, Attachment, Binding, Explanation, Lease, Network};
 use crate::ops::{self, Reading, Writing};
@@ -188,9 +200,24 @@ pub struct SqliteStore {
     /// The database file, so that a view can open its own connection
     /// to it.
     path: PathBuf,
-    /// This store's epoch, read once at open and fixed thereafter.
-    epoch: Epoch,
-    /// The schema version the database is at, likewise.
+    /// This store's epoch, as the last thing to read it off the file
+    /// found it.
+    ///
+    /// A copy behind a lock rather than a field, because minting
+    /// replaces it and the method that reports it is synchronous.
+    /// Nothing writes through it but the mint, and the mint does so
+    /// on the writer thread; it is read by the accessor alone. What
+    /// stamps an epoch on a write is not this but the copy the
+    /// writer thread's own database holds, which is the only one
+    /// that cannot be stale by the time the statement runs.
+    epoch: Arc<RwLock<Epoch>>,
+    /// Where the order has reached, for anything waiting to be told
+    /// that it moved. The sender is here and every job carries a
+    /// reference to it, because the sending happens on the writer
+    /// thread; see this module's documentation for why it happens
+    /// there, and between a job and its reply.
+    positions: Arc<watch::Sender<Cursor>>,
+    /// The schema version the database is at, read once at open.
     schema_version: u32,
     /// Where the time stamped on every write comes from. Held here
     /// rather than on the writer thread's database so that each write
@@ -249,7 +276,7 @@ impl SqliteStore {
         let census = Arc::new(ThreadCensus::default());
 
         let (writes, mut jobs) = mpsc::unbounded_channel::<WriteJob>();
-        let (ready, opened) = oneshot::channel::<Result<(Epoch, u32)>>();
+        let (ready, opened) = oneshot::channel::<Result<Opened>>();
 
         let thread_path = path.clone();
         let thread_census = Arc::clone(&census);
@@ -269,9 +296,7 @@ impl SqliteStore {
                     }
                 };
 
-                let identity = database
-                    .schema_version()
-                    .map(|version| (database.epoch().clone(), version));
+                let identity = opening(&database);
                 let reported = identity.is_ok();
                 if ready.send(identity).is_err() || !reported {
                     return;
@@ -290,11 +315,16 @@ impl SqliteStore {
             .map_err(|error| Error::threads("own the store's write connection", error))?;
 
         match opened.await {
-            Ok(Ok((epoch, schema_version))) => Ok(Self {
+            Ok(Ok(Opened {
+                epoch,
+                schema_version,
+                positions,
+            })) => Ok(Self {
                 writes: Some(writes),
                 writer: Some(writer),
                 path,
-                epoch,
+                epoch: Arc::new(RwLock::new(epoch)),
+                positions,
                 schema_version,
                 clock,
                 census,
@@ -314,23 +344,14 @@ impl SqliteStore {
         }
     }
 
-    /// How many views of this store are currently held.
-    ///
-    /// Each costs a thread for as long as it is held, which is what
-    /// makes this worth being able to ask: it is the quantity any
-    /// bound on concurrent views would be enforced against, and the
-    /// number that should return to zero when a consumer has finished
-    /// with the store.
-    pub fn live_views(&self) -> usize {
-        self.census.views()
-    }
-
     /// The thread counts, for a test that outlives the store.
     ///
     /// A test is the only thing that wants this: it has to be able to
     /// ask whether the threads have gone *after* the store that owned
-    /// them has been dropped, which the method above cannot answer
-    /// because there is no longer a store to call it on.
+    /// them has been dropped, which `live_views` cannot answer
+    /// because there is no longer a store to call it on. It is also
+    /// the count that method is checked against, the two having to
+    /// agree about a number one of them reports through a trait.
     #[cfg(test)]
     pub(crate) fn census_for_test(&self) -> Arc<ThreadCensus> {
         Arc::clone(&self.census)
@@ -343,12 +364,17 @@ impl SqliteStore {
     /// from here without a runtime is to block the caller's thread --
     /// which is precisely the thing this design exists to avoid. What
     /// bounds the work in flight is the number of callers.
+    ///
+    /// This is also the one place the store says that its order has
+    /// moved, which is why nothing below has to remember to: a write
+    /// added later cannot forget a line it never writes.
     async fn write<T, F>(&self, context: &'static str, job: F) -> Result<T>
     where
         F: FnOnce(&mut Database) -> Result<T> + Send + 'static,
         T: Send + 'static,
     {
         let (reply, answer) = oneshot::channel();
+        let positions = Arc::clone(&self.positions);
 
         let writes = self
             .writes
@@ -357,11 +383,24 @@ impl SqliteStore {
 
         writes
             .send(Box::new(move |database| {
+                let answer = job(database);
+
+                // Between the job and the reply, and both halves of
+                // that are the contract. After the job, because the
+                // job is what commits: a watcher woken earlier would
+                // go and read a position that is not there yet, and
+                // the symptom of that is an intermittently empty read
+                // rather than an error. Before the reply, because a
+                // caller that has been handed its cursor is entitled
+                // to assume that whatever watches this store has
+                // already been told about it.
+                announce(database, &positions);
+
                 // The receiver is gone if the caller's future was
                 // dropped before the reply arrived, which is not an
                 // error: the write has happened either way, and the
                 // store's history is where it is recorded.
-                let _ = reply.send(job(database));
+                let _ = reply.send(answer);
             }))
             .map_err(|_| Error::unavailable(context))?;
 
@@ -387,22 +426,37 @@ impl SqliteStore {
         self.write(context, move |database| job(database)).await
     }
 
-    /// What every write needs besides the connection, for a job
-    /// running on the writer thread.
+    /// The connection a write runs on and everything else it needs,
+    /// for a job running on the writer thread.
+    ///
+    /// The epoch is taken from the database here rather than passed
+    /// in, and that is the whole reason this takes the database at
+    /// all. A job that captured an epoch where it was built would
+    /// have captured it before the queue, and a mint waiting in the
+    /// same queue would then leave it stamping the old order's epoch
+    /// on a position in the new one -- a cursor that belongs to
+    /// nothing, handed back as if it did. Read here, on the thread
+    /// that is about to run the statements and the thread the mint
+    /// runs on, it is whichever epoch the write genuinely happens in.
     fn writing<'a>(
+        database: &'a mut Database,
         actor: &'a Actor,
         clock: &'a Arc<dyn Clock>,
-        epoch: &'a Epoch,
         guard: &'a Arc<CrossNetworkGuard>,
         retention: &'a Retention,
-    ) -> Writing<'a> {
-        Writing {
-            clock: clock.as_ref(),
-            actor,
-            epoch,
-            guard: guard.as_ref(),
-            retention,
-        }
+    ) -> (&'a mut Connection, Writing<'a>) {
+        let (connection, epoch) = database.for_write();
+
+        (
+            connection,
+            Writing {
+                clock: clock.as_ref(),
+                actor,
+                epoch,
+                guard: guard.as_ref(),
+                retention,
+            },
+        )
     }
 }
 
@@ -436,10 +490,104 @@ fn open_database(path: &Path) -> Result<Database> {
     Database::open(path)
 }
 
+/// What the writer thread reports once its database is open.
+#[derive(Debug)]
+struct Opened {
+    /// The epoch the file carries, for the store's own copy of it.
+    epoch: Epoch,
+    /// The schema version it is at.
+    schema_version: u32,
+    /// Where the order had reached when the store opened, and the
+    /// channel every movement of it is announced on afterwards.
+    positions: Arc<watch::Sender<Cursor>>,
+}
+
+/// Read what the store needs to know about a freshly opened database.
+///
+/// The position starts the watch channel off rather than being
+/// reported separately: a receiver taken before anything has been
+/// written has to carry a position, and the position the store opened
+/// at is the only honest one. It is read on this thread, like
+/// everything else here.
+fn opening(database: &Database) -> Result<Opened> {
+    let epoch = database.epoch().clone();
+    let schema_version = database.schema_version()?;
+    let position = ops::snapshot_position(database.connection())?;
+    let at = Cursor::new(epoch.clone(), position);
+
+    Ok(Opened {
+        epoch,
+        schema_version,
+        positions: Arc::new(watch::Sender::new(at)),
+    })
+}
+
+/// Say where the order has reached, if it has moved.
+///
+/// Runs on the writer thread, after the job that may have moved it
+/// and before that job's caller is told anything, which is what makes
+/// the position it reports one a reader can already find. The epoch
+/// comes from the same database for the same reason: a mint is a job
+/// like any other, so by the time this runs the pair is either wholly
+/// before it or wholly after it.
+///
+/// Only a movement is sent. A job that read without writing leaves
+/// the position where it was, and a watcher woken for one would be
+/// told to go and read something it has already read.
+///
+/// A position that cannot be read is not reported, and there is
+/// nothing better to do with it here: the write it belonged to has
+/// already answered its own caller, and this channel carries the
+/// latest position rather than a sequence of them, so the next write
+/// that succeeds corrects the omission.
+fn announce(database: &Database, positions: &watch::Sender<Cursor>) {
+    let Ok(position) = ops::snapshot_position(database.connection()) else {
+        return;
+    };
+
+    let latest = Cursor::new(database.epoch().clone(), position);
+    positions.send_if_modified(|current| {
+        if *current == latest {
+            return false;
+        }
+
+        *current = latest;
+        true
+    });
+}
+
+/// The store's copy of the epoch, read through the poison.
+///
+/// Reading a poisoned lock is safe here and the alternative is
+/// worse. The only thing that writes through it is a mint, which
+/// replaces one whole value with another; there is no half-written
+/// state for a panic to leave behind, and refusing to answer with the
+/// epoch because some unrelated holder panicked would turn a reported
+/// failure into a second one.
+fn held(epoch: &RwLock<Epoch>) -> Epoch {
+    epoch.read().unwrap_or_else(PoisonError::into_inner).clone()
+}
+
+/// Move the store's copy of the epoch, for the thread that has just
+/// replaced it in the file.
+fn replace(epoch: &RwLock<Epoch>, minted: Epoch) {
+    *epoch.write().unwrap_or_else(PoisonError::into_inner) = minted;
+}
+
 #[async_trait]
 impl BindingStore for SqliteStore {
-    fn epoch(&self) -> &Epoch {
-        &self.epoch
+    fn epoch(&self) -> Epoch {
+        held(&self.epoch)
+    }
+
+    async fn identity(&self) -> Result<StoreIdentity> {
+        // Off the file rather than out of the copy this store holds:
+        // the copy answers what this process last saw, and a second
+        // store over the same database may have minted since.
+        self.read_now("ask the store about itself", |database| {
+            identity::read_identity(database.connection())
+        })
+        .await
     }
 
     fn schema_version(&self) -> u32 {
@@ -453,10 +601,22 @@ impl BindingStore for SqliteStore {
         self.guard.refused()
     }
 
+    fn live_views(&self) -> usize {
+        self.census.views()
+    }
+
+    fn subscribe(&self) -> watch::Receiver<Cursor> {
+        // Through the sender rather than by cloning a receiver the
+        // store kept, so that the position the channel already holds
+        // counts as seen: a consumer that has just subscribed is told
+        // the order moved when it moves next, not because it moved
+        // before it was listening.
+        self.positions.subscribe()
+    }
+
     async fn read(&self) -> Result<Box<dyn ReadHandle>> {
         let view = SnapshotView::open(
             self.path.clone(),
-            self.epoch.clone(),
             // The instant the view reads at, taken here beside the
             // position it reads at. A lease's expiry is a fact about
             // the clock rather than about the store's order, so a
@@ -475,10 +635,13 @@ impl BindingStore for SqliteStore {
     async fn interface_owner(&self, namespace: &str, ifname: &str) -> Result<Option<Attachment>> {
         let namespace = namespace.to_owned();
         let ifname = ifname.to_owned();
-        let epoch = self.epoch.clone();
 
         self.read_now("ask which network holds an interface", move |database| {
-            ops::interface_owner(database.connection(), &epoch, &namespace, &ifname)
+            // The epoch comes off the database on the thread the read
+            // runs on, as a write's does, so the cursor on the
+            // attachment this answers with is in the epoch the read
+            // itself happened in.
+            ops::interface_owner(database.connection(), database.epoch(), &namespace, &ifname)
         })
         .await
     }
@@ -488,16 +651,14 @@ impl BindingStore for SqliteStore {
 
         let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
-        let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
         let retention = self.retention;
 
         self.write("create a network", move |database| {
-            ops::create_network(
-                database.connection_mut(),
-                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
-                &network,
-            )
+            let (connection, writing) =
+                SqliteStore::writing(database, &actor, &clock, &guard, &retention);
+
+            ops::create_network(connection, &writing, &network)
         })
         .await
     }
@@ -513,17 +674,14 @@ impl BindingStore for SqliteStore {
 
         let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
-        let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
         let retention = self.retention;
 
         self.write("remove a network", move |database| {
-            ops::delete_network(
-                database.connection_mut(),
-                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
-                &network,
-                &expected,
-            )
+            let (connection, writing) =
+                SqliteStore::writing(database, &actor, &clock, &guard, &retention);
+
+            ops::delete_network(connection, &writing, &network, &expected)
         })
         .await
     }
@@ -541,18 +699,14 @@ impl BindingStore for SqliteStore {
 
         let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
-        let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
         let retention = self.retention;
 
         self.write("claim an interface", move |database| {
-            ops::attach_interface(
-                database.connection_mut(),
-                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
-                &network,
-                &namespace,
-                &ifname,
-            )
+            let (connection, writing) =
+                SqliteStore::writing(database, &actor, &clock, &guard, &retention);
+
+            ops::attach_interface(connection, &writing, &network, &namespace, &ifname)
         })
         .await
     }
@@ -572,18 +726,15 @@ impl BindingStore for SqliteStore {
 
         let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
-        let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
         let retention = self.retention;
 
         self.write("release an interface", move |database| {
+            let (connection, writing) =
+                SqliteStore::writing(database, &actor, &clock, &guard, &retention);
+
             ops::detach_interface(
-                database.connection_mut(),
-                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
-                &network,
-                &namespace,
-                &ifname,
-                &expected,
+                connection, &writing, &network, &namespace, &ifname, &expected,
             )
         })
         .await
@@ -602,19 +753,14 @@ impl BindingStore for SqliteStore {
 
         let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
-        let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
         let retention = self.retention;
 
         self.write("create an address range", move |database| {
-            ops::create_address_range(
-                database.connection_mut(),
-                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
-                &network,
-                &name,
-                first,
-                last,
-            )
+            let (connection, writing) =
+                SqliteStore::writing(database, &actor, &clock, &guard, &retention);
+
+            ops::create_address_range(connection, &writing, &network, &name, first, last)
         })
         .await
     }
@@ -634,19 +780,15 @@ impl BindingStore for SqliteStore {
 
         let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
-        let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
         let retention = self.retention;
 
         self.write("resize an address range", move |database| {
+            let (connection, writing) =
+                SqliteStore::writing(database, &actor, &clock, &guard, &retention);
+
             ops::update_address_range(
-                database.connection_mut(),
-                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
-                &network,
-                &name,
-                &expected,
-                first,
-                last,
+                connection, &writing, &network, &name, &expected, first, last,
             )
         })
         .await
@@ -665,18 +807,14 @@ impl BindingStore for SqliteStore {
 
         let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
-        let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
         let retention = self.retention;
 
         self.write("remove an address range", move |database| {
-            ops::delete_address_range(
-                database.connection_mut(),
-                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
-                &network,
-                &name,
-                &expected,
-            )
+            let (connection, writing) =
+                SqliteStore::writing(database, &actor, &clock, &guard, &retention);
+
+            ops::delete_address_range(connection, &writing, &network, &name, &expected)
         })
         .await
     }
@@ -695,14 +833,16 @@ impl BindingStore for SqliteStore {
 
         let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
-        let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
         let retention = self.retention;
 
         self.write("configure a binding", move |database| {
+            let (connection, writing) =
+                SqliteStore::writing(database, &actor, &clock, &guard, &retention);
+
             ops::create_binding(
-                database.connection_mut(),
-                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
+                connection,
+                &writing,
                 &network,
                 &selector,
                 address,
@@ -728,14 +868,16 @@ impl BindingStore for SqliteStore {
 
         let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
-        let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
         let retention = self.retention;
 
         self.write("change a binding", move |database| {
+            let (connection, writing) =
+                SqliteStore::writing(database, &actor, &clock, &guard, &retention);
+
             ops::update_binding(
-                database.connection_mut(),
-                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
+                connection,
+                &writing,
                 &network,
                 &selector,
                 &expected,
@@ -759,18 +901,14 @@ impl BindingStore for SqliteStore {
 
         let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
-        let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
         let retention = self.retention;
 
         self.write("remove a binding", move |database| {
-            ops::delete_binding(
-                database.connection_mut(),
-                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
-                &network,
-                &selector,
-                &expected,
-            )
+            let (connection, writing) =
+                SqliteStore::writing(database, &actor, &clock, &guard, &retention);
+
+            ops::delete_binding(connection, &writing, &network, &selector, &expected)
         })
         .await
     }
@@ -791,14 +929,16 @@ impl BindingStore for SqliteStore {
 
         let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
-        let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
         let retention = self.retention;
 
         self.write("configure a binding over a lease", move |database| {
+            let (connection, writing) =
+                SqliteStore::writing(database, &actor, &clock, &guard, &retention);
+
             ops::create_binding_revoking_lease(
-                database.connection_mut(),
-                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
+                connection,
+                &writing,
                 &network,
                 &selector,
                 address,
@@ -822,19 +962,14 @@ impl BindingStore for SqliteStore {
 
         let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
-        let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
         let retention = self.retention;
 
         self.write("take a lease on an address", move |database| {
-            lease::acquire_lease(
-                database.connection_mut(),
-                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
-                &network,
-                &identity,
-                address,
-                duration,
-            )
+            let (connection, writing) =
+                SqliteStore::writing(database, &actor, &clock, &guard, &retention);
+
+            lease::acquire_lease(connection, &writing, &network, &identity, address, duration)
         })
         .await
     }
@@ -852,18 +987,15 @@ impl BindingStore for SqliteStore {
 
         let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
-        let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
         let retention = self.retention;
 
         self.write("allocate an address", move |database| {
+            let (connection, writing) =
+                SqliteStore::writing(database, &actor, &clock, &guard, &retention);
+
             lease::allocate_lease(
-                database.connection_mut(),
-                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
-                &network,
-                &identity,
-                requested,
-                duration,
+                connection, &writing, &network, &identity, requested, duration,
             )
         })
         .await
@@ -882,19 +1014,14 @@ impl BindingStore for SqliteStore {
 
         let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
-        let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
         let retention = self.retention;
 
         self.write("renew a lease", move |database| {
-            lease::renew_lease(
-                database.connection_mut(),
-                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
-                &network,
-                address,
-                &identity,
-                duration,
-            )
+            let (connection, writing) =
+                SqliteStore::writing(database, &actor, &clock, &guard, &retention);
+
+            lease::renew_lease(connection, &writing, &network, address, &identity, duration)
         })
         .await
     }
@@ -911,18 +1038,14 @@ impl BindingStore for SqliteStore {
 
         let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
-        let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
         let retention = self.retention;
 
         self.write("revoke a lease", move |database| {
-            lease::revoke_lease(
-                database.connection_mut(),
-                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
-                &network,
-                address,
-                &expected,
-            )
+            let (connection, writing) =
+                SqliteStore::writing(database, &actor, &clock, &guard, &retention);
+
+            lease::revoke_lease(connection, &writing, &network, address, &expected)
         })
         .await
     }
@@ -936,16 +1059,35 @@ impl BindingStore for SqliteStore {
 
         let actor = actor.clone();
         let clock = Arc::clone(&self.clock);
-        let epoch = self.epoch.clone();
         let guard = Arc::clone(&self.guard);
         let retention = self.retention;
 
         self.write("sweep expired leases", move |database| {
-            lease::sweep_expired_leases(
-                database.connection_mut(),
-                &SqliteStore::writing(&actor, &clock, &epoch, &guard, &retention),
-                &network,
-            )
+            let (connection, writing) =
+                SqliteStore::writing(database, &actor, &clock, &guard, &retention);
+
+            lease::sweep_expired_leases(connection, &writing, &network)
+        })
+        .await
+    }
+
+    async fn mint_epoch(&self, actor: &Actor) -> Result<Cursor> {
+        let actor = actor.clone();
+        let clock = Arc::clone(&self.clock);
+        let epoch = Arc::clone(&self.epoch);
+
+        self.write("mint an epoch", move |database| {
+            let minted = database.mint_epoch(&actor, clock.unix_seconds())?;
+
+            // The store's copy moves here, on the writer thread and
+            // after the transaction that replaced it in the file, so
+            // that no write can be dispatched into the new order
+            // while anything can still read the old epoch off the
+            // store. The copy the next write stamps is the
+            // database's own, which this thread has already moved.
+            replace(&epoch, minted.epoch().clone());
+
+            Ok(minted)
         })
         .await
     }
@@ -1065,20 +1207,28 @@ impl SnapshotView {
     /// Start a view of the database at `path`.
     ///
     /// The thread opens its own connection, begins a read
-    /// transaction, and reads the store's position inside it -- in
-    /// that order, and the order is what makes the view a view. A
-    /// deferred transaction takes its snapshot at its first read, so
-    /// reading the position is both the answer this returns and the
-    /// act that fixes everything the view will go on to say.
+    /// transaction, and reads the store's identity and position
+    /// inside it -- in that order, and the order is what makes the
+    /// view a view. A deferred transaction takes its snapshot at its
+    /// first read, so reading them is both the answer this returns
+    /// and the act that fixes everything the view will go on to say.
+    ///
+    /// Both halves of the cursor are read in there, and that is not
+    /// tidiness. An epoch taken from the store and a position taken
+    /// from the transaction could be a pair that never existed: a
+    /// mint between the two would leave the view reading at a
+    /// position in the new order while claiming the old order's
+    /// epoch, and every cursor it handed out would be one this store
+    /// never issued. Read together inside one transaction they
+    /// describe one state of the file.
     async fn open(
         path: PathBuf,
-        epoch: Epoch,
         as_of: i64,
         census: Arc<ThreadCensus>,
         guard: Arc<CrossNetworkGuard>,
     ) -> Result<Self> {
         let (queries, mut jobs) = mpsc::unbounded_channel::<ReadJob>();
-        let (ready, opened) = oneshot::channel::<Result<u64>>();
+        let (ready, opened) = oneshot::channel::<Result<(Epoch, u64)>>();
 
         let thread = thread::Builder::new()
             .name("teneral-store-view".to_owned())
@@ -1102,9 +1252,11 @@ impl SnapshotView {
                     }
                 };
 
-                let position = ops::snapshot_position(&transaction);
-                let reported = position.is_ok();
-                if ready.send(position).is_err() || !reported {
+                let at = identity::read_epoch(&transaction).and_then(|epoch| {
+                    ops::snapshot_position(&transaction).map(|position| (epoch, position))
+                });
+                let reported = at.is_ok();
+                if ready.send(at).is_err() || !reported {
                     return;
                 }
 
@@ -1121,7 +1273,7 @@ impl SnapshotView {
             .map_err(|error| Error::threads("hold a view of the store", error))?;
 
         match opened.await {
-            Ok(Ok(position)) => Ok(Self {
+            Ok(Ok((epoch, position))) => Ok(Self {
                 queries: Some(queries),
                 thread: Some(thread),
                 cursor: Cursor::new(epoch, position),
