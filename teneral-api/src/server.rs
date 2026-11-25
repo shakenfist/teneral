@@ -58,6 +58,8 @@ use crate::error::{Error, Result};
 use crate::operations;
 use crate::proto::{self, Hello, HelloResult, Welcome, hello_result};
 use crate::refusal;
+use crate::views::Views;
+use crate::watch::{self, Pump};
 use crate::{PROTOCOL_VERSION, wire};
 
 /// The mode the socket is created with.
@@ -108,6 +110,18 @@ pub struct ServerConfig {
     /// the arrangement that notices the day the two disagree.
     pub max_live_views: usize,
 
+    /// How often an open stream is sent a heartbeat.
+    ///
+    /// Two things come of it and the second is the one that is not
+    /// obvious. A consumer can tell "nothing has happened" from "my
+    /// connection is a black hole", which in a system whose failures
+    /// are silent is worth the bytes; and the position it carries lets
+    /// a consumer advance its resume point during a quiet period, so a
+    /// stream idle for hours still resumes rather than resyncing.
+    /// Without it, a quiet network is the case most likely to fall out
+    /// of the retained history.
+    pub heartbeat: Duration,
+
     /// How long to wait for an answer when deciding whether something
     /// else is already serving the socket path.
     ///
@@ -128,6 +142,7 @@ impl ServerConfig {
             owning_uid: owning_uid(),
             max_connections: 256,
             max_live_views: 64,
+            heartbeat: Duration::from_secs(15),
             probe_timeout: Duration::from_secs(2),
         }
     }
@@ -143,8 +158,19 @@ struct Serving {
     store: Arc<dyn BindingStore>,
     /// The credentials, which are not resources in that store.
     tokens: Arc<dyn TokenStore>,
-    /// The bound the diagnostics report.
-    max_live_views: usize,
+    /// The bound on how many views of the store this daemon holds at
+    /// once, which every read goes through and the diagnostics report.
+    views: Arc<Views>,
+    /// The one reader of the history, which every stream on this
+    /// listener is fed from.
+    pump: Arc<Pump>,
+    /// How often an open stream is sent a heartbeat.
+    heartbeat: Duration,
+    /// Says so when this daemon is shutting down, so that an open
+    /// stream can end with a final event rather than with a socket
+    /// that goes quiet -- a closed socket being indistinguishable from
+    /// a network that went away.
+    stopping: tokio::sync::watch::Receiver<bool>,
 }
 
 /// The socket, bound and ready to serve.
@@ -193,6 +219,14 @@ impl Listener {
     /// `shutdown` completed or because accepting failed. A connection
     /// already accepted is a task of its own and ends when its peer
     /// goes or when the runtime does.
+    ///
+    /// The watch pump is started here and waited for before this
+    /// returns, because it is the one task this listener starts that
+    /// is not a connection: a pump still reading the history after the
+    /// listener has returned would be a view this daemon left open
+    /// behind itself. Every open stream is told the daemon is stopping
+    /// by the same signal, so a consumer gets a final event rather
+    /// than a socket that goes quiet.
     pub async fn serve<S>(
         self,
         store: Arc<dyn BindingStore>,
@@ -204,39 +238,51 @@ impl Listener {
     {
         let connections = Arc::new(Semaphore::new(self.config.max_connections));
         let owning_uid = self.config.owning_uid;
+        let views = Arc::new(Views::new(self.config.max_live_views));
+        let (stopping, stopped) = tokio::sync::watch::channel(false);
+        let (pump, pumping) = Pump::start(Arc::clone(&store), Arc::clone(&views), stopped.clone());
         let serving = Arc::new(Serving {
             store,
             tokens,
-            max_live_views: self.config.max_live_views,
+            views,
+            pump,
+            heartbeat: self.config.heartbeat,
+            stopping: stopped,
         });
         let mut shutdown = std::pin::pin!(shutdown);
 
-        loop {
+        // The accept loop's own outcome, so that every way out of it
+        // goes on to stop the pump: a listener that returned an error
+        // and left a task reading the store would be the same leak as
+        // one that forgot to stop it.
+        let outcome = loop {
             // The permit before the accept, so that a daemon at its
             // bound stops taking connections off the queue rather than
             // accepting them and then holding them open with nothing
             // serving them.
             let permit = tokio::select! {
                 biased;
-                () = &mut shutdown => break,
+                () = &mut shutdown => break Ok(()),
                 permit = Arc::clone(&connections).acquire_owned() => match permit {
                     Ok(permit) => permit,
                     // The semaphore is only closed by this function,
                     // which does not, so this is unreachable rather
                     // than handled -- and stopping is the only honest
                     // thing to do with a bound that has gone away.
-                    Err(_) => break,
+                    Err(_) => break Ok(()),
                 },
             };
 
             let accepted = tokio::select! {
                 biased;
-                () = &mut shutdown => break,
+                () = &mut shutdown => break Ok(()),
                 accepted = self.listener.accept() => accepted,
             };
 
-            let (stream, _) =
-                accepted.map_err(|error| Error::io("accepting a connection", error))?;
+            let (stream, _) = match accepted {
+                Ok(accepted) => accepted,
+                Err(error) => break Err(Error::io("accepting a connection", error)),
+            };
 
             let serving = Arc::clone(&serving);
             tokio::spawn(async move {
@@ -247,9 +293,16 @@ impl Listener {
 
                 serve_connection(stream, &serving, owning_uid).await;
             });
-        }
+        };
 
-        Ok(())
+        // The pump, and every open stream, told that this daemon is
+        // finished. Waited for rather than abandoned: the pump holds a
+        // view of the store while it reads, and the store is dropped
+        // by whatever opened it as soon as this returns.
+        let _ = stopping.send(true);
+        let _ = pumping.await;
+
+        outcome
     }
 }
 
@@ -590,8 +643,25 @@ async fn serve_requests(
             store: &*serving.store,
             tokens: &*serving.tokens,
             caller,
-            max_live_views: serving.max_live_views,
+            views: &serving.views,
         };
+
+        // A watch is terminal: the connection becomes a stream of
+        // events until either end closes it, which is what removes the
+        // question of what a request means while a stream is running.
+        // So this returns rather than coming back round the loop, and
+        // the operations below never see one.
+        if let proto::request::Kind::Watch(request) = kind {
+            return watch::serve(
+                stream,
+                &context,
+                &serving.pump,
+                serving.heartbeat,
+                serving.stopping.clone(),
+                request,
+            )
+            .await;
+        }
 
         for response in operations::answer(&context, kind).await {
             wire::write_message(stream, &response).await?;

@@ -25,12 +25,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use teneral_api::client::Connection;
-use teneral_api::proto::{self, request, response};
+use teneral_api::client::{Connection, Stream};
+use teneral_api::proto::{self, request, response, watch_event};
 use teneral_api::{Listener, ServerConfig};
 use teneral_store::{
-    Actor, BindingStore, Caller, Capability, ClientIdentity, Cursor, Lease, MintedToken,
-    SelectorKind, SqliteStore, TokenScope, TokenStore,
+    Actor, BindingStore, Caller, Capability, ClientIdentity, Cursor, EventKind, Lease, MintedToken,
+    Retention, SelectorKind, SqliteStore, SystemClock, TokenScope, TokenStore,
 };
 use tokio::task::JoinHandle;
 
@@ -120,15 +120,55 @@ impl Daemon {
     /// own uid for every connection it makes, which is the whole point
     /// of reading it from the kernel.
     pub async fn start(directory: &TempDirectory, owning_uid: u32) -> Self {
+        Self::started(directory, owning_uid, Retention::DEFAULT, |_| {}).await
+    }
+
+    /// A daemon serving as this test's own uid, with `adjust` applied
+    /// to the numbers it serves with.
+    ///
+    /// The numbers are a parameter because two of them cannot be
+    /// tested at their defaults: a heartbeat every fifteen seconds is
+    /// longer than a test should take, and reaching a bound of
+    /// sixty-four views means holding sixty-four threads open at once
+    /// to prove a refusal that is the same refusal at two.
+    pub async fn tuned(directory: &TempDirectory, adjust: impl FnOnce(&mut ServerConfig)) -> Self {
+        Self::started(
+            directory,
+            teneral_api::owning_uid(),
+            Retention::DEFAULT,
+            adjust,
+        )
+        .await
+    }
+
+    /// A daemon whose store keeps only as much history as `retention`
+    /// says, for the tests about a position that has fallen out of it.
+    pub async fn retaining(directory: &TempDirectory, retention: Retention) -> Self {
+        Self::started(directory, teneral_api::owning_uid(), retention, |_| {}).await
+    }
+
+    /// The whole of starting one, which the four above differ from
+    /// only in what they pass.
+    async fn started(
+        directory: &TempDirectory,
+        owning_uid: u32,
+        retention: Retention,
+        adjust: impl FnOnce(&mut ServerConfig),
+    ) -> Self {
         let store = Arc::new(
-            SqliteStore::open(directory.store())
-                .await
-                .expect("a store in the test's own directory"),
+            SqliteStore::with_clock_and_retention(
+                directory.store(),
+                Arc::new(SystemClock),
+                retention,
+            )
+            .await
+            .expect("a store in the test's own directory"),
         );
 
         let mut config = ServerConfig::new(directory.socket());
         config.owning_uid = owning_uid;
         config.probe_timeout = Duration::from_millis(250);
+        adjust(&mut config);
 
         let listener = Listener::bind(config)
             .await
@@ -174,6 +214,13 @@ impl Daemon {
     /// rather than as the thing under test.
     pub fn store(&self) -> &SqliteStore {
         &self.store
+    }
+
+    /// The same store, for a test whose fixture writes from a task of
+    /// its own: writes landing while a consumer connects are the only
+    /// way to exercise the join between its first read and the stream.
+    pub fn shared_store(&self) -> Arc<SqliteStore> {
+        Arc::clone(&self.store)
     }
 
     /// Connect, as the owning peer or as a credential.
@@ -497,6 +544,150 @@ pub fn every_scoped_request(network: &str) -> Vec<request::Kind> {
             network: network.to_owned(),
         }),
     ]
+}
+
+// ---------------------------------------------------------------------
+// The watch stream.
+//
+// Every read of a stream here is bounded. A test that waited forever
+// for an event that is never coming would hang the suite rather than
+// fail it, and the failure mode being tested -- an event that does not
+// arrive -- is exactly the one that would do it.
+// ---------------------------------------------------------------------
+
+/// How long a test waits for an event before deciding there is not one.
+pub const PATIENCE: Duration = Duration::from_secs(10);
+
+/// A watch over `scope`, for every kind of resource there is.
+pub fn watching(scope: TokenScope, after: Option<proto::Cursor>) -> proto::WatchRequest {
+    watching_kinds(scope, &EventKind::ALL, after)
+}
+
+/// A watch over `scope`, for `kinds`.
+pub fn watching_kinds(
+    scope: TokenScope,
+    kinds: &[EventKind],
+    after: Option<proto::Cursor>,
+) -> proto::WatchRequest {
+    proto::WatchRequest {
+        scope: Some(proto::scope(&scope)),
+        kinds: kinds
+            .iter()
+            .map(|kind| proto::resource_kind(*kind) as i32)
+            .collect(),
+        after,
+    }
+}
+
+/// A scope of one network, which is the one a cross-network defect
+/// shows up in.
+pub fn only(network: &str) -> TokenScope {
+    TokenScope::Networks(vec![network.to_owned()])
+}
+
+/// The next event on a stream, or a panic saying none arrived.
+pub async fn next_event(stream: &mut Stream) -> watch_event::Event {
+    let event = tokio::time::timeout(PATIENCE, stream.next())
+        .await
+        .expect("an event arrived within the time a test waits")
+        .expect("the stream carried an event rather than ending");
+
+    event
+        .event
+        .expect("a watch event says which kind of event it is")
+}
+
+/// The refusal a stream was met with, or a panic naming what arrived
+/// instead.
+pub async fn refusal_of(stream: &mut Stream) -> proto::Refusal {
+    let outcome = tokio::time::timeout(PATIENCE, stream.next())
+        .await
+        .expect("an answer arrived within the time a test waits");
+
+    match outcome {
+        Ok(event) => panic!("the watch was served with {event:?} rather than refused"),
+        Err(error) => match error.refusal() {
+            Some(refusal) => refusal.clone(),
+            None => panic!("the watch failed rather than being refused: {error}"),
+        },
+    }
+}
+
+/// Everything up to the in-sync marker, and the position it carries.
+///
+/// A resync before it is a panic rather than a skip: the tests that
+/// expect one read the event themselves, and a test that silently
+/// tolerated one would be a test that passes when a consumer is told
+/// to throw its state away.
+pub async fn in_sync(stream: &mut Stream) -> (Vec<proto::ResourceEvent>, proto::Cursor) {
+    let mut events = Vec::new();
+
+    loop {
+        match next_event(stream).await {
+            watch_event::Event::Change(change) => events.push(change),
+            watch_event::Event::InSync(marker) => {
+                let at = marker.cursor.expect("an in-sync marker carries a position");
+
+                return (events, at);
+            }
+            other => panic!("the stream carried {other:?} before it was in sync"),
+        }
+    }
+}
+
+/// The next change on a stream, skipping the heartbeats.
+///
+/// Heartbeats are skipped and nothing else is: a resync or a
+/// disconnection in the middle of a test that wanted a change is the
+/// test's answer and not noise.
+pub async fn next_change(stream: &mut Stream) -> proto::ResourceEvent {
+    loop {
+        match next_event(stream).await {
+            watch_event::Event::Change(change) => return change,
+            watch_event::Event::Heartbeat(_) => continue,
+            other => panic!("the stream carried {other:?} rather than a change"),
+        }
+    }
+}
+
+/// The resync a stream opened with, or a panic naming what arrived
+/// instead.
+pub async fn resync(stream: &mut Stream) -> proto::Resync {
+    match next_event(stream).await {
+        watch_event::Event::Resync(resync) => resync,
+        other => panic!("the stream opened with {other:?} rather than a resync"),
+    }
+}
+
+/// The lease a change event carries, or a panic naming what it carried
+/// instead.
+pub fn lease_state(change: &proto::ResourceEvent) -> proto::Lease {
+    match change.state.as_ref().and_then(|state| state.state.clone()) {
+        Some(proto::resource::State::Lease(lease)) => lease,
+        other => panic!("that event carried {other:?} rather than a lease"),
+    }
+}
+
+/// The binding a change event carries, or a panic naming what it
+/// carried instead.
+pub fn binding_state(change: &proto::ResourceEvent) -> proto::Binding {
+    match change.state.as_ref().and_then(|state| state.state.clone()) {
+        Some(proto::resource::State::Binding(binding)) => binding,
+        other => panic!("that event carried {other:?} rather than a binding"),
+    }
+}
+
+/// A hardware address that is this test's `index`th, so that a test
+/// writing a hundred bindings has a hundred clients rather than one
+/// written over.
+pub fn nth_mac(index: usize) -> String {
+    let index = u32::try_from(index).unwrap_or(u32::MAX);
+    let bytes = index.to_be_bytes();
+
+    format!(
+        "02:00:{:02x}:{:02x}:{:02x}:{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3]
+    )
 }
 
 /// The two requests whose answer is a network, aimed at `network`'s

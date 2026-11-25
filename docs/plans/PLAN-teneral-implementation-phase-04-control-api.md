@@ -611,9 +611,16 @@ One task per daemon reads the history; every stream filters it.
   `docs/api-design.md:715-735`'s departure from `ryll`'s dropping
   queue, and the enum variant makes it a case the compiler
   insists on handling.
-- The heartbeat carries the current cursor every 15 seconds, so
-  an idle consumer advances its resume point and a quiet network
-  stops being the one most likely to fall out of retention.
+- The heartbeat carries, every 15 seconds, the highest position
+  the daemon has delivered to that stream -- **not** the store's
+  current position, which 4e established is the unsafe reading: the
+  store's latest can include an event the stream has not been
+  handed, and a consumer resuming from it would never hear about
+  that event. Counting events outside the stream's scope is safe
+  and wanted, because an event it was never going to be given is
+  one it loses nothing by resuming past. With it, an idle consumer
+  advances its resume point and a quiet network stops being the one
+  most likely to fall out of retention.
 - A resync carries its reason -- epoch changed, evicted, never
   issued -- as three values and not one message, because an
   operator reads them differently and only the third means
@@ -1092,6 +1099,28 @@ and two tests were added over the socket: a lookup naming one
 network for another's interface is refused without naming either
 and the counter moves, and the ordinary case answers from the
 network the caller named.
+
+**4e, reviewed and committed 2026-11-26.** The step found that the
+heartbeat as this plan and `docs/api-design.md` both specified it --
+"the current cursor" -- is the unsafe reading of the one mechanism
+whose job is to stop a consumer falling out of retention. Both are
+corrected above and at their source, and the stream keeps two
+positions rather than one: what the consumer holds, which a resync
+and a disconnection report, and what it may resume from, which the
+heartbeat carries. Its mutation run is worth recording in full
+because of what it caught: the mutant that moves the subscription
+after the read -- the gap the whole join is arranged to prevent --
+**survived** the first attempt, because the pump's own lag
+re-broadcast the missing events and a concurrent-writes test could
+not see the difference. The step then built a deterministic window
+(a snapshot larger than any socket buffer, one event read to prove
+the view is open, writes during it) and the mutant died. A test
+that cannot distinguish the defect from the repair is not a test of
+the defect, and only the mutation run said so. Two of the required
+tests are in-crate rather than over the socket -- the lagging
+reader and the view bound -- because the socket versions would be
+timing-dependent; a socket test covers the bound's refusal reaching
+a caller with its retry hint.
 
 **Not a phase-4 change, recorded here because it landed on this
 branch.** `bluecatengineering/dhcproto#111`, the `hlen` clamp this

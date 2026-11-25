@@ -1331,8 +1331,8 @@ message Resync {
   optional Cursor latest = 5;
 }
 
-// An idle stream, saying so, and carrying the position the store has
-// reached.
+// An idle stream, saying so, and carrying the position this consumer
+// may resume from.
 //
 // Two reasons, and the second is the one that is not obvious. A
 // consumer can tell "nothing has happened" from "my connection is a
@@ -1341,6 +1341,15 @@ message Resync {
 // during a quiet period, so a stream idle for hours still resumes --
 // without it, a quiet network is the case most likely to fall out of
 // the retained history.
+//
+// It is the position this stream has been brought up to, which is not
+// the same thing as the position the store has reached and must not be:
+// the store's own latest can include an event this stream has not been
+// handed yet, and a consumer that resumed from that would never be
+// told about it. What is safe to carry, and what this is, is the
+// highest position the daemon has delivered this stream -- counting the
+// events outside its scope, because an event this stream was never
+// going to be given is one it loses nothing by resuming past.
 message Heartbeat {
   Cursor cursor = 1;
 }

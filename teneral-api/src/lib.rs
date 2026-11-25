@@ -21,6 +21,17 @@
 //! and which network it is scoped by, one exhaustive function each,
 //! and [`refusal`] is the vocabulary everything is refused with.
 //!
+//! The watch stream is in two halves that are not in the module list
+//! above because nothing outside this crate links them: one task per
+//! daemon reads the store's history and broadcasts it, and every
+//! stream filters that one reading for its own scope, because a read
+//! of the history is a view and a view is a thread. The join between a
+//! consumer's first read and the events that arrive while it is making
+//! it is the most delicate thing in the crate, and the argument for
+//! the order those two happen in is written where the code is. The
+//! bound on how many views are open at once lives beside it, because
+//! the stream is what opens them in bursts.
+//!
 //! [`resource`] holds one converter per resource kind, and it is one
 //! rather than two because a resource reaches this crate twice over:
 //! typed, from a read, and as the JSON text an event carries. Two
@@ -67,6 +78,10 @@ pub mod proto;
 pub mod refusal;
 pub mod resource;
 pub mod server;
+#[cfg(test)]
+mod testing;
+mod views;
+mod watch;
 pub mod wire;
 
 pub use authz::{Authenticated, named_network, required_capability};

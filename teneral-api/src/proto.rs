@@ -19,8 +19,8 @@ pub use generated::*;
 use std::net::Ipv4Addr;
 
 use teneral_store::{
-    Capability as StoreCapability, Cursor as StoreCursor, Selector as StoreSelector,
-    SelectorKind as StoreSelectorKind, Token as StoreToken, TokenScope,
+    Capability as StoreCapability, Cursor as StoreCursor, EventKind as StoreEventKind,
+    Selector as StoreSelector, SelectorKind as StoreSelectorKind, Token as StoreToken, TokenScope,
 };
 
 /// The store's position, as the wire carries it.
@@ -128,6 +128,42 @@ pub fn selector_kind_from_wire(value: SelectorKind) -> Option<StoreSelectorKind>
     }
 }
 
+/// A kind of resource, as the wire carries it.
+///
+/// An exhaustive match and not a cast, for the reason a capability is:
+/// the store's list is what its event log holds and the wire's is a
+/// set of field numbers, and a cast between them would make either
+/// one's numbering a thing nobody may change.
+pub fn resource_kind(kind: StoreEventKind) -> ResourceKind {
+    match kind {
+        StoreEventKind::Network => ResourceKind::Network,
+        StoreEventKind::Attachment => ResourceKind::Attachment,
+        StoreEventKind::AddressRange => ResourceKind::AddressRange,
+        StoreEventKind::Binding => ResourceKind::Binding,
+        StoreEventKind::Lease => ResourceKind::Lease,
+    }
+}
+
+/// The kind a wire value names, or `None` for one this build does not
+/// serve.
+///
+/// `None` rather than a default, and a watch naming one is refused
+/// rather than having it dropped from the subscription: a consumer
+/// written against a fuller vocabulary should learn that it is talking
+/// to an older daemon instead of watching a stream that never carries
+/// what it asked for. The unspecified value lands here too, a field
+/// nobody set not being a kind of resource.
+pub fn resource_kind_from_wire(value: ResourceKind) -> Option<StoreEventKind> {
+    match value {
+        ResourceKind::Network => Some(StoreEventKind::Network),
+        ResourceKind::Attachment => Some(StoreEventKind::Attachment),
+        ResourceKind::AddressRange => Some(StoreEventKind::AddressRange),
+        ResourceKind::Binding => Some(StoreEventKind::Binding),
+        ResourceKind::Lease => Some(StoreEventKind::Lease),
+        ResourceKind::Unspecified => None,
+    }
+}
+
 /// The selector kind the store spells `name`, or `None` for a spelling
 /// this build does not know.
 ///
@@ -188,9 +224,28 @@ pub fn address_from_wire(value: u32) -> Ipv4Addr {
 
 #[cfg(test)]
 mod tests {
-    use super::{Capability, address, address_from_wire, capability, capability_from_wire};
+    use super::{
+        Capability, ResourceKind, address, address_from_wire, capability, capability_from_wire,
+        resource_kind, resource_kind_from_wire,
+    };
     use std::net::Ipv4Addr;
-    use teneral_store::Capability as StoreCapability;
+    use teneral_store::{Capability as StoreCapability, EventKind as StoreEventKind};
+
+    #[test]
+    fn every_kind_of_resource_the_store_holds_survives_the_round_trip() {
+        // The two lists are matched by hand, and a kind that mapped to
+        // the wrong wire value would hand a consumer one resource's
+        // state under another's name -- which a consumer applying it
+        // would store as the wrong thing entirely.
+        for kind in StoreEventKind::ALL {
+            assert_eq!(resource_kind_from_wire(resource_kind(kind)), Some(kind));
+        }
+    }
+
+    #[test]
+    fn a_kind_of_resource_this_build_does_not_serve_is_not_read_as_one_it_does() {
+        assert_eq!(resource_kind_from_wire(ResourceKind::Unspecified), None);
+    }
 
     #[test]
     fn every_capability_survives_the_round_trip_to_the_wire_and_back() {

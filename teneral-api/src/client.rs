@@ -19,7 +19,8 @@ use tokio::net::UnixStream;
 
 use crate::error::{Error, Result};
 use crate::proto::{
-    Hello, HelloResult, Request, Response, Welcome, hello_result, request, response,
+    Hello, HelloResult, Request, Response, WatchEvent, WatchRequest, Welcome, hello_result,
+    request, response,
 };
 use crate::{PROTOCOL_VERSION, wire};
 
@@ -133,6 +134,31 @@ impl Connection {
         .await
     }
 
+    /// Ask for a stream, which is the last thing a connection does.
+    ///
+    /// Consuming, because a watch is terminal: nothing follows it on
+    /// the connection but events, so a caller that could still make a
+    /// request would be a caller holding a connection whose answers
+    /// are no longer answers to anything it asked.
+    ///
+    /// The request is written and nothing is read, so a refusal
+    /// arrives from [`Stream::next`] rather than from here -- which is
+    /// what keeps a refused watch from consuming the first event of a
+    /// watch that was not refused.
+    pub async fn watch(self, request: WatchRequest) -> Result<Stream> {
+        let (mut socket, welcome) = self.into_parts();
+
+        wire::write_message(
+            &mut socket,
+            &Request {
+                kind: Some(request::Kind::Watch(request)),
+            },
+        )
+        .await?;
+
+        Ok(Stream { socket, welcome })
+    }
+
     /// Take the socket and the welcome apart.
     ///
     /// The seam between the handshake and whatever reads the
@@ -143,6 +169,53 @@ impl Connection {
     /// handshake, and a caller holding the pieces can be any of them.
     pub fn into_parts(self) -> (UnixStream, Welcome) {
         (self.stream, self.welcome)
+    }
+}
+
+/// A watch stream: a connection that carries events and nothing else.
+///
+/// What a consumer does with it is read until it stops, and the one
+/// thing it must not do is treat a resync as a reason to reconnect
+/// blindly. A resync arrives here as an event, which means a consumer
+/// has to parse it to carry on reading -- so the only consumer that
+/// can ignore one is a consumer that has stopped reading, which is the
+/// whole reason a gap is data on the stream and not a connection
+/// error.
+pub struct Stream {
+    /// The socket, past the handshake and past the request.
+    socket: UnixStream,
+    /// What the daemon said when the connection opened.
+    welcome: Welcome,
+}
+
+impl Stream {
+    /// What the daemon said when the connection opened: its position,
+    /// its schema version, and the scope and capabilities this caller
+    /// was granted.
+    pub fn welcome(&self) -> &Welcome {
+        &self.welcome
+    }
+
+    /// The next event, or why there will not be one.
+    ///
+    /// A refusal is an error here rather than an answer, unlike a
+    /// request's: a refused watch has no stream, so there is nothing
+    /// for a caller to go on reading and the refusal is the whole of
+    /// what happened. The final event of a stream that is being
+    /// disconnected is an ordinary event, delivered as one, and the
+    /// error after it is the connection closing.
+    pub async fn next(&mut self) -> Result<WatchEvent> {
+        let response: Response = wire::read_message(&mut self.socket).await?;
+
+        match response.answer {
+            Some(response::Answer::Event(event)) => Ok(event),
+            Some(response::Answer::Refusal(refusal)) => Err(Error::Refused {
+                refusal: Box::new(refusal),
+            }),
+            other => Err(Error::Unexpected {
+                detail: format!("a watch stream carried {other:?} rather than an event"),
+            }),
+        }
     }
 }
 

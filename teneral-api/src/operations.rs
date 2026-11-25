@@ -52,6 +52,7 @@ use crate::authz::Authenticated;
 use crate::proto::{self, Response, request, response};
 use crate::refusal::{self, Refused};
 use crate::resource;
+use crate::views::{View, Views};
 
 /// What a resource is called in a refusal this layer builds.
 ///
@@ -84,16 +85,23 @@ pub(crate) struct Context<'a> {
     pub tokens: &'a dyn TokenStore,
     /// Who the connection is acting as, settled at the handshake.
     pub caller: &'a Authenticated,
-    /// How many views of the store this daemon will hold at once,
-    /// which the diagnostics report.
-    pub max_live_views: usize,
+    /// The bound on how many views of the store this daemon holds at
+    /// once, which every read here goes through and the diagnostics
+    /// report.
+    pub views: &'a Views,
 }
 
 impl Context<'_> {
     /// A view of the store, which every read in one answer is taken
     /// from.
-    async fn view(&self) -> Result<Box<dyn ReadHandle>, Refused> {
-        self.store.read().await.map_err(refuse)
+    ///
+    /// The one place an operation opens a view, which is what makes
+    /// the bound on them a property of this function rather than
+    /// something each handler is trusted to ask about. A daemon
+    /// already holding as many as it will refuses with the named
+    /// refusal and a retry hint; see [`crate::views`].
+    pub(crate) async fn view(&self) -> Result<View, Refused> {
+        self.views.refusing(self.store).await
     }
 
     /// The position the store has reached.
@@ -170,11 +178,17 @@ async fn dispatch(context: &Context<'_>, request: &request::Kind) -> Answered {
         request::Kind::ListTokens(_) => list_tokens(context).await,
         request::Kind::MintEpoch(_) => mint_epoch(context).await,
 
-        // The stream is the next thing built on this wire, and a
-        // consumer asking for one now is told that this build does not
-        // serve it rather than left holding a connection that will
-        // never carry an event.
-        request::Kind::Watch(_) => Err(Box::new(refusal::not_served("a watch"))),
+        // A watch is terminal: the connection becomes the stream, so
+        // it is taken by [`crate::watch`] before this function is
+        // reached and never arrives here. Written out rather than
+        // defaulted because the match has no default arm -- an
+        // operation added to the schema has to be decided here -- and
+        // answered as a failure rather than as a refusal a consumer
+        // could act on, there being nothing a consumer could do about
+        // a daemon that dispatched its stream as a request.
+        request::Kind::Watch(_) => Err(Box::new(refusal::internal(
+            "serve a stream as a request and its one answer",
+        ))),
     }
 }
 
@@ -355,7 +369,7 @@ async fn interface_owner(
     let mut view = context.view().await?;
     let position = proto::cursor(view.cursor());
 
-    let network = owner(context, view.as_mut(), &request.namespace, &request.ifname).await?;
+    let network = owner(context, &mut *view, &request.namespace, &request.ifname).await?;
     let network = match network {
         Some(network) => network,
         // Nothing has claimed it, which only a caller that may see
@@ -873,7 +887,7 @@ async fn diagnostics(context: &Context<'_>) -> Answered {
             epoch_minted_by: identity.minted_by.clone(),
             epoch_minted_at: identity.minted_at,
             live_views: counted(context.store.live_views()),
-            max_live_views: counted(context.max_live_views),
+            max_live_views: counted(context.views.bound()),
             cross_network_answers: context.store.cross_network_answers(),
         }),
     )])

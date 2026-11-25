@@ -735,8 +735,8 @@ exact.
 
 ### Heartbeat
 
-An idle stream emits a periodic keepalive carrying the current
-cursor. Two reasons, and the second is the non-obvious one.
+An idle stream emits a periodic keepalive carrying the position
+that stream has been brought up to. Two reasons, and the second is the non-obvious one.
 First, a consumer can tell "nothing has happened" from "my
 connection is a black hole", which in a system whose failures
 are silent is worth the bytes. Second, the cursor in a heartbeat
@@ -744,6 +744,16 @@ lets a client advance its resume point during a quiet period, so
 a consumer that has been idle for hours still resumes rather
 than resyncing -- without it, a quiet network is the case most
 likely to fall out of the retention window.
+
+Which position it carries is the part to get right, and this note
+first said "the current cursor", which is the unsafe reading. The
+store's own latest position can include an event the stream has
+not been handed yet, and a consumer that advanced its resume point
+to that would never be told about that event -- a silent gap
+produced by the very mechanism meant to prevent one. What is safe
+is the highest position the daemon has delivered to *that* stream,
+counting the events outside its scope, since an event a stream was
+never going to be given is one it loses nothing by resuming past.
 
 ## Detecting a wrong answer
 
