@@ -6,8 +6,11 @@ them to work out *what* to build is fine; this file is how the
 project stays able to say where each behaviour came from, years
 later, without relying on anyone's memory.
 
-Every behaviour visible on the wire gets a row. The rule is one of
-two sources, and the row says which:
+Every behaviour visible on the wire of a protocol teneral did not
+invent gets a row. The control API's own wire is teneral's invention
+end to end, with no RFC to cite and nothing to measure, so it has no
+rows: a row citing nothing would make this rule meaningless. The rule
+is one of two sources, and the row says which:
 
 - **An RFC**, cited to the section. The protocols are specified in
   public documents -- dnsmasq's own source references roughly 120

@@ -10,11 +10,14 @@ sections say what is waiting on that. The
 [implementation plan](plans/PLAN-teneral-implementation.md) tracks
 the rest.
 
-The workspace has two members. `teneral-store` is the binding store,
-which is built; [binding-store.md](binding-store.md) describes what
-it holds and why. `teneral` is the binary, which so far prints its
-version and carries the differential rig. Every `make` target below
-acts on the whole workspace, so none of this is per-crate.
+The workspace has three members. `teneral-store` is the binding
+store; [binding-store.md](binding-store.md) describes what it holds
+and why. `teneral-api` is the control plane over it -- the schema,
+the server and the client -- and [control-api.md](control-api.md)
+describes it. `teneral` is the daemon, with a few client
+subcommands for debugging, and it carries the differential rig.
+Every `make` target below acts on the whole workspace, so none of
+this is per-crate.
 
 ## Rust is built in Docker, not on the host
 
@@ -44,6 +47,22 @@ There is deliberately no `rust-toolchain.toml`: it makes rustup try
 to sync a channel, which fails in a container with no network. The
 language floor is `rust-version` in `[workspace.package]`, so a
 too-old toolchain fails with cargo's own MSRV error instead.
+
+The image also carries `protobuf-compiler`, because
+`teneral-api/build.rs` runs `protoc` over
+`teneral-api/proto/teneral.v1.proto`. It is installed when the image
+is built -- the one place allowed to reach the network -- since every
+compile target runs with no network and a build script that had to
+fetch a compiler would fail there. **The generated Rust is never
+committed.** It is written to `OUT_DIR` on every build, and cargo
+reruns the script when the schema changes, so editing the schema and
+running `make build` or `make test` is all that regenerates it; a
+second copy in the tree would be a copy that can disagree with the
+first. After changing the Dockerfile, `make image` rebuilds the
+image. To check that the reference page still lists every operation
+in the schema, and no others, run `scripts/check-api-docs.sh`; like
+`scripts/check-store-trait.sh` it is run by hand rather than from
+pre-commit.
 
 `unwrap_used` is `deny` in `[workspace.lints.clippy]`, and every
 crate inherits it with `[lints] workspace = true`. A root

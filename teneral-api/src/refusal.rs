@@ -207,7 +207,9 @@ pub fn cross_network(kind: &str, id: &str, asked: &str, found: &str) -> Refusal 
     Refusal {
         code: RefusalCode::Internal as i32,
         detail: format!(
-            "the {kind} {id} was asked about in {asked} and belongs to {found}, so the daemon              refused the answer rather than serving one network's configuration to another"
+            "the {kind} {id} was asked about in {asked} and belongs to \
+             {found}, so the daemon refused the answer rather than \
+             serving one network's configuration to another"
         ),
         resource_kind: Some(kind.to_owned()),
         resource_id: Some(id.to_owned()),

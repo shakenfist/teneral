@@ -105,13 +105,19 @@ This is the first consumer and the demanding one. It wants to
 read and write everything: networks, ranges, reservations,
 leases, names, upstream forwarders. It wants to show a live
 list, so it wants a push channel rather than a poll loop. Its
-user interface is served by the daemon itself, from the shared
-`sfui` design system vendored into its static assets, and it
+user interface is served by the home IPAM's own binary, from the
+shared `sfui` design system vendored into its static assets. That
+binary is in the home IPAM's own repository, built from teneral's
+libraries, and not in this one: this repository is teneral's core,
+and the IPAM is a separate product that uses it underneath. It
 consumes this API like any other client -- which is what stops it
-acquiring a privileged path into the store.
+acquiring a privileged path into the store, and a user interface in
+another repository cannot reach the store even by accident, since
+it has no access to the crate.
 
-That last clause is the whole of why serving the pages here is
-safe, so it is worth stating as a rule rather than an intention:
+That last clause is the whole of why the pages being served by a
+product built on this store is safe, so it is worth stating as a
+rule rather than an intention:
 **the web interface gets no API surface of its own.** Every byte
 it displays arrives over the endpoints described below, with the
 same network scoping and the same authorisation as any other
@@ -863,6 +869,19 @@ programmatic clients, where identity comes from a token and
 identity headers are rejected outright rather than ignored. The
 daemon should refuse to start if it cannot tell them apart.
 
+**As built, which differs from the opening of this section in one
+respect.** The peer is the credential only for the process the
+daemon runs as: any other caller on the socket presents a token, and
+the operator's operations -- minting and removing tokens, listing
+them, the diagnostics and minting an epoch -- are gated by an
+`admin` capability on that token rather than by a second socket's
+file mode. A token may mint only a token whose scope and
+capabilities lie inside its own. This repository's socket has no
+header-trusting counterpart: the listener that would trust identity
+headers belongs to whatever sits behind the proxy, which is the home
+IPAM's binary, and mapping an identity to a scope is not yet decided.
+[The control API](control-api.md) describes what is built.
+
 **Beyond those, bearer tokens as above**, which is what a
 consumer like a hypervisor fleet uses: it cannot complete a
 browser flow, and it should not have to. The conductor meets the
@@ -1016,15 +1035,19 @@ Four things, each stated so that it can be checked rather than
 argued:
 
 1. ~~**The user interface turns out to have no server-side
-   half.**~~ **Answered, and it upholds the recommendation.** The
-   interface is served by the daemon itself from vendored `sfui`
-   assets, behind the same authenticating proxy that the rest of
-   the API sits behind. So a reverse proxy is present by
-   construction rather than by assumption -- it is where the OIDC
-   flow lives -- and the socket has something to be bridged by.
-   There is no static bundle talking to the daemon directly, no
-   cross-origin policy to own, and no TLS for the daemon to
-   terminate.
+   half.**~~ **Answered.** The interface has a server-side half,
+   and it is the home IPAM's binary in its own repository, behind
+   the same authenticating proxy that the rest of the API sits
+   behind -- not this repository's daemon. That upheld the HTTP
+   recommendation, because the daemon would have been the thing
+   the proxy bridged to; under the ruling it is what makes the
+   protobuf form workable, because the IPAM's binary is the one
+   place that translates for a browser, linking teneral's client
+   rather than reimplementing the model. A reverse proxy is
+   present by construction rather than by assumption, since it is
+   where the OIDC flow lives. There is no static bundle talking to
+   the daemon directly, no cross-origin policy for teneral to own,
+   and no TLS for it to terminate.
 2. **The stream's cost is measured and JSON is the reason.** Not
    a feeling about parsing overhead: a number. If one consumer
    mirroring a whole store costs more than a few percent of a
@@ -1118,6 +1141,9 @@ worst time to be changing the store's interface.
 
 - [ARCHITECTURE.md](../ARCHITECTURE.md) -- the layers this API
   is the control plane for.
+- [control-api.md](control-api.md) -- what was built from this
+  note: the schema, the capabilities, every operation and the watch
+  stream as it behaves.
 - [provenance.md](provenance.md) -- why behaviour is cited to an
   RFC or to a measurement, which is why the selector precedence
   above is documented as this project's own choice.

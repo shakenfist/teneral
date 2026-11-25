@@ -5,13 +5,14 @@ client on a known interface with the content configured for that
 client. See `ARCHITECTURE.md` for the shape of the system and
 `docs/plans/` for what is being built and in what order.
 
-The daemon does not exist yet. The Cargo workspace holds two
-crates: `teneral-store`, which is the binding store and is built,
-and `teneral`, whose binary still only prints its version. The
-build, the lint suite and the CI lanes are all in place and do
-apply, except that no lane has ever run, because there is no
-remote. See `docs/development.md`, and
-`docs/binding-store.md` for the store.
+The Cargo workspace holds three crates: `teneral-store`, the
+binding store; `teneral-api`, the control plane over it, whose
+schema, server and client are what another repository links; and
+`teneral`, the daemon and its debugging client. No front-end
+speaks DHCP or DNS yet, and the repository has no remote, so no CI
+lane has ever run. See `docs/development.md`,
+`docs/binding-store.md` for the store and `docs/control-api.md` for
+the API.
 
 ## The invariants
 
@@ -67,6 +68,19 @@ and each of them has already been decided:
   therefore not where this rule is enforced. A runtime feature
   appearing in that crate's own `[dependencies]` has broken it and
   should fail review.
+- **Every mutating store method takes the actor that made the
+  write.** It is recorded on the event and on the resource row. A new
+  write that does not take one is the one whose author nobody can
+  name.
+- **A credential narrows and never widens, and `admin` is a
+  capability on a token, not a second socket.** One socket serves
+  everyone; the only caller that needs no token is the process the
+  daemon runs as. A minted token may not exceed its minter, and that
+  is enforced in the store. Which capability a request needs is one
+  exhaustive `match` in `teneral-api`; do not give it a default arm.
+- **A generated protobuf file is never committed.** `build.rs`
+  generates it from `teneral.v1.proto` into `OUT_DIR`, and the schema
+  is the only copy.
 - **A panic is a cluster-wide outage.** One process serves every
   network, so `unwrap()`, `expect()`, slice indexing and
   unchecked arithmetic on anything derived from a packet are

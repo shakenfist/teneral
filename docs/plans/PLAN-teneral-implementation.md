@@ -354,7 +354,7 @@ by the time it was executed.
 | 1. Research spikes | [PLAN-teneral-implementation-phase-01-research-spikes.md](PLAN-teneral-implementation-phase-01-research-spikes.md) | Complete | `homelab-deployments-lfs 658caab (!12)`, teneral `fa77a8e..1337e79` |
 | 2. Repository foundations | [PLAN-teneral-implementation-phase-02-foundations.md](PLAN-teneral-implementation-phase-02-foundations.md) | Complete | teneral `482edf7..8fa1b4b` |
 | 3. The binding store | [PLAN-teneral-implementation-phase-03-binding-store.md](PLAN-teneral-implementation-phase-03-binding-store.md) | Complete | teneral `a6189fc..190425f` |
-| 4. The control API | [PLAN-teneral-implementation-phase-04-control-api.md](PLAN-teneral-implementation-phase-04-control-api.md) | Not started | |
+| 4. The control API | [PLAN-teneral-implementation-phase-04-control-api.md](PLAN-teneral-implementation-phase-04-control-api.md) | In progress | |
 | 5. DHCPv4 front-end | PLAN-teneral-implementation-phase-05-dhcpv4.md | Proposed | |
 | 6. DNS front-end | PLAN-teneral-implementation-phase-06-dns.md | Proposed | |
 | 7. Home IPAM v1 | PLAN-teneral-implementation-phase-07-home-ipam.md | Proposed | |
@@ -367,9 +367,9 @@ Phases 1 to 3 are complete. The first two said that they were the
 only ones that would be scheduled, because the operator had other
 projects in flight and had said this one should not proceed past
 the prototype until those were further along; he resumed it on
-2026-11-23. Phase 4 is planned and `Not started` as of
-2026-11-25. Phases 5 to 11 remain `Proposed` rather than
-`Not started`, which is the honest status and should not be
+2026-11-23. Phase 4 is `In progress` as of 2026-11-26: its
+steps are built and it awaits review and merge. Phases 5 to 11
+remain `Proposed` rather than `Not started`, which is the honest status and should not be
 promoted to make the table look busier.
 
 Phases 2 and 3 both landed on `develop` without a pull request,
@@ -474,20 +474,27 @@ redeploys it.
 - **Phase 4: The control API.** The transport, CRUD over the
   store, watch/subscribe, authentication.
 
-  Now planned, and its own file is the specification. Two
-  corrections to this sketch, both of which a reader would
-  otherwise trip over. The transport is not the one phase 1e
-  chose: 1e recommended HTTP with JSON bodies and the operator
-  ruled for protobuf on the socket on 2026-11-25, which is open
-  question 1 above. And "CRUD over the store" is a quarter of the
-  phase -- `docs/api-design.md`, which 1e wrote after this
-  paragraph, fixes every identity, the watch primitive's behaviour
-  across a reconnect, two trust models that may not share a
-  listener and six diagnostics, and that note rather than this
-  sketch is what the phase file is written against. Two of this
-  plan's *Future work* entries are also phase 4's by name: minting
-  an epoch after a restore, and bounding how many read handles are
-  live at once.
+  Now built, and its own file is the record. In summary: the
+  `teneral-api` crate -- a protobuf schema, a server over any
+  binding store, and the client a consumer links -- on one Unix
+  socket, with the `teneral` binary a daemon around it; the five
+  resources the store holds, the three ways a consumer learns an
+  address, and the watch primitive in full, with its snapshot, its
+  in-sync marker, resume, three named resyncs, a heartbeat that
+  carries what the stream was delivered and not what the store has
+  reached, and disconnection of a reader that falls behind. Four
+  things changed on the way, each a ruling or a finding rather
+  than a refinement. The transport is not the one phase 1e chose:
+  the operator ruled for protobuf on 2026-11-25, which is open
+  question 1 above. There is one socket and `admin` is a capability
+  on a token rather than a second socket, so the strongest boundary
+  in the design is a comparison in the code, held by an exhaustive
+  capability decision, a subset rule the store enforces on minting,
+  and a refusal test per operator operation. Every mutating store
+  method now takes the actor that made the write. And minting an
+  epoch is an operation, while detecting a restore was considered
+  and declined; see *Future work*. `docs/control-api.md` describes
+  it without a plan in hand.
 - **Phase 5: DHCPv4 front-end.** The socket datapath without
   namespaces. DISCOVER, REQUEST, ACK, NAK, RELEASE, INFORM.
   Static reservations and dynamic pools. Option encoding. The
@@ -1141,36 +1148,39 @@ chosen to defer to here, so that we do not forget them.
   workflow is a decision made by the wrong person. Phase 7 is where
   packaging is actually decided, and it should revisit the release
   artefact at the same time.
-* **The epoch does not cover a restore of the same database file,
-  and nothing can mint a new one.** A cursor's epoch is what tells
-  a returning consumer "carry on from here" apart from "that number
-  belongs to another store's history", and it is generated once, by
-  the engine, when the database is created. So it lives in the
-  file -- and a file-level restore from a backup brings it back
-  unchanged, together with a sequence counter wound back to
-  whenever the backup was taken. A consumer whose position is
-  *ahead* of the restore point is caught, because it presents a
-  position the store has never issued, and that is a distinct
-  answer rather than an eviction for exactly this reason. A
-  consumer whose position is at or below the restore point is
-  caught by nothing at all: its cursor is one the restored store
-  has issued, so it resumes, and it is then served different events
-  under numbers it has already seen. That is the project's
-  signature failure mode -- a silently wrong answer -- with a
-  known and ordinary trigger, which makes this the most serious
-  item in this section. The remedy is not a mechanism but an
-  operator action: after restoring a store from a backup, mint a
-  new epoch before any consumer reconnects, which makes the
-  restored store honestly a different store and turns every stale
-  cursor into an epoch mismatch. Nothing offers that operation
-  today. Whoever builds the control plane has to expose it, decide
-  whether the daemon should refuse to serve a restored file until
-  it has been run, and say in the operator documentation that
-  restoring a backup without it is how a consumer is quietly lied
-  to. The hole and its remedy are recorded in
-  `docs/binding-store.md` and in the migration that generates the
-  value, so that a reader meets them where they would otherwise
-  trust the epoch.
+* **The epoch does not cover a restore of the same database file;
+  minting one is half done, and detecting the need for it was
+  declined.** A cursor's epoch is what tells a returning consumer
+  "carry on from here" apart from "that number belongs to another
+  store's history", and it is generated once, by the engine, when
+  the database is created. So it lives in the file -- and a
+  file-level restore from a backup brings it back unchanged,
+  together with a sequence counter wound back to whenever the backup
+  was taken. A consumer whose position is *ahead* of the restore
+  point is caught, as a position the store never issued. A consumer
+  whose position is at or below it is caught by nothing at all: its
+  cursor is one the restored store has issued, so it resumes, and is
+  then served different events under numbers it has already seen.
+  That is the project's signature failure mode with a known and
+  ordinary trigger. **Done:** `mint_epoch` exists and is reachable,
+  as an operator's operation over the control socket
+  (`teneral mint-epoch`), needing the `admin` capability or the
+  owning peer; it returns the first cursor of the new order and the
+  sequence counter does not restart. The restore procedure -- mint
+  before any consumer reconnects -- is in `docs/control-api.md`.
+  **Considered and declined:** having the daemon notice that it has
+  been handed a restored file, and refuse to serve it until an epoch
+  has been minted. Every detector needs durable state outside the
+  database, such as a remembered high-water mark, and the restore
+  that rewinds the database is a restore of the data directory that
+  remembered it, so the detector comes back rewound too. It would
+  fail exactly when it is needed and be trusted anyway, which is
+  worse than having none. What stands in for it: the daemon logs the
+  epoch, who minted it and when, the schema version and the latest
+  position at startup, the diagnostics report the same, and
+  `NEVER_ISSUED` is a distinct answer that says a store has gone
+  backwards. Revisit only if a detector can be found whose state
+  survives the restore it is meant to detect.
 * **The sweep interval is also an address-stickiness knob, and the
   two cannot be set independently.** RFC 2131 section 4.3.1's
   second selection step gives a client back the address it held
@@ -1213,26 +1223,55 @@ chosen to defer to here, so that we do not forget them.
   was documented rather than hidden. Whether it is needed is a
   question for a consumer: changing an existing binding's address
   onto an address something else is holding is the case it would
-  serve, and nothing yet does that. Fill it when a consumer needs
-  it, as one transaction like its sibling rather than as a revoke
+  serve. Phase 4 looked, and nothing in the API's shape needs it:
+  changing a binding on to an address something holds is refused
+  with the holder named, which is a legitimate answer, and a
+  consumer that wants the address can revoke the lease and retry.
+  Fill it when a consumer needs it, as one transaction like its sibling rather than as a revoke
   followed by an update, because the two-step form has a state in
   which the address was taken from a client and the binding that
   justified taking it was never written.
-* **Nothing bounds how many read handles are live at once, and the
-  bound belongs to the control plane.** Each live view holds a read
-  transaction on a thread of its own for as long as it is held,
-  which is what makes a consistent view across a caller's awaits
-  possible at all, and it means the number alive at once wants
-  bounding. The store does the half that is genuinely its own:
-  `live_views()` reports the count, so a bound is enforceable from
-  above. The other half is not the store's to write. Refusing to
-  open a view needs a policy -- how many is too many -- and an
-  error a consumer expects and knows how to retry, and both of
-  those are the control plane's vocabulary rather than the store's;
-  phase 4 is also the layer that knows how many concurrent
-  consumers there are supposed to be. So phase 4 sets the bound,
-  names the refusal, and says what a consumer does when it is
-  refused.
+* **Done: the number of live read handles is bounded.** Each live
+  view holds a read transaction on a thread of its own, which is what
+  makes a consistent view across a caller's awaits possible and is
+  why the number alive at once wants bounding. Phase 4 set the bound
+  at 64, configurable as `--max-live-views`, and the refusal lives in
+  the control plane: one function in `teneral-api` is the only place
+  a view is opened, and it takes a permit first, refusing a request
+  with `TOO_MANY_VIEWS` and a retry hint when none is free. The
+  watch's own reader waits for a permit rather than being refused,
+  since a reader that gave up would leave every consumer silently
+  behind. The store's own `live_views()` is on the trait now, and
+  the diagnostics report it beside the bound, because the bound is
+  enforced on the views this daemon opened and the count is every
+  view in the process -- the arrangement that notices the day they
+  disagree, which phase 8 will make matter by sharing the process
+  with a datapath.
+* **Content blobs have no capability yet.** Reading one is its own
+  capability, because a blob holds credentials, and it arrives with
+  the blobs in phase 10. Capabilities are rows of text rather than a
+  schema, so adding it is an insert and not a migration.
+* **How an authenticated identity maps to a scope is undecided.**
+  Phase 4 built tokens, their scopes and who may mint one. Mapping a
+  human arriving from an authenticating proxy to the networks they
+  may touch wants a real authentik configuration to be designed
+  against, and should be decided with the home IPAM, whose binary
+  sits behind that proxy.
+* **The daemon has no logging framework.** It writes one line per
+  message to standard error, for a unit file to capture into the
+  journal, which supplies the timestamps and the filtering. Whether
+  to carry a framework is a packaging decision and belongs with the
+  rest of the deployment, so the packaging phase should make it.
+* **The client library has no reconnecting watch helper.** The phase
+  4 plan specified one: a watch that holds the last position it was
+  delivered, reconnects with backoff, presents it, and surfaces a
+  resync to its caller as a distinct event. What exists is a
+  connection, requests, collection reads and a stream whose `next`
+  returns events, and the reconnect bookkeeping is the consumer's.
+  Every consumer that hand-rolls it is liable to get it subtly wrong
+  in the same way, and the failure is silent divergence, so it
+  should be written once, in the client, before a second consumer
+  needs it -- the home IPAM being the first.
 
 ### Bugs fixed during this work
 

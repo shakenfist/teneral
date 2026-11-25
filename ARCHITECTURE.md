@@ -1,9 +1,9 @@
 # Architecture
 
 **This describes the intended shape of the system. The binding
-store at the middle of it is built; everything above and below it
-is not yet.** The plan that builds the rest, and the research
-spikes that gate it, are in
+store at the middle of it and the control plane over it are built;
+the front-ends and datapaths are not yet.** The plan that builds
+the rest, and the research spikes that gate it, are in
 [docs/plans/PLAN-teneral-implementation.md](docs/plans/PLAN-teneral-implementation.md).
 
 ## The idea
@@ -79,19 +79,36 @@ occupies that design space.
 **The control plane** is an API, not a configuration file. Config
 files, a database watcher and an operator's user interface are all
 interchangeable clients of the same API, and the API is the only
-way into the store. The daemon also serves a simple web interface
-over that same API, from the shared `sfui` design system vendored
-into its static assets; it is a client of the API like any other
-and has no privileged path of its own.
+way into the store. It exists, as the `teneral-api` crate: a
+protobuf schema, a server over any binding store, and the client a
+consumer links, speaking length-delimited messages over one Unix
+socket. It serves the five resources the store holds, the three ways
+a consumer learns an address, the watch primitive with its snapshot,
+resume and named resyncs, the diagnostics, and the operator's own
+operations -- tokens and minting an epoch. It does not serve zones,
+records or content blobs, which the store does not hold, and it
+listens on no TCP port. The `teneral` binary is a thin daemon around
+it. See [docs/control-api.md](docs/control-api.md).
+
+No front-end serves a browser from this repository. This repository
+is teneral's core libraries; the home IPAM is a separate product in
+its own repository, built from them, and the binary that serves the
+web interface is that product's. It links the client crate and is a
+consumer of the API like any other, with no privileged path into the
+store -- which a user interface in another repository cannot acquire
+even by accident, since it has no access to the store's crate.
 
 Human identity comes from an authenticating reverse proxy, which
 terminates TLS, runs the OIDC flow and forwards the authenticated
 user as request headers -- the arrangement the `private-ci`
 conductor dashboard runs. Those headers are evidence only because
-the proxy is the only thing that can reach the listener, so the
-listener that trusts them is separate from the one programmatic
-clients use with a bearer token. Authorisation -- which networks
-an identity may touch -- stays in the daemon, because it is the
+the proxy is the only thing that can reach the listener, so a
+listener that trusts them is separate from one that trusts a bearer
+token, and it is not this repository's socket: that one trusts its
+file mode and its tokens, and nothing else. The listener behind the
+proxy belongs to the home IPAM's binary. Which networks an
+identity arriving that way may touch is not decided yet; the
+authorisation stays in teneral, because it is the
 only component that knows what a network is.
 
 The API carries a watch/subscribe primitive, because a consumer
@@ -128,6 +145,9 @@ language, not the reason for the project.
 
 ## Related documents
 
+- [docs/control-api.md](docs/control-api.md) -- the control plane
+  as built: the transport, the capabilities, every operation and
+  the watch stream's contract.
 - [docs/binding-store.md](docs/binding-store.md) -- layer zero as
   built: the schema and its keys, the lease lifecycle and its
   durability point, the history and its bound, and the diagnostics.
