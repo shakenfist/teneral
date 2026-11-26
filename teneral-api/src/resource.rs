@@ -48,6 +48,8 @@ use crate::proto::{self, Cursor, Resource, resource};
 pub struct NetworkState {
     /// The caller's name for it.
     pub name: String,
+    /// How long, in seconds, an address it gives out is held for.
+    pub lease_seconds: i64,
     /// Who made the write that produced this state.
     pub written_by: String,
 }
@@ -57,6 +59,7 @@ impl NetworkState {
     pub fn of(network: &Network) -> Self {
         Self {
             name: network.name.clone(),
+            lease_seconds: network.lease_seconds,
             written_by: network.written_by.clone(),
         }
     }
@@ -208,6 +211,7 @@ impl LeaseState {
 pub fn network(state: &NetworkState, written_at: &Cursor) -> proto::Network {
     proto::Network {
         name: state.name.clone(),
+        lease_seconds: state.lease_seconds,
         cursor: Some(written_at.clone()),
         written_by: state.written_by.clone(),
     }

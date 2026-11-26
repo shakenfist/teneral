@@ -379,9 +379,9 @@ async fn every_write_is_confirmed_at_the_position_it_was_assigned_and_names_its_
     sorted.dedup();
     assert_eq!(sequences, sorted, "two writes shared a position");
 
-    // A network of its own, created and then removed at the position
-    // the removal was assigned -- the one resource whose own name is
-    // the network it is about.
+    // A network of its own, created, configured and then removed at
+    // the position the removal was assigned -- the one resource whose
+    // own name is the network it is about.
     let answer = connection
         .request(request::Kind::CreateNetwork(proto::CreateNetworkRequest {
             name: "gamma".to_owned(),
@@ -392,14 +392,41 @@ async fn every_write_is_confirmed_at_the_position_it_was_assigned_and_names_its_
     let created = position_of(&answer);
 
     let answer = connection
-        .request(request::Kind::DeleteNetwork(proto::DeleteNetworkRequest {
+        .request(request::Kind::UpdateNetwork(proto::UpdateNetworkRequest {
             name: "gamma".to_owned(),
             expected: Some(created.clone()),
+            lease_seconds: 7_200,
         }))
         .await
         .expect("a write is confirmed");
     assert_eq!(network_of(&answer), "gamma");
-    assert!(position_of(&answer).sequence > created.sequence);
+    let configured = position_of(&answer);
+    assert!(configured.sequence > created.sequence);
+
+    // Read back over the same wire, because a write confirmed at a
+    // position says where it happened and not what it did.
+    let answer = connection
+        .request(request::Kind::GetNetwork(proto::GetNetworkRequest {
+            name: "gamma".to_owned(),
+        }))
+        .await
+        .expect("a network is answered");
+    let found = match resource_in(&answer).state {
+        Some(proto::resource::State::Network(network)) => network,
+        other => panic!("that answer carried {other:?} rather than a network"),
+    };
+    assert_eq!(found.lease_seconds, 7_200);
+    assert_eq!(found.cursor, Some(configured.clone()));
+
+    let answer = connection
+        .request(request::Kind::DeleteNetwork(proto::DeleteNetworkRequest {
+            name: "gamma".to_owned(),
+            expected: Some(configured.clone()),
+        }))
+        .await
+        .expect("a write is confirmed");
+    assert_eq!(network_of(&answer), "gamma");
+    assert!(position_of(&answer).sequence > configured.sequence);
 
     // And a lease is taken away, which is the only write to one on
     // this wire.
@@ -447,7 +474,7 @@ async fn a_credential_scoped_to_one_network_is_refused_on_the_other_for_every_op
     // this checks against.
     assert_eq!(
         requests.len(),
-        24,
+        25,
         "the operations that name a network have changed, and this list has not"
     );
     for kind in &requests {

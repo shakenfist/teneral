@@ -326,12 +326,33 @@ operation added without a decision about its network does not compile.
 
 ### Networks
 
+A network is a name, the children configured under it, and one value
+of its own: `lease_seconds`, how long an address it gives out is held
+for. There is one value and not a set of them because this is the only
+thing a protocol answer needs that cannot be observed -- a front-end
+reads the address and the mask of the interface a request arrived on
+for each request and remembers neither, and a duration is a decision
+somebody made rather than something to read. Every network has one: a
+network created without it carries the daemon's own default, so there
+is no unset state to handle and no create-then-configure pair to get
+half-way through.
+
 | Operation | Capability | Scope rule |
 |-----------|------------|------------|
 | `list_networks` | read | Filtered: the collection holds only the networks the caller may reach. |
 | `get_network` | read | Named network. |
 | `create_network` | write | Named network: a scoped token may create only a network its scope names. |
+| `update_network` | write | Named network. Needs the expected cursor. |
 | `delete_network` | write | Named network. Needs the expected cursor. |
+
+`update_network` sets the lease time to a whole value rather than
+adjusting it, and takes the position the caller read the network at. A
+caller that computed a new lease time from the one it read and wrote it
+without the position would write over somebody else's change with
+nothing saying so, and what that would cost is every client renewing in
+between being told the wrong number for as long as it holds its
+address. A lease time of zero or less, or one too large to be sent to a
+client at all, is refused as `INVALID_REQUEST`.
 
 ### Attachments
 

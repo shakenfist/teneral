@@ -236,7 +236,7 @@ fail separately is a write whose attribution is sometimes absent.
 | `token_network` | `(token, network)` | The networks one token may reach, as names rather than references -- a token may be minted before its network exists. |
 | `token_capability` | `(token, capability)` | Rows rather than columns or bits, so a capability for a resource this schema does not hold yet is an insert. |
 
-**A network is a name and nothing else.** The name is the caller's,
+**A network is a name and one number.** The name is the caller's,
 unique in the store, and opaque here: a UUID and the word `guest`
 are equally valid, because a consumer that already has a stable
 identifier for the thing should not have to keep a mapping to a
@@ -247,6 +247,20 @@ its own and owns zero or more ranges as child rows, which is what
 makes a static-only network with no range and a home network with a
 pool the same resource with different children rather than two
 modes.
+
+The number is how long, in seconds, an address the network gives
+out is held for, and it is the only thing a network configures
+because it is the only value a protocol answer carries that cannot
+be observed. A front-end takes the address and the mask from the
+interface a request arrived on, afresh for each request and
+remembering neither, which is observation rather than state. How
+long a client may keep an address is a decision somebody made, and
+a front-end that held one would be holding per-network state of its
+own. Every network has one: a network nobody has configured reads
+as twelve hours, including every network written before the column
+existed, because a network that has not chosen is not a network
+answering a little less -- it is one no client can be answered from
+at all.
 
 **An attachment's primary key is `(namespace, ifname)`, with the
 network an ordinary column**, and that is the most important line

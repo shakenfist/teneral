@@ -207,6 +207,7 @@ pub fn required_capability(request: &request::Kind) -> StoreCapability {
         | request::Kind::Explain(_) => StoreCapability::Read,
 
         request::Kind::CreateNetwork(_)
+        | request::Kind::UpdateNetwork(_)
         | request::Kind::DeleteNetwork(_)
         | request::Kind::AttachInterface(_)
         | request::Kind::DetachInterface(_)
@@ -256,6 +257,7 @@ pub fn named_network(request: &request::Kind) -> Option<&str> {
     match request {
         request::Kind::GetNetwork(request) => Some(&request.name),
         request::Kind::CreateNetwork(request) => Some(&request.name),
+        request::Kind::UpdateNetwork(request) => Some(&request.name),
         request::Kind::DeleteNetwork(request) => Some(&request.name),
 
         request::Kind::ListAttachments(request) => Some(&request.network),
@@ -334,6 +336,7 @@ mod tests {
             request::Kind::ListNetworks(Default::default()),
             request::Kind::GetNetwork(Default::default()),
             request::Kind::CreateNetwork(Default::default()),
+            request::Kind::UpdateNetwork(Default::default()),
             request::Kind::DeleteNetwork(Default::default()),
             request::Kind::ListAttachments(Default::default()),
             request::Kind::GetAttachment(Default::default()),
@@ -387,7 +390,7 @@ mod tests {
         // covering less than they claim to, and nothing else would
         // say so: the compiler insists on the match in this module
         // being exhaustive, and cannot insist on a list in a test.
-        assert_eq!(every_request_kind().len(), 33);
+        assert_eq!(every_request_kind().len(), 34);
     }
 
     #[test]
@@ -417,7 +420,7 @@ mod tests {
             }
         }
 
-        assert_eq!(counts, (16, 11, 1, 5));
+        assert_eq!(counts, (16, 12, 1, 5));
     }
 
     #[test]
@@ -439,7 +442,7 @@ mod tests {
         // The nine that name none: the listing of networks, the two
         // questions whose answer is a network, the five operator
         // operations, and the stream.
-        assert_eq!((named, unnamed), (24, 9));
+        assert_eq!((named, unnamed), (25, 9));
     }
 
     /// What an operation does to a lease.
@@ -460,6 +463,7 @@ mod tests {
             request::Kind::ListNetworks(_)
             | request::Kind::GetNetwork(_)
             | request::Kind::CreateNetwork(_)
+            | request::Kind::UpdateNetwork(_)
             | request::Kind::DeleteNetwork(_)
             | request::Kind::ListAttachments(_)
             | request::Kind::GetAttachment(_)
@@ -509,7 +513,7 @@ mod tests {
             }
         }
 
-        assert_eq!(counts, (3, 1, 29));
+        assert_eq!(counts, (3, 1, 30));
     }
 
     #[test]

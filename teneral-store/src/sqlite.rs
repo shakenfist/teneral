@@ -663,6 +663,30 @@ impl BindingStore for SqliteStore {
         .await
     }
 
+    async fn update_network(
+        &self,
+        actor: &Actor,
+        network: &str,
+        expected: &Cursor,
+        lease_seconds: i64,
+    ) -> Result<Cursor> {
+        let network = network.to_owned();
+        let expected = expected.clone();
+
+        let actor = actor.clone();
+        let clock = Arc::clone(&self.clock);
+        let guard = Arc::clone(&self.guard);
+        let retention = self.retention;
+
+        self.write("configure a network", move |database| {
+            let (connection, writing) =
+                SqliteStore::writing(database, &actor, &clock, &guard, &retention);
+
+            ops::update_network(connection, &writing, &network, &expected, lease_seconds)
+        })
+        .await
+    }
+
     async fn delete_network(
         &self,
         actor: &Actor,

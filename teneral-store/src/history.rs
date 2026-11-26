@@ -808,7 +808,8 @@ fn position_as_sequence(cursor: &Cursor) -> Result<i64> {
 
 /// The network itself. Its name is both the network column and the
 /// identity, which is why it appears twice.
-const SNAPSHOT_NETWORK: &str = "SELECT json_object('name', name, 'written_by', written_by),
+const SNAPSHOT_NETWORK: &str = "SELECT json_object('name', name, 'lease_seconds', lease_seconds,
+                        'written_by', written_by),
             cursor_seq, name, written_by, name
      FROM network WHERE name = ?1";
 

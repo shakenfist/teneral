@@ -23,7 +23,7 @@ use crate::error::{Error, Result};
 /// above it is refused. Adding a migration raises this, in the same
 /// commit, and the test at the foot of this file is what notices if
 /// only one of the two happened.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 9;
 
 /// One step from the version below it to its own.
 struct Migration {
@@ -67,6 +67,14 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 7,
         sql: include_str!("migrations/0007_epoch_attribution.sql"),
+    },
+    Migration {
+        version: 8,
+        sql: include_str!("migrations/0008_event_state_attribution.sql"),
+    },
+    Migration {
+        version: 9,
+        sql: include_str!("migrations/0009_lease_time.sql"),
     },
 ];
 
@@ -230,7 +238,13 @@ mod tests {
                      INSERT INTO address_range
                          (network, name, first_address, last_address, cursor_seq)
                      VALUES ('alpha', 'pool', 167772170, 167772260, 0),
-                            ('beta', 'pool', 167772170, 167772260, 0);",
+                            ('beta', 'pool', 167772170, 167772260, 0);
+                     INSERT INTO event_log
+                         (network, kind, resource_id, state, recorded_at, actor)
+                     VALUES ('alpha', 'network', 'alpha',
+                             json_object('name', 'alpha', 'written_by', 'peer:0'),
+                             1700000000, 'peer:0'),
+                            ('alpha', 'network', 'alpha', NULL, 1700000001, 'peer:0');",
                 )
                 .unwrap();
 
@@ -267,6 +281,142 @@ mod tests {
             .query_row("SELECT count(*) FROM address_range", [], |row| row.get(0))
             .unwrap();
         assert_eq!((networks, ranges), (2, 2));
+
+        // And each of them can answer how long it holds an address
+        // for, although no operator ever set it. A network with no
+        // lease time would be a network the front-end cannot answer a
+        // client from at all, so the migration's default is what makes
+        // an older database complete rather than merely readable.
+        let lease_seconds: Vec<i64> = connection
+            .prepare("SELECT lease_seconds FROM network ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(lease_seconds, vec![43_200, 43_200]);
+
+        // And so can the events already in the log, which is the half
+        // a row-only migration would leave broken: a consumer applies
+        // an event as a resource's whole state, and the layer above
+        // refuses one whose keys are not the keys this build writes --
+        // so a network event from before the column would stop a watch
+        // resuming across the upgrade. Compared as text, because that
+        // is how a snapshot and an event of one write are compared,
+        // and the key has to sit where the writer puts it and not
+        // merely be present.
+        let states: Vec<Option<String>> = connection
+            .prepare("SELECT state FROM event_log WHERE kind = 'network' ORDER BY seq")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            states,
+            vec![
+                Some(r#"{"name":"alpha","lease_seconds":43200,"written_by":"peer:0"}"#.to_owned()),
+                // A deletion's state is its absence, and a backfill
+                // that gave it one would be a resource that came back.
+                None,
+            ]
+        );
+    }
+
+    #[test]
+    fn an_event_written_before_the_store_named_its_writer_is_readable_afterwards() {
+        // The two state backfills chained, from the last version that
+        // had neither. A database at five holds events whose state
+        // says nothing about who made the write -- the migration that
+        // taught every writer to record it stamped the column and the
+        // log's actor and left these alone -- and a consumer applies a
+        // state as a resource's whole description, so a key the
+        // writers put there and these states lack is an event no
+        // current build can read. Five is therefore where this has to
+        // start; the test above starts one version back and is about
+        // the other half.
+        let store = TempStore::new("event-states");
+        let pre_attribution = 5;
+
+        {
+            let connection = Connection::open(store.path()).unwrap();
+            connection
+                .execute_batch("PRAGMA foreign_keys = ON;")
+                .unwrap();
+
+            for migration in MIGRATIONS.iter().filter(|m| m.version <= pre_attribution) {
+                connection.execute_batch(migration.sql).unwrap();
+            }
+            connection
+                .execute_batch(&format!("PRAGMA user_version = {pre_attribution};"))
+                .unwrap();
+
+            // Two networks over the same addresses, as above, and the
+            // events those writes left in the shape the store wrote
+            // then: every key a writer composes today except the
+            // writer itself. The deletion is here because its state is
+            // its absence, and a backfill that gave one a writer would
+            // be a resource that came back.
+            connection
+                .execute_batch(
+                    "INSERT INTO network (name, cursor_seq) VALUES ('alpha', 1), ('beta', 2);
+                     INSERT INTO address_range
+                         (network, name, first_address, last_address, cursor_seq)
+                     VALUES ('alpha', 'pool', 167772170, 167772260, 3),
+                            ('beta', 'pool', 167772170, 167772260, 4);
+                     INSERT INTO attachment (namespace, ifname, network, cursor_seq)
+                     VALUES ('ns-alpha', 'eth0', 'alpha', 5);
+                     INSERT INTO event_log (network, kind, resource_id, state, recorded_at)
+                     VALUES ('alpha', 'network', 'alpha',
+                             json_object('name', 'alpha'), 1700000000),
+                            ('alpha', 'attachment', 'ns-alpha/eth0',
+                             json_object('network', 'alpha', 'namespace', 'ns-alpha',
+                                         'ifname', 'eth0'), 1700000001),
+                            ('alpha', 'network', 'alpha', NULL, 1700000002);",
+                )
+                .unwrap();
+        }
+
+        let database = Database::open(store.path()).unwrap();
+        assert_eq!(database.schema_version().unwrap(), SCHEMA_VERSION);
+        drop(database);
+
+        let connection = Connection::open(store.path()).unwrap();
+        let states: Vec<(String, Option<String>, String)> = connection
+            .prepare("SELECT kind, state, actor FROM event_log ORDER BY seq")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+
+        // Compared as text rather than key by key, because a snapshot
+        // and the event of the same write are compared as text: the
+        // writer has to sit where the writers put it, last, and the
+        // network's lease time where the migration after this one puts
+        // it.
+        assert_eq!(
+            states,
+            vec![
+                (
+                    "network".to_owned(),
+                    Some(
+                        r#"{"name":"alpha","lease_seconds":43200,"written_by":"unrecorded"}"#
+                            .to_owned()
+                    ),
+                    "unrecorded".to_owned(),
+                ),
+                (
+                    "attachment".to_owned(),
+                    Some(
+                        r#"{"network":"alpha","namespace":"ns-alpha","ifname":"eth0","written_by":"unrecorded"}"#
+                            .to_owned()
+                    ),
+                    "unrecorded".to_owned(),
+                ),
+                ("network".to_owned(), None, "unrecorded".to_owned()),
+            ]
+        );
     }
 
     #[test]

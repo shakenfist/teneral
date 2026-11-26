@@ -140,6 +140,7 @@ async fn dispatch(context: &Context<'_>, request: &request::Kind) -> Answered {
         request::Kind::ListNetworks(_) => list_networks(context).await,
         request::Kind::GetNetwork(request) => get_network(context, request).await,
         request::Kind::CreateNetwork(request) => create_network(context, request).await,
+        request::Kind::UpdateNetwork(request) => update_network(context, request).await,
         request::Kind::DeleteNetwork(request) => delete_network(context, request).await,
 
         request::Kind::ListAttachments(request) => list_attachments(context, request).await,
@@ -245,6 +246,24 @@ async fn create_network(context: &Context<'_>, request: &proto::CreateNetworkReq
     let position = context
         .store
         .create_network(&context.caller.as_actor(), &request.name)
+        .await
+        .map_err(refuse)?;
+
+    Ok(vec![confirmed(&position, Some(&request.name))])
+}
+
+/// Change how long a network holds the addresses it gives out, when
+/// it is still where the caller read it.
+async fn update_network(context: &Context<'_>, request: &proto::UpdateNetworkRequest) -> Answered {
+    let expected = expected(request.expected.as_ref(), NETWORK)?;
+    let position = context
+        .store
+        .update_network(
+            &context.caller.as_actor(),
+            &request.name,
+            &expected,
+            request.lease_seconds,
+        )
         .await
         .map_err(refuse)?;
 

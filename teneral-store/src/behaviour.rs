@@ -520,6 +520,236 @@ async fn a_change_computed_from_a_stale_position_is_refused() {
     assert_eq!(current.cursor, moved);
 }
 
+/// The lease time every network starts with, which is the schema's and
+/// is written in the migration rather than here. Restated as a literal
+/// so that a test reading it back is checking the database's answer
+/// against the number a reader of this file expects, and not against
+/// the database's answer to the same question.
+const DEFAULT_LEASE_SECONDS: i64 = 43_200;
+
+#[tokio::test]
+async fn each_network_hands_out_its_own_lease_time_over_the_same_address() {
+    let fixture = TwoNetworks::new("lease-time").await;
+
+    // Neither network has been configured, so both answer with the
+    // schema's default. A network with no lease time would be one no
+    // client could be answered from at all, which is why the create
+    // path leaves nothing for an operator to finish.
+    let view = fixture.store.read().await.unwrap();
+    let before = view.networks().await.unwrap();
+    assert_eq!(
+        before
+            .iter()
+            .map(|network| (network.name.as_str(), network.lease_seconds))
+            .collect::<Vec<_>>(),
+        vec![
+            (ALPHA, DEFAULT_LEASE_SECONDS),
+            (BETA, DEFAULT_LEASE_SECONDS)
+        ]
+    );
+    let alpha = view.network(ALPHA).await.unwrap().expect("the network");
+    let beta = view.network(BETA).await.unwrap().expect("the network");
+    drop(view);
+
+    let shortened = 7_200;
+    let configured = fixture
+        .store
+        .update_network(&OPERATOR, ALPHA, &alpha.cursor, shortened)
+        .await
+        .expect("a lease time");
+
+    // One network changed and the other did not, read at one position
+    // so that the two answers describe one instant.
+    let view = fixture.store.read().await.unwrap();
+    let alpha = view.network(ALPHA).await.unwrap().expect("the network");
+    let beta_after = view.network(BETA).await.unwrap().expect("the network");
+    assert_eq!(alpha.lease_seconds, shortened);
+    assert_eq!(alpha.cursor, configured);
+    assert_eq!(beta_after.lease_seconds, DEFAULT_LEASE_SECONDS);
+    assert_eq!(
+        beta_after.cursor, beta.cursor,
+        "the other network was rewritten by a write that did not name it"
+    );
+    drop(view);
+
+    // The write left an event at the position it returned, carrying
+    // the state a consumer would apply rather than the change that
+    // produced it. Read with the engine, as every other test of the
+    // log here does, because no trait method reads it.
+    let connection = fixture.behind_the_store();
+    let event: (String, String, i64) = connection
+        .query_row(
+            "SELECT network, kind, json_extract(state, '$.lease_seconds')
+               FROM event_log WHERE seq = ?1",
+            rusqlite::params![i64::try_from(configured.sequence()).unwrap()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (event.0.as_str(), event.1.as_str(), event.2),
+        (ALPHA, "network", shortened)
+    );
+
+    // And the value is per network where it is used: one address, held
+    // in both networks by the same client, for the term its own
+    // network configured. A lease time kept anywhere but on the
+    // network would give these two leases one expiry, and a
+    // single-network test could never see it.
+    let shared = in_pool(30);
+    let holder = presenting(SelectorKind::Mac, SHARED_MAC);
+    let mut expiries = Vec::new();
+    for network in [ALPHA, BETA] {
+        let view = fixture.store.read().await.unwrap();
+        let term = view
+            .network(network)
+            .await
+            .unwrap()
+            .expect("the network")
+            .lease_seconds;
+        drop(view);
+
+        let (_, lease) = fixture
+            .store
+            .acquire_lease(&OPERATOR, network, &holder, shared, term)
+            .await
+            .expect("a lease in each network on the one address");
+        expiries.push(lease.expires_at);
+    }
+
+    assert_eq!(
+        expiries,
+        vec![FIXTURE_NOW + shortened, FIXTURE_NOW + DEFAULT_LEASE_SECONDS]
+    );
+    assert_eq!(fixture.store.cross_network_answers(), 0);
+}
+
+#[tokio::test]
+async fn a_name_a_network_already_has_is_refused_and_leaves_that_network_alone() {
+    let fixture = TwoNetworks::new("network-name-in-use").await;
+
+    let view = fixture.store.read().await.unwrap();
+    let before = view.network(ALPHA).await.unwrap().expect("the network");
+    drop(view);
+
+    let refusal = fixture
+        .store
+        .create_network(&OPERATOR, ALPHA)
+        .await
+        .unwrap_err();
+
+    match &refusal {
+        Error::Conflict { kind, id, held_by } => {
+            assert_eq!(*kind, "network");
+            assert_eq!(id, ALPHA);
+            assert!(held_by.contains("already exists"), "{held_by}");
+        }
+        other => panic!("expected a conflict naming the network, got {other:?}"),
+    }
+
+    // Worth asserting rather than assuming, because a create writes
+    // the row before the event that describes it -- the row is where
+    // the lease time the event has to carry comes from -- so the
+    // collision is detected by a statement that has already begun
+    // writing. What must not survive it is a changed network, here or
+    // in the one that holds the same addresses and was never named.
+    let view = fixture.store.read().await.unwrap();
+    assert_eq!(
+        view.network(ALPHA).await.unwrap().expect("the network"),
+        before
+    );
+    assert_eq!(view.networks().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_lease_time_computed_from_a_stale_position_is_refused() {
+    let fixture = TwoNetworks::new("lease-time-compare-and-set").await;
+
+    let view = fixture.store.read().await.unwrap();
+    let original = view.network(ALPHA).await.unwrap().expect("the network");
+    drop(view);
+
+    let configured = fixture
+        .store
+        .update_network(&OPERATOR, ALPHA, &original.cursor, 7_200)
+        .await
+        .unwrap();
+
+    // The second write was computed from what the first caller read,
+    // which is the sequence that would otherwise discard the first
+    // change with nothing saying so -- and the clients that renewed in
+    // between would be the ones holding the wrong number.
+    let refusal = fixture
+        .store
+        .update_network(&OPERATOR, ALPHA, &original.cursor, 600)
+        .await
+        .unwrap_err();
+
+    match &refusal {
+        Error::Changed {
+            kind,
+            id,
+            expected,
+            found,
+        } => {
+            assert_eq!(*kind, "network");
+            assert_eq!(id, ALPHA);
+            assert_eq!(expected, &original.cursor.to_string());
+            assert_eq!(found, &configured.to_string());
+        }
+        other => panic!("expected a refusal naming both positions, got {other:?}"),
+    }
+
+    // The refused write left nothing behind, in its own network or in
+    // the one that holds the same addresses.
+    let view = fixture.store.read().await.unwrap();
+    let alpha = view.network(ALPHA).await.unwrap().expect("the network");
+    let beta = view.network(BETA).await.unwrap().expect("the network");
+    assert_eq!(alpha.lease_seconds, 7_200);
+    assert_eq!(alpha.cursor, configured);
+    assert_eq!(beta.lease_seconds, DEFAULT_LEASE_SECONDS);
+}
+
+#[tokio::test]
+async fn a_lease_time_no_client_could_be_given_is_refused() {
+    let fixture = TwoNetworks::new("lease-time-bounds").await;
+
+    let view = fixture.store.read().await.unwrap();
+    let alpha = view.network(ALPHA).await.unwrap().expect("the network");
+    let beta = view.network(BETA).await.unwrap().expect("the network");
+    drop(view);
+
+    // Zero and below are not durations; above the thirty-two bits the
+    // duration reaches a client in is a number an operator could set,
+    // read back, and never see take effect.
+    for value in [0, -1, i64::from(u32::MAX) + 1] {
+        let refusal = fixture
+            .store
+            .update_network(&OPERATOR, ALPHA, &alpha.cursor, value)
+            .await
+            .unwrap_err();
+
+        match &refusal {
+            Error::Invalid { what, detail } => {
+                assert_eq!(*what, "lease time");
+                assert!(detail.contains(&value.to_string()), "{detail}");
+            }
+            other => panic!("expected a refusal naming the value, got {other:?}"),
+        }
+    }
+
+    // Refused before anything was written, so neither network moved
+    // and the log has nothing to tell a consumer about.
+    let view = fixture.store.read().await.unwrap();
+    assert_eq!(
+        view.network(ALPHA).await.unwrap().expect("the network"),
+        alpha
+    );
+    assert_eq!(
+        view.network(BETA).await.unwrap().expect("the network"),
+        beta
+    );
+}
+
 #[tokio::test]
 async fn an_overlap_is_refused_within_a_network_and_ignored_between_them() {
     let fixture = TwoNetworks::new("range-overlap").await;
@@ -3491,13 +3721,13 @@ fn binding_written_by(connection: &Connection, network: &str, value: &str) -> St
 
 #[tokio::test]
 async fn every_write_records_the_actor_that_made_it() {
-    // All sixteen mutating methods, each called with an actor of a
+    // All seventeen mutating methods, each called with an actor of a
     // kind that would be plausible for it -- a consumer's token, the
     // owning peer, the daemon's own sweeper -- and every one of them
-    // checked against the event it left. Sixteen signatures changed
-    // to carry the actor, and a method that took the parameter and
-    // then dropped it on the floor would still compile; this is what
-    // notices.
+    // checked against the event it left. Every one of those
+    // signatures carries the actor, and a method that took the
+    // parameter and then dropped it on the floor would still compile;
+    // this is what notices.
     let fixture = TwoNetworks::new("attribution").await;
     let token = Actor::Token(TokenId::for_test("f00dcafe"));
     let other = Actor::Token(TokenId::for_test("0b57ac1e"));
@@ -3576,6 +3806,24 @@ async fn every_write_records_the_actor_that_made_it() {
             &connection,
             "SELECT written_by FROM address_range WHERE network = ?1 AND name = ?2",
             &[&GAMMA, &SECOND_POOL]
+        ),
+        peer.as_recorded()
+    );
+
+    let configured = store
+        .update_network(&peer, GAMMA, &created, 7_200)
+        .await
+        .unwrap();
+    expected.push((configured.clone(), &peer));
+
+    // The same restamping on the one resource whose name is also the
+    // network it belongs to, which is the row a write attributed to
+    // the wrong scope would land on.
+    assert_eq!(
+        written_by(
+            &connection,
+            "SELECT written_by FROM network WHERE name = ?1",
+            &[&GAMMA]
         ),
         peer.as_recorded()
     );
@@ -3695,7 +3943,10 @@ async fn every_write_records_the_actor_that_made_it() {
         .unwrap();
     expected.push((range_gone.clone(), &peer));
 
-    let network_gone = store.delete_network(&token, GAMMA, &created).await.unwrap();
+    let network_gone = store
+        .delete_network(&token, GAMMA, &configured)
+        .await
+        .unwrap();
     expected.push((network_gone.clone(), &token));
 
     for (at, actor) in &expected {
@@ -3706,10 +3957,10 @@ async fn every_write_records_the_actor_that_made_it() {
         );
     }
 
-    // Eighteen calls over the sixteen methods -- two of them twice,
+    // Nineteen calls over the seventeen methods -- two of them twice,
     // once per network -- so a method missed from the walk above
     // fails here rather than silently going unchecked.
-    assert_eq!(expected.len(), 18);
+    assert_eq!(expected.len(), 19);
 
     // And nothing anywhere in the log is unattributed, which covers
     // the fixture's own writes as well as this test's.
