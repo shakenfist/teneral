@@ -952,14 +952,38 @@ checking: the schema table in that file does not omit the new
 column, because it lists no columns for any table -- its subject is
 each resource's key.
 
-**Noted, not chased.** Phase 4's
-`a_stale_socket_file_does_not_stop_a_daemon_starting` failed once in
-four runs, on its own precondition: a connection to the path of a
-listener that had been dropped succeeded. It passed on every run
-since, including the management session's. The test's directory is
-unique per process and per counter and the container's `/tmp` is its
-own, so the ordinary collisions do not explain it, and no mechanism
-has been established. It is recorded here rather than fixed, since a
-fix chosen without the mechanism would only hide it, and it matters
-beyond its own test: the datapath this phase builds leans on the
-same socket replacement.
+**A flake in phase 4's suite, reproduced and left standing.**
+`a_stale_socket_file_does_not_stop_a_daemon_starting` fails on its
+own precondition: it binds a `UnixListener`, drops it, and asserts
+that connecting to the path now fails, and sometimes the connection
+succeeds -- `connected to a socket nobody listens on: Ok(UnixStream
+{ ..., peer: "/tmp/teneral-daemon-stale-18-0/teneral.sock" })` at
+`teneral/tests/daemon.rs:290`. It happened twice in twenty runs of
+the whole suite here, so it is a real intermittent failure and not
+one bad run.
+
+One mechanism is eliminated rather than argued about: closing a
+listening Unix socket and immediately connecting to its path was run
+twenty thousand times on this host, with a fresh path each time, and
+every single connect was refused. So the kernel does not leave a
+closed listener reachable, and something was genuinely holding that
+path. What can hold it is a process that inherited the listening
+descriptor, which would mean a child spawned by one of the five
+tests running in parallel with this one, in the few microseconds
+between the bind and the drop -- except that the standard library
+creates the socket with `SOCK_CLOEXEC`, which should close it at
+`exec`. The two facts do not yet fit together, and nothing is
+committed that claims they do.
+
+It is recorded rather than fixed because a fix chosen before the
+mechanism is known would hide it: the obvious ones -- retry the
+probe, or make the stale file some other way -- would both make the
+test pass without anybody learning why it did not. What the failure
+does *not* show is a defect in the daemon: the two tests that assert
+the behaviour this one sets up for -- that a live daemon stops a
+second starting on its socket, and that a stale file is replaced
+rather than inherited -- passed in every run, including the failing
+one. The next person to touch `teneral/tests/daemon.rs` should start
+by dumping `/proc/net/unix` for that path at the moment the probe
+succeeds, which names the holder and its state and is the one piece
+of evidence nobody has.
