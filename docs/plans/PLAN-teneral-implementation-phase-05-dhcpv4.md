@@ -476,9 +476,8 @@ so `/` cannot collide with a real namespace and needs no
 validation anywhere.
 
 The cost is that it reads like a typo in `teneral attach-interface
---namespace / --ifname br-n1`. That is paid in the help text, in
-`docs/`, and in the line the daemon logs at startup naming the
-namespace it is serving.
+home / br-n1`. That is paid in the help text, in `docs/`, and in the
+line the daemon logs at startup naming the namespace it is serving.
 
 ### 9. The datapath handles one packet at a time per socket, and so bounds its own views
 
@@ -649,7 +648,7 @@ something to compare.
 | Step | Effort | Model | Isolation | Brief for sub-agent |
 |------|--------|-------|-----------|---------------------|
 | 5a | high | opus | none | The one piece of configuration a DHCPv4 answer needs. Read decision 3 and finding 1 of this phase file first. (1) `teneral-store/src/migrations/0009_lease_time.sql`: `ALTER TABLE network ADD COLUMN lease_seconds INTEGER NOT NULL DEFAULT 43200`, with a `CHECK` that it is positive -- follow 0007's shape for an added NOT NULL column on a STRICT table, and register it in `teneral-store/src/schema.rs`, raising `SCHEMA_VERSION` to 9 -- 0008 is the attribution backfill this step also lands, which is explained in the execution notes. (2) `Network` in `teneral-store/src/model.rs:30` gains the field; every construction site in the crate follows. (3) A new `update_network(actor, network, expected: &Cursor, lease_seconds)` on `BindingStore` -- the position before the value, which is the order its sibling takes, compare-and-set on the cursor like `update_address_range` (`store.rs:342`) -- read that one and match it, including the refusal when the position is stale. It appends an event like every other write and returns the position. Run `scripts/check-store-trait.sh` and confirm it reports the new method as `network`-scoped and cursor-returning. (4) The API: a `UpdateNetworkRequest` in `teneral-api/proto/teneral.v1.proto` beside the other network operations, the handler in `operations.rs`, the capability in `authz.rs`'s exhaustive `required_capability` match (`write`), the field on the `Network` resource message **and** in `resource.rs`'s converter and in the event-state mapping, and the row in `docs/control-api.md`'s networks table. `scripts/check-api-docs.sh` must still report every operation documented, both ways. (5) Tests: two networks holding the same address, one with a changed lease time and one without, asserting each reads its own; a stale-cursor refusal; and the default appearing on a network created without one. The debugging client is not touched here: it has no write subcommand of any kind to extend, which is what step 5b is for. Do not add a `--lease-time` flag anywhere -- decision 3 says why. Commit subject: "Give a network the lease time it hands out." |
-| 5b | medium | opus | none | Let the debugging client write what it reads. The premise this step exists for was found by checking another step's brief: `teneral/src/cli.rs` exposes `get`, `explain`, `diagnostics`, `mint-token`, `mint-epoch` and `watch`, and **no write of any kind**, so nothing in this repository can create a network, attach an interface or configure a range -- and step 5g cannot configure the lab it deploys. Read `teneral/src/client.rs` in full first: `one()` sends a `request::Kind` and prints the response, `get()` builds the read requests, and `selector`, `cursor_from`, `scope_from` and `capability_from` are the argument parsers to reuse rather than duplicate. Add one subcommand per write operation the server already serves -- the networks, attachments, address ranges and bindings in `docs/control-api.md`'s tables, the lease revocation, and `update_network` from 5a -- taking `--expected EPOCH:SEQUENCE` where the operation needs a position, with the help text saying it comes from a `get`. Nothing new goes in `teneral-api`: every one of these requests exists in the schema and the server serves it already, so a change in that crate means something has been misread. Add a test that names each write operation in the schema and asserts the client builds a request for it, so an operation added later without a subcommand fails rather than being quietly unreachable. Commit subject: "Let the debugging client configure a daemon." |
+| 5b | medium | opus | none | Let the debugging client write what it reads. The premise this step exists for was found by checking another step's brief: `teneral/src/cli.rs` exposes `get`, `explain`, `diagnostics`, `mint-token`, `mint-epoch` and `watch`, and **no write of any kind**, so nothing in this repository can create a network, attach an interface or configure a range -- and step 5g cannot configure the lab it deploys. Read `teneral/src/client.rs` in full first: `one()` sends a `request::Kind` and prints the response, `get()` builds the read requests, and `selector`, `cursor_from`, `scope_from` and `capability_from` are the argument parsers to reuse rather than duplicate. The gap is wider than a missing write: the client reaches ten of the schema's thirty-four operations, and the twenty-four it cannot reach are every write, every listing, every lookup, the digest and two of the token operations. Close all of it, because the alternative is finding the next hole in 5g with the lab up and no way to see what was configured. Take `--expected EPOCH:SEQUENCE` where an operation needs a position, with the help text saying it comes from a `get`, and keep the six subcommands that already exist in the shape they have rather than regularising them into something a reader of the existing help would not recognise. Nothing new goes in `teneral-api`: every one of these requests exists in the schema and the server serves it already, so a change in that crate means something has been misread. Add a test that names every operation in the schema and asserts the client builds a request for each, so an operation added later without a subcommand fails rather than being quietly unreachable. That test is the gate, and it is why this is worth doing once rather than twice. Commit subject: "Let the debugging client configure a daemon." |
 | 5c | high | opus | none | The wire layer, and nothing above it. Read decisions 2, 4, 5 and 13, and `docs/provenance.md`'s `dhcp-unasked-option-set` row. Create the `teneral-dhcp` crate: `publish = false` (phase 4 found that cargo-deny's wildcard-path allowance does not reach publishable crates), `rust-version.workspace = true`, the workspace lints inherited, `dhcproto = "0.15.0"` and nothing else beyond `teneral-store` -- and **not** `teneral-api` (decision 1). Add it to the workspace members and to `[workspace.dependencies]`. Then `wire`: a parse that refuses `hlen > 16` **before** any `chaddr` accessor is called and a datagram over 1500 bytes before it is parsed, returning a named error per cause; an `Answer` type holding the parameters decision 4's table lists; and an encoder producing the nine options in the measured order with T1 and T2 at a half and seven-eighths. The malformed corpus is the point of this step, not a side-effect: the inputs decision 5 names, each asserting a named refusal and no panic, as table-driven tests with the input described in the test name. Mutate your own guard to prove the tests see it -- copy the tree, remove the `hlen` check, confirm a named test fails, restore from the copy, each run under `timeout` -- and report which test killed it and the script's path. `make lint`, `make test` and `make deny` must all be clean, including the per-crate store check at the end of lint; run `make fetch` before `make deny` so the new dependency tree resolves. Commit subject: "Parse and build DHCPv4 messages safely." |
 | 5d | high | opus | none | The decision layer: a parsed request plus its arrival interface, against a `BindingStore`. Read decisions 2, 6 and 11, finding 10, `docs/binding-store.md`'s lookup and lease-lifecycle sections, and the `lease-address-selection-order` and `selector-client-id-over-chaddr` provenance rows. The store already implements address selection, reservations, pools and the precedence order -- **do not reimplement any of it**; assemble a `ClientIdentity` from what the packet presents and ask. The path is: `interface_owner(namespace, ifname)` to get the network, refuse with a log line if nothing claimed it, then `lookup_binding_on_interface` for a reservation, then `allocate_lease` or `acquire_lease` or `renew_lease` or `revoke_lease` as decision 6's table says. The actor is `Actor::Daemon("dhcpv4")`. The send side is a trait with one method, so this layer is tested against a recorder. Tests: every row of decision 6's table, and **every one of them with two networks holding the same address** -- a DISCOVER arriving on each network's interface from the same MAC gets each network's own answer, a REQUEST for an address held in the other network is NAKed rather than ACKed, and a RELEASE in one network leaves the other's lease alone. That is the project's central correctness property and this is the layer where it is decided. Also: a request whose `giaddr` is non-zero is dropped with one log line, and an INFORM gets options and no lease. Report the test count. Commit subject: "Answer a DHCPv4 client from the binding store." |
 | 5e | high | opus | none | The datapath and the daemon. Read decisions 7, 8, 9 and 14, and the `sock-*` and `netns-*` provenance rows -- every behaviour here is already measured and none of it is to be rediscovered. The receive path: one wildcard-bound UDP socket per served interface (a socket bound to the interface's own address never sees `255.255.255.255`), `IP_PKTINFO` for the arrival ifindex and the datagram's destination, and the interface name from an `ioctl` on a socket rather than from `/sys/class/net`. The reply path: `AF_PACKET` with a hand-built Ethernet/IPv4/UDP frame when the client has no address, and UDP with the egress named per message when it does; the BROADCAST flag is a request for broadcast and never permission to unicast. Phase 1d's spike (iii) in `docs/plans/PLAN-teneral-implementation-phase-01-research-spikes.md:974` built exactly this in Rust and a real client accepted it -- read it and follow what it found, including the privilege. Then the daemon: `--dhcp-interface` repeatable, `--dhcp-port` defaulting to 67 with its testing purpose in the help, the startup line decision 14 specifies, a refusal to start when a named interface is claimed by no network, and shutdown ordered so the sockets close before the store does (`serve.rs` has the existing order and its comment). Nothing here may bind 67 in a test: `make test` runs as a non-root uid with no capabilities and the bind returns `EACCES`, which is why the port is a flag. Say in your report which parts you could not test and why. Commit subject: "Serve DHCPv4 on a socket per interface." |
@@ -739,10 +738,10 @@ than ticking it.
 8. The schema version is 8, the migration is forward-only, and a
    store created by 0001-0007 opens and reports the default lease
    time without an operator writing one.
-9. Every write operation the server serves is reachable from the
-   debugging client, asserted by a test that names them rather
-   than by counting subcommands by hand, and the lab in 5g was
-   configured with that client and nothing else.
+9. Every operation in the schema is reachable from the debugging
+   client, asserted by a test that names them rather than by
+   counting subcommands by hand, and the lab in 5g was configured
+   and inspected with that client and nothing else.
 10. `teneral-dhcp` depends on `teneral-store` and not on
    `teneral-api`, checked by reading its `Cargo.toml` and by
    `cargo tree -p teneral-dhcp` showing no `teneral-api`.
@@ -987,3 +986,42 @@ one. The next person to touch `teneral/tests/daemon.rs` should start
 by dumping `/proc/net/unix` for that path at the moment the probe
 succeeds, which names the holder and its state and is the one piece
 of evidence nobody has.
+
+**2026-11-26, AEDT. Step 5b: the client reaches the whole schema,
+not just the writes.** Tests 234 to 239. The step was widened before
+it ran, by the same check that created it: the client reached ten of
+the schema's thirty-four operations, not twenty-two, because every
+listing, every lookup, the digest and two token operations were
+unreachable as well as every write. Closing only the writes would
+have left the lab deployed in 5g with no way to see what had been
+configured, so all twenty-four were closed at once and the
+definition of done now asserts the whole schema rather than half of
+it.
+
+The gate is a test that parses `Request`'s oneof out of the schema,
+asserts it holds thirty-four operations, and for each one parses a
+command line with clap, builds the request, and compares what was
+built against the schema's own name for it -- through an exhaustive
+match with no default arm, so a new operation stops the crate
+compiling as well as failing the test. Three mutants on copies
+confirmed it bites: a thirty-fifth operation, a row deleted from the
+reachability table, and a listing wired to the wrong request.
+
+Two of the step's judgements were kept against what this plan said.
+The writes take their arguments positionally, where decision 8's
+example wrote them as flags: `get attachment` and `explain` already
+take a namespace and an interface positionally, and a write that
+spelled the same key differently from the read beside it is the
+inconsistency a reader trips on. A transposition is caught quickly
+anyway, because an attachment no real interface matches makes the
+daemon refuse to start on it. Decision 8's example is corrected to
+the form that now exists. And `run()` was split into a function that
+says what was asked for and a dispatch that does it, which is a
+design change made to fit the work and kept deliberately: it is what
+lets the gate test the whole mapping with no daemon and no socket.
+
+`docs/control-api.md` enumerated the six subcommands the client used
+to have, which this falsified. The step reported it rather than
+editing it, correctly, since that file documents the API and not the
+client; the management session replaced the enumeration with the
+property that is now true and testable.

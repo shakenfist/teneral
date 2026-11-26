@@ -797,9 +797,13 @@ framework; capturing and filtering that is left to whatever runs the daemon.
 There is also **no sweeper**: nothing in the daemon removes an expired lease, and
 `list_leases` includes expired ones and says so.
 
-The client subcommands -- `get`, `explain`, `diagnostics`, `mint-token`,
-`mint-epoch` and `watch` -- are each one call over the client and a printing of
-the answer, and hold no logic the server should hold. A token's secret is read
+The debugging client reaches every operation in this document, and a test
+asserts that it does by enumerating the schema rather than by counting
+subcommands, so an operation that arrives with no way to call it fails a test
+instead of being found a phase later. `teneral --help` is the reference for the
+spelling of each; reads are nouns under `get`, `list` and `lookup`, writes are
+verbs. Each is one call over the client and a printing of the answer, and holds
+no logic the server should hold. A token's secret is read
 from the first line of standard input with `--token-stdin`, or from the
 `TENERAL_TOKEN` environment variable; with neither, the connection is made as the
 owning peer. There is deliberately no flag that takes the secret itself, because
