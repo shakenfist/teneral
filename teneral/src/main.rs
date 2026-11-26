@@ -8,6 +8,7 @@
 
 mod cli;
 mod client;
+mod dhcp;
 mod serve;
 
 use std::process::ExitCode;

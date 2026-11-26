@@ -64,6 +64,7 @@ resolver = "3"
 # writing `[workspace.package]` and nothing else.
 [workspace.dependencies]
 teneral-api = { path = "teneral-api" }
+teneral-dhcp = { path = "teneral-dhcp" }
 teneral-store = { path = "teneral-store" }
 
 [workspace.lints.clippy]

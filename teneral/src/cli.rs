@@ -87,6 +87,25 @@ pub struct ServeArgs {
     #[arg(long, value_name = "SECONDS", default_value_t = 15,
           value_parser = clap::value_parser!(u64).range(1..))]
     pub heartbeat_seconds: u64,
+
+    /// An interface to serve DHCPv4 on, repeatable. It must already be
+    /// attached to a network -- under the namespace `root`, which is
+    /// where an interface in no namespace of its own is attached --
+    /// and a name no network has claimed is a refusal to start. With
+    /// no interface named, this daemon serves no DHCP and binds no
+    /// privileged port. Serving one needs CAP_NET_BIND_SERVICE for the
+    /// port and CAP_NET_RAW for the reply to a client that has no
+    /// address yet.
+    #[arg(long, value_name = "IFNAME")]
+    pub dhcp_interface: Vec<String>,
+
+    /// The port DHCPv4 is served on. The protocol's is 67 and a client
+    /// cannot be told to use another, so this is here for a test that
+    /// needs a port an unprivileged process may bind rather than as a
+    /// second place to configure a deployment.
+    #[arg(long, value_name = "PORT", default_value_t = 67,
+          value_parser = clap::value_parser!(u16).range(1..))]
+    pub dhcp_port: u16,
 }
 
 /// What every client subcommand shares.

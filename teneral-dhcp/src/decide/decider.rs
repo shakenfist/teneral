@@ -233,7 +233,9 @@ impl<E: Egress> Decider<E> {
             }
             // No lease, no lease time and no address: the client has
             // one already and asked for the rest of the configuration.
-            RequestKind::Inform => self.send(arrival, &Answer::inform(request, arrival.server))?,
+            RequestKind::Inform => {
+                self.send(arrival, request, &Answer::inform(request, arrival.server))?
+            }
         };
 
         Ok(Decided { outcome, notes })
@@ -312,6 +314,7 @@ impl<E: Egress> Decider<E> {
 
         self.send(
             arrival,
+            request,
             &Answer::offer(request, arrival.server, offered, lease),
         )
     }
@@ -386,6 +389,7 @@ impl<E: Egress> Decider<E> {
         {
             Ok(_) => self.send(
                 arrival,
+                request,
                 &Answer::acknowledge(request, arrival.server, wanted, lease),
             ),
             // Another client holds it in this network. The client is
@@ -454,6 +458,7 @@ impl<E: Egress> Decider<E> {
         {
             Ok(_) => self.send(
                 arrival,
+                request,
                 &Answer::acknowledge(request, arrival.server, address, lease),
             ),
             // The two refusals an identity can decide: no live lease,
@@ -576,20 +581,19 @@ impl<E: Egress> Decider<E> {
 
     /// A NAK: whatever the client asked for, it may not have it here.
     fn refuse(&self, arrival: &Arrival<'_>, request: &Request) -> Result<Outcome> {
-        self.send(arrival, &Answer::refuse(request, arrival.server))
+        self.send(arrival, request, &Answer::refuse(request, arrival.server))
     }
 
     /// Encode an answer and hand it to the egress.
-    fn send(&self, arrival: &Arrival<'_>, answer: &Answer) -> Result<Outcome> {
+    ///
+    /// The request goes with it because how a reply is addressed
+    /// depends on something only the request says: whether the client
+    /// already holds an address, and so whether ordinary routing can
+    /// reach it at all. That decision belongs below this layer, and
+    /// this is the layer that has the fact it turns on.
+    fn send(&self, arrival: &Arrival<'_>, request: &Request, answer: &Answer) -> Result<Outcome> {
         let datagram = answer.encode();
-        let reply = Reply::new(
-            arrival.namespace,
-            arrival.ifname,
-            answer.hardware_address(),
-            answer.client_address(),
-            answer.broadcast(),
-            &datagram,
-        );
+        let reply = Reply::new(arrival, request, answer, &datagram);
 
         self.egress.send(&reply)?;
 

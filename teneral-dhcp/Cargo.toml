@@ -68,6 +68,31 @@ teneral-store = { workspace = true }
 # here rather than to remove the guard.
 dhcproto = { version = "0.15.0", default-features = false }
 
+# The system calls the datapath is made of: the socket options that
+# say which interface a socket serves and ask the kernel to report
+# where each datagram arrived, the control message that names the
+# egress of each reply, the `ioctl` that turns an interface index into
+# a name, and the socket a hand-built frame goes out of. None of it
+# has a safe wrapper in the standard library, and the two crates that
+# wrap some of it wrap neither the control messages nor the packet
+# socket -- so the dependency would be paid for and the `unsafe` would
+# still be here.
+#
+# Already in this tree beneath the runtime and the control plane, so
+# it adds nothing to the dependency graph the licence gate reads.
+libc = "0.2.191"
+
+# The runtime, for one thing: registering a socket with the reactor so
+# that waiting for a datagram parks no thread and a stopping daemon
+# does not have to interrupt a system call to be heard.
+#
+# `net` is the feature that carries it, and it is the only one taken.
+# Deliberately absent is every runtime flavour: which runtime this
+# crate's futures are driven on is the binary's choice, as it is for
+# every other library here, and a library that picked one would be
+# picking for its consumer.
+tokio = { version = "1.54.1", default-features = false, features = ["net"] }
+
 [dev-dependencies]
 # The runtime, to drive the tests and only the tests. The store's
 # interface is asynchronous, and a test of the decision layer asks a

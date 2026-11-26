@@ -78,6 +78,17 @@ struct Daemon {
 impl Daemon {
     /// Start one, without waiting for it to be ready.
     fn spawn(directory: &Directory, label: &str, store: &Path, socket: &Path) -> Self {
+        Self::spawn_with(directory, label, store, socket, &[])
+    }
+
+    /// Start one with extra flags, without waiting for it to be ready.
+    fn spawn_with(
+        directory: &Directory,
+        label: &str,
+        store: &Path,
+        socket: &Path,
+        extra: &[&str],
+    ) -> Self {
         let errors = directory.0.join(format!("{label}.stderr"));
         let _spawning = spawning();
         let child = Command::new(BINARY)
@@ -86,6 +97,7 @@ impl Daemon {
             .arg(store)
             .arg("--socket")
             .arg(socket)
+            .args(extra)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(fs::File::create(&errors).expect("a file for the daemon's standard error"))
@@ -470,4 +482,67 @@ fn help_names_every_flag_with_its_default() {
         client.contains("--token-stdin") && client.contains("TENERAL_TOKEN"),
         "{client}"
     );
+}
+
+/// A daemon asked to serve DHCP on an interface no network has claimed
+/// does not come up. The alternative is worse than not starting: it
+/// would hold the protocol's port on that link and answer nothing,
+/// while every client on it waited out its timeouts against a server
+/// that was listening.
+///
+/// This is the one half of the DHCP wiring a test here can reach. The
+/// refusal lands before any socket is opened, so it needs none of the
+/// privilege the sockets do -- and the sockets themselves cannot be
+/// opened by this suite at all, which is why the datapath is measured
+/// in a lab with a real client instead.
+#[test]
+fn refuses_to_serve_dhcp_on_an_interface_no_network_has_claimed() {
+    let directory = Directory::new("dhcpunclaimed");
+    let mut daemon = Daemon::spawn_with(
+        &directory,
+        "daemon",
+        &directory.store(),
+        &directory.socket(),
+        &["--dhcp-interface", "teneral0"],
+    );
+
+    let status = daemon.exit();
+
+    assert!(!status.success(), "{}", daemon.stderr());
+    let said = daemon.stderr();
+    for wanted in ["teneral0", "no network has claimed", "root"] {
+        assert!(said.contains(wanted), "{wanted:?} missing from:\n{said}");
+    }
+    // It refused rather than half-started: the control socket it had
+    // already bound is gone again.
+    assert!(!directory.socket().exists());
+}
+
+/// Two sockets on one port and one interface is a conflict the kernel
+/// reports as a port already in use, naming neither the flag nor the
+/// interface, so the flag is checked before a socket is opened.
+#[test]
+fn refuses_an_interface_named_twice_before_it_opens_anything() {
+    let directory = Directory::new("dhcptwice");
+    let mut daemon = Daemon::spawn_with(
+        &directory,
+        "daemon",
+        &directory.store(),
+        &directory.socket(),
+        &[
+            "--dhcp-interface",
+            "teneral0",
+            "--dhcp-interface",
+            "teneral0",
+        ],
+    );
+
+    let status = daemon.exit();
+
+    assert!(!status.success(), "{}", daemon.stderr());
+    let said = daemon.stderr();
+    for wanted in ["--dhcp-interface teneral0", "more than once"] {
+        assert!(said.contains(wanted), "{wanted:?} missing from:\n{said}");
+    }
+    assert!(!directory.socket().exists());
 }

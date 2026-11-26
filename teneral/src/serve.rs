@@ -10,6 +10,7 @@ use tokio::runtime::Runtime;
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::cli::ServeArgs;
+use crate::dhcp;
 
 type Failure = Box<dyn std::error::Error>;
 
@@ -21,7 +22,7 @@ const STOP_GRACE: Duration = Duration::from_secs(5);
 
 /// Standard error, one line a message. See `main` for why there is no
 /// logging framework behind it.
-fn log(message: &str) {
+pub(crate) fn log(message: &str) {
     eprintln!("teneral: {message}");
 }
 
@@ -36,7 +37,7 @@ pub fn run(runtime: Runtime, args: &ServeArgs) -> Result<(), Failure> {
     config.max_connections = to_usize("--max-connections", args.max_connections)?;
     config.heartbeat = Duration::from_secs(args.heartbeat_seconds);
 
-    let store = runtime.block_on(serve(config, &args.store, retention))?;
+    let store = runtime.block_on(serve(config, args, retention))?;
 
     // The order is the point, and it is why this is not left to the
     // end of scope. The listener has stopped accepting and every open
@@ -59,9 +60,11 @@ pub fn run(runtime: Runtime, args: &ServeArgs) -> Result<(), Failure> {
 /// writer thread is joined.
 async fn serve(
     config: ServerConfig,
-    store_path: &Path,
+    args: &ServeArgs,
     retention: Retention,
 ) -> Result<Arc<SqliteStore>, Failure> {
+    let store_path = args.store.as_path();
+
     // The socket before the store. Binding is what finds out that a
     // live daemon already answers on this path, and that has to come
     // first: opening the same database file under a running daemon
@@ -78,6 +81,12 @@ async fn serve(
 
     announce(&store, store_path, listener.path()).await?;
 
+    // After the store, because what may be served is what the store
+    // says, and before anything is answered, because an interface that
+    // cannot be served is a refusal to start rather than a daemon that
+    // listens on a privileged port and answers nothing.
+    let dhcp = dhcp::start(&store, args).await?;
+
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut terminate = signal(SignalKind::terminate())?;
     let stop = async move {
@@ -90,6 +99,16 @@ async fn serve(
     let bindings: Arc<dyn BindingStore> = Arc::clone(&store) as Arc<dyn BindingStore>;
     let tokens: Arc<dyn TokenStore> = Arc::clone(&store) as Arc<dyn TokenStore>;
     listener.serve(bindings, tokens, stop).await?;
+
+    // The sockets before the store, and before the wait below. Each
+    // DHCP task holds a handle on the store, so leaving them running
+    // would make that wait time out rather than find the store
+    // unused -- and a store dropped under a task still reading a
+    // socket would be a daemon blocked on a thread something was
+    // still using.
+    if let Some(dhcp) = dhcp {
+        dhcp.stop().await;
+    }
 
     // `serve` has stopped accepting and told every stream, but the
     // connection tasks send their final event on their own time, and

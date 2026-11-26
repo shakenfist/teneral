@@ -20,18 +20,18 @@
 //!   where a network is resolved from an interface, where what a
 //!   packet presents becomes an identity the store will match, and
 //!   where a lease is written. Every two-network test lives here.
-//! - the datapath is the sockets, and the frame that reaches a client
-//!   with no address.
-//!
-//! The first two of those exist so far.
+//! - [`datapath`] is the sockets: receiving with the arrival
+//!   interface reported by the kernel, naming the egress in each
+//!   message, and the frame that reaches a client with no address.
 //!
 //! The reason for that shape is that `make test` runs as an
-//! unprivileged uid with no capabilities, so it can bind neither port
-//! 67 nor an `AF_PACKET` socket. Anything decided inside the datapath
-//! is decided where this repository's tests cannot see it, so every
-//! judgement is pushed above that line and what is left untested is
-//! "the bytes went out of the right fd", which the lab measures with
-//! a real client instead.
+//! unprivileged uid with no capabilities and one interface, so it
+//! cannot open an `AF_PACKET` socket and cannot reach a client at
+//! all. Anything decided inside the datapath is decided where this
+//! repository's tests cannot see it, so every judgement is pushed
+//! above that line and what is left untested is "the bytes went out
+//! of the right fd", which the lab measures with a real client
+//! instead.
 //!
 //! The layers are modules rather than a flattened set of re-exports
 //! because which layer a type belongs to is part of the design: a
@@ -39,5 +39,6 @@
 //! that had acquired a dependency on the store, and that is worth
 //! reading as a change at the call site.
 
+pub mod datapath;
 pub mod decide;
 pub mod wire;

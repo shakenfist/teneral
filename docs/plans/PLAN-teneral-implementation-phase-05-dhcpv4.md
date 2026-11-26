@@ -139,17 +139,30 @@ why -- while `docs/differential-rig.md:192-203` says the harness
 byte that differs". Both cannot be true. Decision 12 settles it,
 and the work is a step rather than a footnote.
 
-**3. `make test` cannot bind port 67, and this is measured rather
-than assumed.** The Makefile runs the build image as the invoking
-uid (`Makefile:57`, `-u $(UID):$(GID)`) with no `--cap-add`, under
-`--network none`. `net.ipv4.ip_unprivileged_port_start` is 1024,
-and a `bind` of UDP 67 as uid 1000 on this host returns `EACCES`
-(errno 13), which was run rather than reasoned about. `AF_PACKET`
-needs `CAP_NET_RAW`, which the container also lacks. So neither
-half of the datapath can be exercised by the repository's own test
-target. This is a design input, not an obstacle: it is why
-decision 2 puts everything that decides anything above the socket,
-and why the socket layer is as thin as it can be made.
+**3. `make test` cannot open an `AF_PACKET` socket, and this is
+measured rather than assumed.** The Makefile runs the build image as
+the invoking uid (`Makefile:57`, `-u $(UID):$(GID)`) with no
+`--cap-add`, under `--network none`. `CapEff` is empty there, so
+`socket(AF_PACKET, SOCK_RAW)` returns `EPERM`, and the container has
+loopback and nothing else -- so the half of the datapath that reaches
+a client with no address cannot be exercised by the repository's own
+test target at all. This is a design input, not an obstacle: it is
+why decision 2 puts everything that decides anything above the
+socket, and why the socket layer is as thin as it can be made.
+
+This finding said more than that when the plan was written, and the
+rest of it was wrong. It claimed that port 67 could not be bound
+either, from `net.ipv4.ip_unprivileged_port_start` being 1024 and a
+`bind` of UDP 67 as uid 1000 returning `EACCES`. That measurement
+was taken on the host rather than in the container: docker gives
+each run a network namespace of its own and sets the sysctl to zero
+in it, so an unprivileged uid binds port 67 there without complaint.
+`SO_BINDTODEVICE` likewise needs no capability on this kernel, where
+it once needed `CAP_NET_RAW`. Step 5e measured both and said so, and
+the plan is corrected here rather than in a footnote. Nothing in the
+design turns on it: `--dhcp-port` exists because a test must not take
+a well-known port, which is true however the kernel feels about it,
+and `AF_PACKET` remains the one hard barrier.
 
 **4. The view bound does not cover a datapath, and the master plan
 names the wrong phase for noticing it.** `Views` is `pub(crate)`
@@ -296,8 +309,8 @@ method -- "send these bytes to this client on this interface" --
 so `decide` is tested against a recorder and the real thing is a
 single implementation of it.
 
-This is the shape finding 3 forces: `make test` cannot bind port
-67 and cannot open an `AF_PACKET` socket, so anything decided
+This is the shape finding 3 forces: `make test` cannot open an
+`AF_PACKET` socket and has one interface, so anything decided
 inside the datapath is decided where the repository's tests cannot
 see it. Pushing every judgement above that line is what keeps the
 untested surface down to "the bytes went out of the right fd",
@@ -800,7 +813,7 @@ removal. The management session reproduces one mutant itself, on a
 copy, under `timeout`.
 
 **The datapath is the part the repository's tests cannot reach.**
-Finding 3 is measured: no privileged port, no `CAP_NET_RAW`.
+Finding 3 is measured: no `CAP_NET_RAW`, and one interface.
 Mitigation is structural rather than procedural -- decision 2 puts
 every judgement above the socket, so what cannot be tested is
 "the bytes left the right fd" -- plus the lab, which tests exactly
@@ -946,8 +959,8 @@ before a step runs.
 
 The phase builds a DHCPv4 front-end in a new crate, in three
 layers, and the layers exist in that shape because the
-repository's own test target cannot bind port 67 or open an
-`AF_PACKET` socket -- so everything that decides anything lives
+repository's own test target cannot open an `AF_PACKET` socket and
+has one interface -- so everything that decides anything lives
 above the socket, where it can be tested, and the lab proves the
 rest. Seven steps, strictly sequential, one commit each, reviewed
 in this session. The store gains one column -- the lease time --
@@ -1301,3 +1314,68 @@ kept: the request gaining the user and vendor class options that
 decision 15 specifies and 5c did not carry, a dropped attribute
 being noted rather than fatal, and a release or a decline asking
 what the client holds rather than re-deriving its holder.
+
+**2026-11-27, AEDT. Step 5e, and a premise of mine the step was
+right to measure.** The brief told the step three things about the
+build container: that binding UDP 67 fails with `EACCES`, that
+creating an `AF_PACKET` socket fails with `EPERM`, and that
+`SO_BINDTODEVICE` wants `CAP_NET_RAW` so the egress should be named
+per message instead. Only the second was true. Docker gives each run
+a network namespace of its own and sets
+`net.ipv4.ip_unprivileged_port_start` to zero in it, so port 67
+binds there as uid 1000; the 1024 in the brief was the host's, which
+is where that measurement had actually been taken. And
+`SO_BINDTODEVICE` needs no capability on this kernel, where it
+historically needed one. The step measured all three and said so,
+which is what a brief's premises are for. Finding 3, decision 2's
+closing paragraph, the risk entry and the back brief are corrected
+here, and so are two module doc comments in the crate that had
+already shipped the claim. Nothing in the design moves: `--dhcp-port`
+exists because a test must not take a well-known port, which is true
+however the kernel feels about it, and the capability set is
+unchanged because `AF_PACKET` is still the one hard barrier and the
+protocol's port is still privileged where this will be deployed.
+
+**2026-11-27, AEDT. The order a reply is addressed in is a
+specified algorithm, and this session reordered two of its
+branches.** The step reported two wire-visible behaviours that had
+arrived without a row in `docs/provenance.md` -- that a refusal is
+broadcast even to a client holding an address, and that an answer to
+a client that holds one is unicast to `ciaddr` -- and did not invent
+the rows, which was right. Reading the sections to write them found
+that RFC 2131 section 4.1 specifies the whole order rather than
+those two parts of it, and that the step's code departed from it in
+one case: it treated the broadcast flag and the refusal as one
+branch ahead of the address the client holds, where section 4.1
+reads the condition off `ciaddr` and consults the flag only where
+`ciaddr` is zero. So a client that holds an address and asks for a
+broadcast is answered at the address it holds, and the branches are
+now in the section's order with a test on the case the two orders
+disagree about. The flag's own reason does not arise for such a
+client: it answers address resolution for the address it has. One
+row covers the whole order, `dhcp-reply-addressing-order`, with the
+refusal's MUST cited to section 4.3.2 and the answer to a request
+for configuration alone to section 4.3.5, and with the one part that
+no section covers -- an answer carrying no address at all is
+broadcast -- marked as teneral's own.
+
+**2026-11-27, AEDT. What 5e changed in the layer above it, kept.**
+`Reply::new` now takes the arrival, the request, the answer and the
+datagram rather than six fields, and the reply carries three more:
+which answer it is, the server's own address, and the address the
+client already holds. The last is the one that mattered -- 5d's seam
+could not tell a client being offered an address from one that
+already holds one, which is the fact the whole delivery order turns
+on -- and the shape is better than what it replaced, because a reply
+can no longer be assembled from an answer and an interface that
+answer was not derived from. Two startup refusals were added beyond
+the row and kept on decision 14's own argument, both landing before
+any socket opens: an interface named twice, which the kernel would
+otherwise report as a port already in use naming neither the flag
+nor the interface, and an interface whose address an answer cannot
+be derived from. Each datagram's arrival index is resolved to a name
+through the socket and checked against the interface served, so the
+network a request is answered from follows the kernel's account of
+where it came from rather than a string an operator typed. Also
+corrected in review: the protocol number an Ethernet frame declares
+had come to be written in two places, and is now written once.

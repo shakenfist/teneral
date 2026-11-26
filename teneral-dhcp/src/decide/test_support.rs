@@ -37,23 +37,10 @@ use crate::wire::ServerFacts;
 static NEXT: AtomicU32 = AtomicU32::new(0);
 
 /// The namespace an interface in no namespace of its own is attached
-/// under.
-///
-/// A word rather than a character that cannot be a namespace, which
-/// was the first choice and is not available: an attachment's
-/// identity reaches an event as one string with `namespace` and
-/// `ifname` joined by a slash, and the store refuses that character
-/// in either half rather than escaping it, so that `a/b` plus `c`
-/// and `a` plus `b/c` cannot become one event.
-///
-/// This name can be a real namespace, and what that costs is a
-/// refusal rather than a wrong answer. An attachment is keyed by
-/// `(namespace, ifname)`, so an interface here and an identically
-/// named interface inside a namespace called `root` claim one
-/// identity, and the store refuses the second claim naming the
-/// holder. Nothing leaks between networks; an operator is told they
-/// cannot attach that interface.
-pub(crate) const UNNAMESPACED: &str = "root";
+/// under, which is the datapath's to spell and this fixture's to
+/// agree with: a test that wrote the word itself would pass while the
+/// daemon looked an attachment up under another one.
+pub(crate) use crate::datapath::UNNAMESPACED;
 
 /// The first network, and the interface it claimed.
 pub(crate) const ALPHA: &str = "alpha";
