@@ -354,7 +354,7 @@ by the time it was executed.
 | 1. Research spikes | [PLAN-teneral-implementation-phase-01-research-spikes.md](PLAN-teneral-implementation-phase-01-research-spikes.md) | Complete | `homelab-deployments-lfs 658caab (!12)`, teneral `fa77a8e..1337e79` |
 | 2. Repository foundations | [PLAN-teneral-implementation-phase-02-foundations.md](PLAN-teneral-implementation-phase-02-foundations.md) | Complete | teneral `482edf7..8fa1b4b` |
 | 3. The binding store | [PLAN-teneral-implementation-phase-03-binding-store.md](PLAN-teneral-implementation-phase-03-binding-store.md) | Complete | teneral `a6189fc..190425f` |
-| 4. The control API | [PLAN-teneral-implementation-phase-04-control-api.md](PLAN-teneral-implementation-phase-04-control-api.md) | In progress | |
+| 4. The control API | [PLAN-teneral-implementation-phase-04-control-api.md](PLAN-teneral-implementation-phase-04-control-api.md) | Complete | teneral `14dce3a..5a2ef38` |
 | 5. DHCPv4 front-end | PLAN-teneral-implementation-phase-05-dhcpv4.md | Proposed | |
 | 6. DNS front-end | PLAN-teneral-implementation-phase-06-dns.md | Proposed | |
 | 7. Home IPAM v1 | PLAN-teneral-implementation-phase-07-home-ipam.md | Proposed | |
@@ -363,23 +363,25 @@ by the time it was executed.
 | 10. Generic content front-ends | PLAN-teneral-implementation-phase-10-content.md | Proposed | |
 | 11. Push audit | - | Proposed | |
 
-Phases 1 to 3 are complete. The first two said that they were the
+Phases 1 to 4 are complete. The first two said that they were the
 only ones that would be scheduled, because the operator had other
 projects in flight and had said this one should not proceed past
 the prototype until those were further along; he resumed it on
-2026-11-23. Phase 4 is `In progress` as of 2026-11-26: its
-steps are built and it awaits review and merge. Phases 5 to 11
-remain `Proposed` rather than `Not started`, which is the honest status and should not be
-promoted to make the table look busier.
+2026-11-23. Phases 5 to 11 remain `Proposed` rather than `Not
+started`, which is the honest status and should not be promoted to
+make the table look busier.
 
-Phases 2 and 3 both landed on `develop` without a pull request,
+Phases 2, 3 and 4 all landed on `develop` without a pull request,
 because there is still no remote, so their `Merged` cells carry a
 `first..last` range rather than a pull request number. Phase 3's
 range was left open-ended by its documentation step, which could not
 name the commit it was itself about to become, and is closed here at
 `190425f`. As in phases 1 and 2, the commit that closes a range sits
 outside the range it records: the range names the phase's content,
-and the bookkeeping that closes it cannot be inside itself. Neither phase had a CI run; each step was reviewed
+and the bookkeeping that closes it cannot be inside itself. Phase 4
+is recorded the same way, from the commit that carried the
+operator's transport ruling to the one that recorded its definition
+of done. Neither phase had a CI run; each step was reviewed
 by the management session reading its diff, which was the only
 check.
 
