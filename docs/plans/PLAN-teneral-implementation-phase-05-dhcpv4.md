@@ -687,6 +687,47 @@ no network has claimed is a refusal to start, not a warning: a
 daemon that bound port 67 and then NAKed everything would be worse
 than one that did not come up.
 
+### 15. How a packet's attributes become selector values
+
+This decision was missing and the store says so: `Selector::new`
+normalises a hardware address and nothing else, and its comment
+states that "the front-end that renders an option into a selector
+value owns the choice of form. That choice has to be the same on the
+configuring side and the matching side, and this store is not in a
+position to check that it is." So the form is this phase's to choose,
+and choosing it badly is the project's signature failure in its
+quietest form: an operator configures a reservation, every test
+passes, and no binding ever matches a real client.
+
+- **The hardware address** is `chaddr` truncated to the `hlen` octets
+  the client declared, as lower-case colon-separated hex. The store
+  normalises this one, and accepts three written forms, so an
+  operator may type any of them and still match.
+- **The client identifier**, option 61, is every byte of the option
+  including the leading type byte, as lower-case colon-separated hex.
+  The precedent is measured rather than invented: the reference
+  implementation's lease file renders a client identifier as
+  colon-separated hex (`lease-file-format`), so an operator moving
+  from it can paste what they already have.
+- **The user class and the vendor class**, options 77 and 60, are the
+  option's bytes as text when they are valid UTF-8 and the store will
+  take them. When they are not -- a control character, or bytes that
+  are not UTF-8 at all -- the attribute is simply not presented, and
+  the fact is recorded the way a dropped option is. A client whose
+  vendor class is unprintable loses that attribute and keeps its
+  lease, which is the same ruling as decision 5's.
+- **DUID and IAID** are never presented by a v4 client. The kind
+  exists for the v6 work that is out of this plan and stays empty
+  here rather than being filled with something that looks like one.
+
+What makes this safe rather than merely written down is a test that
+goes the whole way round: render a selector value from a packet's
+bytes, configure a binding with the value an operator would type,
+and match that packet against that binding. A unit test on the
+renderer alone cannot see a divergence, because it would be
+asserting the renderer against itself. `docs/` carries the forms,
+because the operator typing them is the other half of the agreement.
+
 ## Step plan
 
 Sequential, every step. All eight write to the same worktree and
@@ -702,7 +743,7 @@ something to compare.
 | 5a | high | opus | none | The one piece of configuration a DHCPv4 answer needs. Read decision 3 and finding 1 of this phase file first. (1) `teneral-store/src/migrations/0009_lease_time.sql`: `ALTER TABLE network ADD COLUMN lease_seconds INTEGER NOT NULL DEFAULT 43200`, with a `CHECK` that it is positive -- follow 0007's shape for an added NOT NULL column on a STRICT table, and register it in `teneral-store/src/schema.rs`, raising `SCHEMA_VERSION` to 9 -- 0008 is the attribution backfill this step also lands, which is explained in the execution notes. (2) `Network` in `teneral-store/src/model.rs:30` gains the field; every construction site in the crate follows. (3) A new `update_network(actor, network, expected: &Cursor, lease_seconds)` on `BindingStore` -- the position before the value, which is the order its sibling takes, compare-and-set on the cursor like `update_address_range` (`store.rs:342`) -- read that one and match it, including the refusal when the position is stale. It appends an event like every other write and returns the position. Run `scripts/check-store-trait.sh` and confirm it reports the new method as `network`-scoped and cursor-returning. (4) The API: a `UpdateNetworkRequest` in `teneral-api/proto/teneral.v1.proto` beside the other network operations, the handler in `operations.rs`, the capability in `authz.rs`'s exhaustive `required_capability` match (`write`), the field on the `Network` resource message **and** in `resource.rs`'s converter and in the event-state mapping, and the row in `docs/control-api.md`'s networks table. `scripts/check-api-docs.sh` must still report every operation documented, both ways. (5) Tests: two networks holding the same address, one with a changed lease time and one without, asserting each reads its own; a stale-cursor refusal; and the default appearing on a network created without one. The debugging client is not touched here: it has no write subcommand of any kind to extend, which is what step 5b is for. Do not add a `--lease-time` flag anywhere -- decision 3 says why. Commit subject: "Give a network the lease time it hands out." |
 | 5b | medium | opus | none | Let the debugging client write what it reads. The premise this step exists for was found by checking another step's brief: `teneral/src/cli.rs` exposes `get`, `explain`, `diagnostics`, `mint-token`, `mint-epoch` and `watch`, and **no write of any kind**, so nothing in this repository can create a network, attach an interface or configure a range -- and step 5g cannot configure the lab it deploys. Read `teneral/src/client.rs` in full first: `one()` sends a `request::Kind` and prints the response, `get()` builds the read requests, and `selector`, `cursor_from`, `scope_from` and `capability_from` are the argument parsers to reuse rather than duplicate. The gap is wider than a missing write: the client reaches ten of the schema's thirty-four operations, and the twenty-four it cannot reach are every write, every listing, every lookup, the digest and two of the token operations. Close all of it, because the alternative is finding the next hole in 5g with the lab up and no way to see what was configured. Take `--expected EPOCH:SEQUENCE` where an operation needs a position, with the help text saying it comes from a `get`, and keep the six subcommands that already exist in the shape they have rather than regularising them into something a reader of the existing help would not recognise. Nothing new goes in `teneral-api`: every one of these requests exists in the schema and the server serves it already, so a change in that crate means something has been misread. Add a test that names every operation in the schema and asserts the client builds a request for each, so an operation added later without a subcommand fails rather than being quietly unreachable. That test is the gate, and it is why this is worth doing once rather than twice. Commit subject: "Let the debugging client configure a daemon." |
 | 5c | high | opus | none | The wire layer, and nothing above it. Read decisions 2, 4, 5 and 13, and `docs/provenance.md`'s `dhcp-unasked-option-set` row. Create the `teneral-dhcp` crate: `publish = false` (phase 4 found that cargo-deny's wildcard-path allowance does not reach publishable crates), `rust-version.workspace = true`, the workspace lints inherited, `dhcproto = "0.15.0"` and nothing else beyond `teneral-store` -- and **not** `teneral-api` (decision 1). Add it to the workspace members and to `[workspace.dependencies]`. Then `wire`: a parse that refuses `hlen > 16` **before** any `chaddr` accessor is called and a datagram over 1500 bytes before it is parsed, returning a named error per cause; an `Answer` type holding the parameters decision 4's table lists; and an encoder producing the nine options in the measured order with T1 and T2 at a half and seven-eighths. The malformed corpus is the point of this step, not a side-effect: the inputs decision 5 names, each asserting a named refusal and no panic, as table-driven tests with the input described in the test name. Mutate your own guard to prove the tests see it -- copy the tree, remove the `hlen` check, confirm a named test fails, restore from the copy, each run under `timeout` -- and report which test killed it and the script's path. `make lint`, `make test` and `make deny` must all be clean, including the per-crate store check at the end of lint; run `make fetch` before `make deny` so the new dependency tree resolves. Commit subject: "Parse and build DHCPv4 messages safely." |
-| 5d | high | opus | none | The decision layer: a parsed request plus its arrival interface, against a `BindingStore`. Read decisions 2, 6 and 11, finding 10, `docs/binding-store.md`'s lookup and lease-lifecycle sections, and the `lease-address-selection-order` and `selector-client-id-over-chaddr` provenance rows. The store already implements address selection, reservations, pools and the precedence order -- **do not reimplement any of it**; assemble a `ClientIdentity` from what the packet presents and ask. The path is: `interface_owner(namespace, ifname)` to get the network, refuse with a log line if nothing claimed it, then `lookup_binding_on_interface` for a reservation, then `allocate_lease` or `acquire_lease` or `renew_lease` or `revoke_lease` as decision 6's table says. The actor is `Actor::Daemon("dhcpv4")`. The send side is a trait with one method, so this layer is tested against a recorder. Tests: every row of decision 6's table, and **every one of them with two networks holding the same address** -- a DISCOVER arriving on each network's interface from the same MAC gets each network's own answer, a REQUEST for an address held in the other network is NAKed rather than ACKed, and a RELEASE in one network leaves the other's lease alone. That is the project's central correctness property and this is the layer where it is decided. Also: a request whose `giaddr` is non-zero is dropped with one log line, and an INFORM gets options and no lease. Report the test count. Commit subject: "Answer a DHCPv4 client from the binding store." |
+| 5d | high | opus | none | The decision layer: a parsed request plus its arrival interface, against a `BindingStore`. Read decisions 2, 6 and 11, finding 10, `docs/binding-store.md`'s lookup and lease-lifecycle sections, and the `lease-address-selection-order` and `selector-client-id-over-chaddr` provenance rows. The store already implements address selection, reservations, pools and the precedence order -- **do not reimplement any of it**; assemble a `ClientIdentity` from what the packet presents and ask. The path is: `interface_owner(namespace, ifname)` to get the network, refuse with a log line if nothing claimed it, then `lookup_binding_on_interface` for a reservation, then `allocate_lease` or `acquire_lease` or `renew_lease` or `revoke_lease` as decision 6's table says. The actor is `Actor::Daemon("dhcpv4")`. Decision 15 is the one to read twice: the form a packet's attributes take as selector values is this step's to implement and the store cannot check it, so the test that matters goes from packet bytes through a configured binding and back rather than asserting the renderer against itself. The send side is a trait with one method, so this layer is tested against a recorder. Tests: every row of decision 6's table, and **every one of them with two networks holding the same address** -- a DISCOVER arriving on each network's interface from the same MAC gets each network's own answer, a REQUEST for an address held in the other network is NAKed rather than ACKed, and a RELEASE in one network leaves the other's lease alone. That is the project's central correctness property and this is the layer where it is decided. Also: a request whose `giaddr` is non-zero is dropped with one log line, and an INFORM gets options and no lease. Report the test count. Commit subject: "Answer a DHCPv4 client from the binding store." |
 | 5e | high | opus | none | The datapath and the daemon. Read decisions 7, 8, 9 and 14, and the `sock-*` and `netns-*` provenance rows -- every behaviour here is already measured and none of it is to be rediscovered. The receive path: one wildcard-bound UDP socket per served interface (a socket bound to the interface's own address never sees `255.255.255.255`), `IP_PKTINFO` for the arrival ifindex and the datagram's destination, and the interface name from an `ioctl` on a socket rather than from `/sys/class/net`. The reply path: `AF_PACKET` with a hand-built Ethernet/IPv4/UDP frame when the client has no address, and UDP with the egress named per message when it does; the BROADCAST flag is a request for broadcast and never permission to unicast. Phase 1d's spike (iii) in `docs/plans/PLAN-teneral-implementation-phase-01-research-spikes.md:974` built exactly this in Rust and a real client accepted it -- read it and follow what it found, including the privilege. Then the daemon: `--dhcp-interface` repeatable, `--dhcp-port` defaulting to 67 with its testing purpose in the help, the startup line decision 14 specifies, a refusal to start when a named interface is claimed by no network, and shutdown ordered so the sockets close before the store does (`serve.rs` has the existing order and its comment). Nothing here may bind 67 in a test: `make test` runs as a non-root uid with no capabilities and the bind returns `EACCES`, which is why the port is a flag. Say in your report which parts you could not test and why. Commit subject: "Serve DHCPv4 on a socket per interface." |
 | 5f | medium | opus | none | The sweeper. Read decision 10, and the `sweep_expired_leases` documentation in `teneral-store/src/store.rs:570` -- particularly the paragraph saying nothing in the store waits for it, which is the premise the chosen interval rests on. A timer in the daemon, `--sweep-interval` in seconds defaulting to 86400, no sweep at startup, running over every network the store holds, with `Actor::Daemon("sweeper")`. It logs what it removed per network, and a sweep that removed nothing logs nothing. Tests: with the store's injectable clock (`teneral-store/src/clock.rs`), a lapsed lease is removed and its event appears; a live lease is not; a lease in one network is swept while the same address in another network is left alone; and a sweep that finds nothing writes no event and reports no position. Do not add a grace period -- decision 10 explains why it is future work rather than this step. Commit subject: "Sweep lapsed leases on a daily timer." |
 | 5g | high | opus | none | The lab, the captures and the rig. **Do not deploy anything until the management session confirms the back brief's gate has been answered yes** -- this step touches real infrastructure. Then: `cd` to the `homelab-deployments-lfs` checkout, `git pull` (the local `main` is 13 commits behind the merge that carries the lab), deploy `playbooks/linux-bridge-lab-debian-13.yml`, and leave the gateways in the root configuration (`lbr-lab-gateway show` to confirm). Read `docs/linux-bridge-lab.md` in that repository and `docs/differential-rig.md` here, especially *How a captured pair gets into the corpus lawfully*, which is six numbered steps and is not optional: the versions, the `tcpdump` command, the pcap kept outside this repository with its sha256 recorded, the frames as annotated hex, and the write-up. Capture dnsmasq first, then stop it and run teneral on the same bridges with the same ranges -- a `make release` binary copied in, run with `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW` -- and capture the same exchanges. What the phase needs: a DISCOVER/OFFER and a REQUEST/ACK from each of the two overlapping networks, a renewal, a RELEASE, an INFORM, and a NAK. Four behaviours came out of 5c with no provenance row and have to be measured here rather than guessed: whether the reference implementation pads a reply to the BOOTP minimum of 300 bytes, which teneral does not do and a 274-byte reply was accepted by one client; what it does with `hlen` of zero, with a `chaddr` of all zeroes and with a plain BOOTP request carrying no message type, all three of which teneral refuses; and what it does with an option whose value will not decode, where teneral drops the option and answers anyway. Add the provenance rows the captures support, with their write-ups, and the cases that cite them. Then the rig: the `[network]` table in `case.toml`, the subject signature carrying it, field-wise comparison reporting every difference rather than the first, and the existing `dhcpv4-discover-offer-dhclient` case flipped from `pending` to `compared`. Correct `docs/differential-rig.md:192-203`, which promises byte comparison. Nothing in this step reads dnsmasq's source, and no measurement is taken anywhere but the lab. Report the lab's identifier, the versions, and every row id you added. Commit subject: "Compare teneral's DHCPv4 bytes with dnsmasq's." |
@@ -807,58 +848,62 @@ than ticking it.
 13. Two networks holding the same address, asserted for every row
     of decision 6's table: DISCOVER, REQUEST in both states,
     DECLINE, RELEASE and INFORM.
-14. The nine options of `dhcp-unasked-option-set` appear in an
+14. A binding configured with the selector value an operator would
+    type is matched by a packet carrying the attribute it was
+    configured from, for the hardware address and for the client
+    identifier, proved end to end rather than by asserting the
+    renderer against itself.
+15. The nine options of `dhcp-unasked-option-set` appear in an
     OFFER in the measured order, with T1 at half the lease and T2
     at seven-eighths, asserted against the bytes rather than
     against the builder's inputs.
-15. An INFORM is answered with options, no `yiaddr` and no lease
+16. An INFORM is answered with options, no `yiaddr` and no lease
     time, and no lease row is written.
-16. A REQUEST naming another server's identifier produces no
+17. A REQUEST naming another server's identifier produces no
     reply, and a REQUEST for an address another client holds
     produces a NAK.
-17. A non-zero `giaddr` produces no reply and exactly one log
+18. A non-zero `giaddr` produces no reply and exactly one log
     line naming the relay.
-18. An interface with no address, or with more than one, is
+19. An interface with no address, or with more than one, is
     refused with a log line naming the interface rather than
     answered from a guess.
-19. The sweeper removes a lapsed lease and leaves a live one,
+20. The sweeper removes a lapsed lease and leaves a live one,
     writes no event when nothing expired, and sweeps one network
     without touching the same address in another.
-20. The daemon refuses to start when `--dhcp-interface` names an
+21. The daemon refuses to start when `--dhcp-interface` names an
     interface no network has claimed, and the refusal names it.
-21. The daemon's startup line names, per served interface, the
+22. The daemon's startup line names, per served interface, the
     network, the namespace, the derived address and prefix, and
     the lease time -- read from a real run, not from the source.
-22. `teneral serve` with no `--dhcp-interface` behaves exactly as
+23. `teneral serve` with no `--dhcp-interface` behaves exactly as
     phase 4 shipped it, proved by phase 4's own daemon tests still
     passing unchanged.
-23. The lab was deployed, teneral served both overlapping networks
+24. The lab was deployed, teneral served both overlapping networks
     through one process, and a real client bound an address on
     each -- with the client's own output recorded, not teneral's.
-24. `cross_network_answers` is zero in the diagnostics after the
+25. `cross_network_answers` is zero in the diagnostics after the
     lab run, read from the running daemon.
-25. Every new provenance row cites an RFC section or a named
+26. Every new provenance row cites an RFC section or a named
     observed-behaviour test, each new row is cited by at least one
     case, and the rig fails a case citing a row that does not
     exist.
-26. `dhcpv4-discover-offer-dhclient` is `compared` rather than
+27. `dhcpv4-discover-offer-dhclient` is `compared` rather than
     `pending`, the rig's subject registration and the case's
     status agree, and a deliberately wrong field in the subject
     makes the rig fail naming that field.
-27. No document says the binding store holds protocol options, and
+28. No document says the binding store holds protocol options, and
     `grep -rn 'protocol options' ARCHITECTURE.md docs/` returns
     only accurate sentences.
-28. `docs/dhcpv4.md` exists and states the lease time's home, the
+29. `docs/dhcpv4.md` exists and states the lease time's home, the
     namespace `/`, the capability set, the sweeper's interval with
     what it chose, and the recorded-holder behaviour.
-29. The master plan's phase 5 row and every *Future work* entry
+30. The master plan's phase 5 row and every *Future work* entry
     this phase closes or rewrites are updated, and each new
     deferral is written in full rather than named.
-30. Nothing this phase started is still running: no teneral
+31. Nothing this phase started is still running: no teneral
     process on this host or in the lab, no container, no `cargo`
     on the host, and the lab either torn down or reported as
     deliberately left up.
-
 ## Back brief
 
 My understanding of this phase, and the points that need an answer
@@ -1132,3 +1177,24 @@ decodes with one packet and spend them on the single thread that
 answers every network. Four drops, then the datagram is refused.
 Each of the three rounds is a case of the same thing: the cost of a
 packet must be a constant the receiver chose.
+
+**2026-11-26, AEDT. A decision was missing, found before 5d ran.**
+Checking 5d's brief against the store turned up the question of what
+form a packet's attributes take as selector values -- and the store's
+own comment on `Selector::new` saying that the front-end owns the
+choice, that the configuring side and the matching side have to agree
+on it, and that the store is not in a position to check that they do.
+Only the hardware address is normalised; everything else is whatever
+string the caller passed.
+
+That is the project's signature failure in its quietest form. Get the
+form wrong and an operator configures a reservation, every test in
+this repository passes, and no binding ever matches a real client.
+The plan had nothing to say about it, so decision 15 now does, with
+the client identifier taking the form the reference implementation's
+own lease file was measured to use -- colon-separated hex -- so that
+an operator moving across can paste what they already have. The
+definition of done gained the only test that can see a divergence:
+one that renders a value from a packet, configures a binding with the
+value an operator would type, and matches the packet against it. A
+test of the renderer alone would be asserting it against itself.
