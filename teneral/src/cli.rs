@@ -88,6 +88,19 @@ pub struct ServeArgs {
           value_parser = clap::value_parser!(u64).range(1..))]
     pub heartbeat_seconds: u64,
 
+    /// How often lapsed leases are swept, in seconds. A sweep turns
+    /// each expiry into an event for a consumer watching the history
+    /// and removes the row -- and that row is also what gives a
+    /// returning client its old address back, so this interval is how
+    /// long that stickiness lasts as well as how timely the event is.
+    /// A day, because the stickiness is the half worth keeping:
+    /// nothing in the store waits for the event, every read evaluates
+    /// expiry itself, and the lapsed row is the only source of address
+    /// stability this daemon has. Nothing is swept at startup.
+    #[arg(long, value_name = "SECONDS", default_value_t = 86_400,
+          value_parser = clap::value_parser!(u64).range(1..))]
+    pub sweep_interval: u64,
+
     /// An interface to serve DHCPv4 on, repeatable. It must already be
     /// attached to a network -- under the namespace `root`, which is
     /// where an interface in no namespace of its own is attached --

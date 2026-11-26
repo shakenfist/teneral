@@ -73,11 +73,13 @@ clap = { version = "4.6.10", default-features = false, features = ["std", "deriv
 #                      respectively.
 #   `macros`           `select!`, to wait for whichever arrives first.
 #   `time`             the bound on how long shutdown lets open
-#                      streams finish before giving up on them.
+#                      streams finish before giving up on them, and
+#                      the interval the lease sweeper runs on.
 #   `sync`             the channel that tells each DHCP socket's task
-#                      to stop, so that the sockets are closed before
-#                      the store is rather than being cancelled with
-#                      the runtime.
+#                      and the sweeper to stop, so that the sockets
+#                      are closed and the last sweep finished before
+#                      the store is dropped rather than being
+#                      cancelled with the runtime.
 tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-thread", "signal", "macros", "time", "sync"] }
 
 # Only the differential rig reads these. `toml` is the format cargo

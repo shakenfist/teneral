@@ -454,6 +454,8 @@ fn help_names_every_flag_with_its_default() {
         ("--max-live-views", "64"),
         ("--max-connections", "256"),
         ("--heartbeat-seconds", "15"),
+        ("--sweep-interval", "86400"),
+        ("--dhcp-port", "67"),
     ];
     for (flag, default) in flags {
         assert!(help.contains(flag), "{flag} missing from:\n{help}");
@@ -462,6 +464,14 @@ fn help_names_every_flag_with_its_default() {
             "{flag}'s default {default} missing from:\n{help}"
         );
     }
+
+    // The one flag with no default, which is what makes serving DHCP
+    // something an operator asks for rather than something a row in
+    // the store turns on.
+    assert!(
+        help.contains("--dhcp-interface"),
+        "--dhcp-interface missing from:\n{help}"
+    );
 
     // Every subcommand is named, and a client's help says where its
     // secret comes from.
@@ -516,6 +526,41 @@ fn refuses_to_serve_dhcp_on_an_interface_no_network_has_claimed() {
     // It refused rather than half-started: the control socket it had
     // already bound is gone again.
     assert!(!directory.socket().exists());
+}
+
+/// An interval the monotonic clock cannot name an instant that far
+/// ahead of is refused by name, before the daemon creates anything.
+///
+/// Both flags that arm a timer are checked, because the failure they
+/// share is not a refusal: arming one is `now` plus the interval, and
+/// an instant the clock cannot name panics inside whichever task holds
+/// the timer. That leaves the daemon running with its sweeper or a
+/// consumer's stream dead and a backtrace where the flag's name should
+/// have been.
+#[test]
+fn refuses_an_interval_further_ahead_than_the_clock_can_name() {
+    for flag in ["--sweep-interval", "--heartbeat-seconds"] {
+        let directory = Directory::new(&format!("interval{}", &flag[2..6]));
+        let mut daemon = Daemon::spawn_with(
+            &directory,
+            "daemon",
+            &directory.store(),
+            &directory.socket(),
+            &[flag, "18446744073709551615"],
+        );
+
+        let status = daemon.exit();
+
+        assert!(!status.success(), "{}", daemon.stderr());
+        let said = daemon.stderr();
+        for wanted in [flag, "clock can name"] {
+            assert!(said.contains(wanted), "{wanted:?} missing from:\n{said}");
+        }
+        // Refused before anything was created, so there is no socket
+        // and no store left behind.
+        assert!(!directory.socket().exists());
+        assert!(!directory.store().exists());
+    }
 }
 
 /// Two sockets on one port and one interface is a conflict the kernel

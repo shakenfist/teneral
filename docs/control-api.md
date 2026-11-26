@@ -788,14 +788,22 @@ is the reference.
 | `--max-live-views` | 64 | How many concurrent reads. Each costs the store a thread. Lower protects the machine; higher serves more simultaneous consumers. |
 | `--max-connections` | 256 | A connection is a task, so this is what stops an accept loop becoming unbounded memory. A daemon at the bound stops taking connections off the queue rather than accepting and idling them. |
 | `--heartbeat-seconds` | 15 | How soon a consumer notices a dead connection, against how much a quiet stream chatters. |
+| `--sweep-interval` | 86400 (a day) | How often lapsed leases are swept, in seconds. One interval sets two things that cannot be set apart: how soon a consumer is told an address was given up, and how long a client that has been away keeps getting its old address back. A day optimises for the second, because nothing in the store waits for the expiry event -- every read evaluates expiry against the clock -- while the lapsed row is the only source of address stability the daemon has. Lower it where a consumer needs expiries promptly and the stickiness does not matter. |
+| `--dhcp-interface` | none | An interface to serve DHCPv4 on, repeatable. It must already be attached to a network, under the namespace `root`, and an interface no network has claimed is a refusal to start rather than a warning. With none given the daemon serves no DHCP, binds no privileged port and opens no socket below the IP layer. Naming the interfaces is deliberate: a daemon that served every attachment the store held would have turned a configuration write into a privileged action. |
+| `--dhcp-port` | 67 | The port DHCPv4 is served on. The protocol's, and a client cannot be told to use another, so this exists for a test that needs a port an unprivileged process may bind rather than as a second place to configure a deployment. |
 
-All numeric flags must be at least 1. The daemon stops cleanly on `SIGINT` and
+All numeric flags must be at least 1, and an interval further ahead than this
+machine's monotonic clock can name is refused by name before the daemon creates
+anything. The daemon stops cleanly on `SIGINT` and
 `SIGTERM`: it stops accepting, tells every open stream it is stopping, waits up
 to five seconds for connections to finish with the store, and then closes the
 store. It logs one line per message to standard error and uses no logging
 framework; capturing and filtering that is left to whatever runs the daemon.
-There is also **no sweeper**: nothing in the daemon removes an expired lease, and
-`list_leases` includes expired ones and says so.
+A timer sweeps lapsed leases every `--sweep-interval` seconds, writing one
+expiry event per lease it removes and one log line per network it removed
+anything from; a sweep that removed nothing logs nothing. Nothing is swept at
+startup, so that a restart does not become the bound on the stickiness above.
+Until a sweep runs, `list_leases` includes expired leases and says so.
 
 The debugging client reaches every operation in this document, and a test
 asserts that it does by enumerating the schema rather than by counting
