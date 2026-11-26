@@ -870,13 +870,22 @@ than ticking it.
    with that method's `network` parameter removed still fails it.
 6. `scripts/check-api-docs.sh` reports every operation documented
    and every documented operation present, and fails when
-   `update_network` is removed from either side.
+   `update_network` is removed from either side. Running this found
+   that it did not: the script took "named anywhere on the page in
+   backticks" for the schema-to-page direction, so deleting an
+   operation's row from the table left it passing on a mention in a
+   paragraph. Both directions now read the enumeration, which is
+   what the script's own header already said the check was for.
 7. `1.89` is still the only place the MSRV floor is written outside
    the lockfile, and if `dhcproto` raised it the raise is in the
    same commit with a comment naming what needed it.
-8. The schema version is 8, the migration is forward-only, and a
+8. The schema version is 9, the migrations are forward-only, and a
    store created by 0001-0007 opens and reports the default lease
-   time without an operator writing one.
+   time without an operator writing one. This item said 8 until the
+   phase ran: 0008 sweeps attribution into the event states phase 4
+   left without it, which this phase found while checking 0009's own
+   backfill, so the lease time is 0009 and there are two migrations
+   rather than one.
 9. Every operation in the schema is reachable from the debugging
    client, asserted by a test that names them rather than by
    counting subcommands by hand, and the lab in 5g was configured
@@ -1578,3 +1587,50 @@ the step phrased better than the row did, extending it to a length,
 an ordering or an addressing rule that merely seems incidental. Those
 are precisely the three things this phase shipped without a row and
 had to go back for.
+
+**2026-11-27, AEDT. The definition of done, run.** Twenty-nine items
+passed as written, one passed after being corrected, and one failed
+and was fixed. The test count finishes at **355**, against phase 4's
+229: 229 to 234 for the lease time, to 313 for the wire and the
+decision layer, to 347 for the datapath and the daemon, to 352 for
+the sweeper, and to 355 for the padding the lab found missing. The
+rig runs thirteen cases against forty-three provenance rows and the
+daemon suite is nine, of which phase 4's six are untouched -- the
+item asking that `teneral serve` with no `--dhcp-interface` behave
+as phase 4 shipped it is checked by their diff being additions only,
+a hundred and twenty insertions and no deletions.
+
+The item that failed was item 6, and it failed in the gate rather
+than in the tree: deleting `update_network`'s row from the control
+API page left `scripts/check-api-docs.sh` reporting "every operation
+is documented" while its own output said the page enumerated
+thirty-three against the schema's thirty-four. The script's header
+describes the check as being for the section where the capability and
+the scope rule live, and its implementation accepted the name
+appearing anywhere on the page in backticks -- so a paragraph
+mentioning an operation satisfied it. Both directions now read the
+enumeration, and the gate was re-run against the row deleted from
+each side in turn: it fails each way, naming the operation. The
+leniency had no other purpose, every operation being in the table.
+
+Two mutants were reproduced by this session rather than taken on
+report, each on a copy of the tree and under `timeout`. Removing the
+`hlen` guard from the wire layer is killed by
+`a_hardware_length_past_the_end_of_the_field_is_refused` and
+`a_hardware_length_past_the_end_of_the_field_is_refused_whatever_follows_it`,
+107 of 109 tests still passing, which is the shape a good mutant has.
+Changing the renewal time from half the lease to a third fails five
+differential cases, each naming the field and both values -- `option-58
+differs and the case asserts that it matches: the capture carries
+00:00:54:60 and teneral produced 00:00:38:40` -- which is the item
+asking that a deliberately wrong field make the rig fail naming that
+field.
+
+One item could not be checked the way it was written and is reported
+as such rather than ticked: item 9's clause that the lab was
+configured and inspected with the debugging client "and nothing
+else". The client did the configuring, and the lab's own helper
+script names the store file in a variable, so the claim is right in
+substance; but a grep of a script is not a proof of what ran, and
+the only honest statement is that nothing in the recorded output
+shows another tool writing to the store.
