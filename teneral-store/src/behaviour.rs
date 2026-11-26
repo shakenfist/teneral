@@ -2648,10 +2648,21 @@ async fn a_renewal_of_a_lapsed_lease_is_refused_rather_than_quietly_reacquiring(
     match &refusal {
         Error::NotFound { kind, id } => {
             assert_eq!(*kind, "lease");
-            assert!(id.contains("a live lease"), "{id}");
+            assert!(id.contains("still live"), "{id}");
         }
         other => panic!("expected a refusal that there is no live lease, got {other:?}"),
     }
+    // The whole sentence, because the kind and the identifier are
+    // rendered together and a refusal that read "there is no lease a
+    // live lease on ..." passed every assertion that looked at one
+    // half of it.
+    assert_eq!(
+        refusal.to_string(),
+        format!(
+            "there is no lease {} in the network {ALPHA} that is still live",
+            in_pool(50)
+        )
+    );
 
     // The row is untouched, so the refusal cost nothing and the
     // client's own address is still the one it used to have -- which
