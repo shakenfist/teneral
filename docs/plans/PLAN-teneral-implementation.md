@@ -367,9 +367,13 @@ Phases 1 to 4 are complete. The first two said that they were the
 only ones that would be scheduled, because the operator had other
 projects in flight and had said this one should not proceed past
 the prototype until those were further along; he resumed it on
-2026-11-23. Phase 5 is `In progress` as of 2026-11-26: its plan is
-written and awaits review, and its survey found that the store holds
-none of the configuration a DHCPv4 answer needs. Phases 6 to 11
+2026-11-23. Phase 5 was planned on 2026-11-26 and its survey found
+that the store held none of the configuration a DHCPv4 answer needs;
+every one of its steps has landed on its branch and it is `In
+progress` until that branch merges. It stays that way in its own
+pull request deliberately: the row's `Merged` cell holds the commit
+that landed the phase, which nothing inside the phase can name, so
+phase 6's first commit is what closes this row. Phases 6 to 11
 remain `Proposed` rather than `Not started`, which is the honest
 status and should not be promoted to make the table look busier.
 
@@ -504,6 +508,28 @@ redeploys it.
   Static reservations and dynamic pools. Option encoding. The
   `AF_PACKET` reply path from 1d. Differential cases for
   everything wire-visible.
+
+  Now built, and its own file is the record. In summary: the
+  `teneral-dhcp` crate, in three layers -- the wire, the decision
+  against the store, and the sockets -- served by `teneral serve
+  --dhcp-interface`, with a lease time on the network, a daily
+  sweeper, and the debugging client widened to reach every operation
+  in the schema. It answers DISCOVER, REQUEST, DECLINE, RELEASE and
+  INFORM with the nine options a client that asks for nothing was
+  measured receiving, and it served two overlapping networks from one
+  process as an unprivileged uid in the lab. Things that changed on
+  the way, each a finding rather than a refinement: the store held
+  none of the configuration an answer needs, so the lease time became
+  a column and everything else is derived from the arrival interface;
+  the namespace for an interface in no namespace is `root` and not
+  `/`, which the store refuses; the build container can bind a
+  privileged port and cannot open an `AF_PACKET` socket, which
+  reversed a premise of the plan; and the replacement was found
+  emitting replies a conforming receiver is told to discard, which are
+  now padded to the BOOTP minimum. The rig compares field by field
+  against a configuration the case carries. `docs/dhcpv4.md`
+  describes it without a plan in hand, including the limits its
+  parser imposes.
 - **Phase 6: DNS front-end.** `hickory`: authoritative for local
   names, forwarding for the rest, forward and PTR records
   registered from DHCP leases, and the equivalents of
@@ -1084,14 +1110,26 @@ chosen to defer to here, so that we do not forget them.
   `IP_PKTINFO` and the reply has to name its egress per message.
   Phase 8 should run that configuration before it trusts the
   per-socket answer.
-* **The differential rig needs a lab, and one now exists.**
+* **Done: the lab was redeployed, and the differential rig now
+  compares.** Phase 5 redeployed
   `playbooks/linux-bridge-lab-debian-13.yml` in
-  `homelab-deployments-lfs` deploys two overlapping networks,
-  four clients and a real dnsmasq from one command, and it
-  converges. Phase 5's differential testing should redeploy that
-  rather than invent a rig of its own, and the measurements it
-  takes should land in `docs/provenance.md` as the phase 1 ones
-  did.
+  `homelab-deployments-lfs` on 2026-11-27, rather than inventing a
+  rig of its own, and ran dnsmasq and then teneral on the same two
+  overlapping bridges. The second deployment ran a later kernel and a
+  later dnsmasq package than the first, so `docs/provenance.md`
+  scopes the two separately and no row claims more than was measured.
+  It produced twelve observed rows and thirteen cases, six captures
+  retained outside the repository beside their digests, and one
+  defect: teneral was emitting replies shorter than the BOOTP minimum
+  that a conforming receiver is told to discard, which is now fixed
+  and has an RFC-cited row beside the observed one. The rig gained a
+  `[network]` table in a case, a subject that answers against it, and
+  a comparison that is field-wise and reports every difference, and
+  the one case that was `pending` is `compared`. What remains
+  unmeasured is what the lab cannot show: it boots no guest, so PXE
+  and the boot options wait for phase 10, and what the reference
+  implementation does with a BOOTP-only client where one *is*
+  configured was not measured.
 * **The `dhcproto` defect is fixed upstream and the fix is not
   released.** `Message::chaddr()` panics on a DISCOVER whose
   `hlen` exceeds 16, and the zero-copy path over-reads into
@@ -1100,8 +1138,9 @@ chosen to defer to here, so that we do not forget them.
   bluecatengineering/dhcproto#111 on 2026-11-22, with minor
   edits, and **merged on 2026-11-24** as `6194561`; the drafted
   issue was not filed, because that project has not used its
-  issue tracker since 2023. Phase 5 must still reject
-  `hlen > 16` at ingress, and the merge does not soften that:
+  issue tracker since 2023. Phase 5 rejects
+  `hlen > 16` at ingress, before any accessor is called, and the merge
+  does not soften the need:
   0.15.0, published 2026-05-19, is still the only release and
   still carries the defect, so every version this project can
   resolve panics on that packet. What the merge does change is
@@ -1185,40 +1224,46 @@ chosen to defer to here, so that we do not forget them.
   `NEVER_ISSUED` is a distinct answer that says a store has gone
   backwards. Revisit only if a detector can be found whose state
   survives the restore it is meant to detect.
-* **The sweep interval is also an address-stickiness knob, and the
-  two cannot be set independently.** RFC 2131 section 4.3.1's
-  second selection step gives a client back the address it held
-  under a lapsed lease, and the store knows which address that was
-  only because the lapsed lease row is still there. The sweep
-  deletes that row. So however often a later phase sweeps is
-  exactly how long a client keeps getting its old address back
-  after its lease expires, and a sweep interval chosen purely as an
-  event-emission cadence will have silently chosen the stickiness
-  of every address in the deployment as well. Phase 5 is where the
-  interval gets chosen, and it should choose it knowing it is
-  choosing both things -- and record which of the two it optimised
-  for. It is documented in `docs/api-design.md` because that is
-  where phase 5 will be looking.
-* **A client that stops presenting its client identifier is not
-  recognised as its lease's holder.** A lease records one holder,
-  and the one recorded is the highest-precedence attribute the
-  client presented when it acquired the address. A client that
-  supplied a client identifier and later stops supplying one
-  therefore looks like a different client: nothing matches the
-  attribute its lease was recorded against, so it is not the
-  holder, and it will be given a second address while the first
-  stays held until it lapses. This is honest rather than broken --
-  the store cannot know that two identities are one machine, and
-  it is the protocol's own warning about keying on a hardware
-  address, in reverse -- but today it is asserted by a test and
-  explained only in that test's comment, which is not where a
-  front-end author will find it. Phase 5 should decide whether to
-  mitigate it, the obvious candidate being to consult every
-  attribute a client presents when asking what it holds rather
-  than only the recorded one, and record the decision either way:
-  declining to mitigate is a legitimate answer and is worth
-  writing down, because the next person to meet the behaviour will
-  otherwise read it as an oversight.
+* **The sweep interval is chosen, and it is still the stickiness
+  knob.** RFC 2131 section 4.3.1's second selection step gives a
+  client back the address it held under a lapsed lease, and the store
+  knows which address that was only because the lapsed lease row is
+  still there. The sweep deletes that row, so the interval is both
+  how soon a consumer is told an address was given up and how long a
+  client keeps getting its old address back. Phase 5 chose a day
+  (`--sweep-interval`, 86400, no sweep at startup) and **optimised
+  for the stickiness**: the expiry event is a convenience, since
+  every read evaluates expiry against the clock, while the lapsed row
+  is the only source of address stability teneral has, it choosing the
+  lowest free address where dnsmasq chooses by client identity.
+  What this did not fix is that the two remain one knob. Decoupling
+  them means a **grace period**: the sweeper emits the expiry when
+  the lease lapses and deletes the row only after the grace period
+  has also passed, which is two writes and a row state the schema
+  does not have. Do that when a consumer needs expiry events promptly
+  and still wants a returning client to get its address back; until
+  then a reader meeting an address-stability complaint should find
+  this design rather than the symptom. It is documented in
+  `docs/dhcpv4.md`, `docs/control-api.md` and `docs/binding-store.md`.
+* **Declined: a client that stops presenting its client identifier
+  is still not recognised as its lease's holder.** A lease records
+  one holder, the highest-precedence attribute the client presented
+  when it acquired the address, so a client that supplied a client
+  identifier and later stops supplying one looks like a different
+  client: it is given a second address while the first stays held
+  until it lapses. Phase 5 decided not to mitigate it. The obvious
+  mitigation, consulting every attribute a client presents rather
+  than only the recorded one, is already what the lookup does, and
+  it is not the problem; what cannot be fixed that way is the lease
+  recording one holder. Doing better means recording every attribute
+  a client presented at acquisition and matching on any of them,
+  which is a side table, a retention question and a deliberate
+  decision to treat two identities as one machine -- the guess RFC
+  2131's warning about hardware addresses is about -- and a store
+  that guessed would hand one client another's address wherever the
+  guess was wrong. The behaviour, its cause and its consequence are
+  now in `docs/dhcpv4.md` and `docs/binding-store.md`. Revisit only
+  with a consumer that can say two identities are one machine.
 * **There is no `update_binding_revoking_lease`.** The store offers
   "configure this binding, taking the lease on the address away
   from its holder in the same operation" and has no matching form
@@ -1270,6 +1315,84 @@ chosen to defer to here, so that we do not forget them.
   journal, which supplies the timestamps and the filtering. Whether
   to carry a framework is a packaging decision and belongs with the
   rest of the deployment, so the packaging phase should make it.
+
+* **There is no table of options, so a DHCPv4 answer carries
+  exactly nine.** The store holds none, and phase 5 derived what it
+  could -- the server identifier, mask, broadcast address, router and
+  name server from the arrival interface, the times from the lease
+  time -- rather than build a configuration surface. So an operator
+  cannot give a network a router or name server that is not this
+  machine, a domain name, an MTU, or anything outside those nine, and
+  cannot override one per client. The shape to build when a consumer
+  names an option it needs is a row of an option code, a scope of a
+  network or a binding, and bytes, with the front-end looking it up
+  beside the derived values and the derived values as the defaults.
+  Decide it from that consumer rather than from dnsmasq's directives:
+  the option grammar is the thing this project was able to delete.
+  The encoder writes one call per option in a sequence a reader can
+  reorder, so nothing there needs undoing first. Where an option's
+  value is operator-supplied, `docs/provenance.md` will want a row for
+  any order or presence it makes visible.
+* **A DECLINE is revoked and logged, and the address may be offered
+  again.** A DECLINE says the address teneral handed out is already
+  in use by something the store does not know about. Phase 5 revokes
+  the lease and logs the event, so the address returns to the pool
+  and the next client may be offered it; if the conflict is
+  permanent the same address is offered, declined and revoked in a
+  loop. Stopping that needs an exclusion: a state the store does not
+  hold, consulted by allocation, that expires on its own. That is a
+  store change with a retention policy of its own -- how long an
+  excluded address stays excluded, whether an operator can clear it,
+  whether it is an event a consumer watches -- and an API surface to
+  list and clear exclusions. Build it with a consumer that can say
+  how long a conflicting address should stay out of the pool. What
+  was not acceptable, and is not done, is dropping a DECLINE
+  silently: it is the clearest evidence a server gets that its
+  belief is wrong.
+* **The DHCPv4 decoder's dependency subtree is 54 crates counting
+  `dhcproto` itself.** The lockfile went from eighty-eight packages
+  to a hundred and forty-five when `teneral-dhcp` took it. Most of
+  that arrives through `hickory-proto`, which the decoder takes
+  non-optionally for its domain-name options, and with it a URL
+  parser, the ICU normalisation and property tables, and an Android
+  binding that never builds on Linux. "Most" is an understatement:
+  fifty-two of the fifty-four are in `hickory-proto`'s own subtree,
+  and the only two that are not are `dhcproto` and its macro crate.
+  Measured on 2026-11-27 with `cargo tree` in the build image, by
+  crate name. The plan first said fifty-seven, and a figure of
+  twenty-seven for the DNS and Unicode share was this session's own
+  mistake -- the count of names matching a pattern it had written
+  rather than of crates reachable through the library. `make deny`
+  passes with `exceptions` empty, so no licence decision was dodged,
+  and phase 6 wants that library anyway, so it arrives a phase early
+  rather than needlessly. The alternative is a hand-written decoder
+  with no dependency. It would cost writing again the part of this
+  crate where the risk is -- the option records and their
+  concatenation rules, where the `hlen` defect lived -- and would
+  need the malformed corpus to carry the weight the library's own
+  tests now share. Revisit when phase 6 settles which `hickory`
+  crates it takes, because if it needs `hickory-proto` regardless the
+  saving disappears.
+* **The test directory and clock helpers exist in three places.**
+  The sweeper added a third hand-rolled copy of the temporary
+  directory and the injectable test clock, beside the store's and the
+  API's. Hoisting them means a test-support feature on
+  `teneral-store` that two other crates adopt, which is a change to
+  a crate whose feature list the build deliberately polices, so it was
+  not done in a step whose subject was a timer.
+* **A flake in phase 4's daemon suite stands unexplained.**
+  `a_stale_socket_file_does_not_stop_a_daemon_starting` fails on its
+  own precondition roughly twice in twenty runs: it binds a
+  `UnixListener`, drops it, and asserts that connecting to the path
+  fails, and sometimes the connection succeeds. Closing a listener
+  and connecting to its path twenty thousand times on one host was
+  refused every time, so something was holding the path, and the
+  standard library's `SOCK_CLOEXEC` should have stopped a child
+  inheriting it. Nothing is claimed about why. Start by dumping
+  `/proc/net/unix` for that path at the moment the probe succeeds,
+  which names the holder and is the one piece of evidence nobody has.
+  The daemon is not shown to be at fault: the two tests that assert
+  the behaviour this one sets up for passed in every run.
 
 ### Bugs fixed during this work
 

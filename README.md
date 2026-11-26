@@ -15,8 +15,8 @@ who.
 **Status: early.** The repository carries its build, its lint and
 licence gates, its CI lanes and the differential rig, and the
 binding store every front-end will read is built, and so is the
-control API over it, served by a daemon. Nothing yet speaks DHCP or
-DNS. See the
+control API over it, served by a daemon, and so is a DHCPv4
+front-end. Nothing yet speaks DNS. See the
 [implementation plan](https://github.com/shakenfist/teneral/blob/develop/docs/plans/PLAN-teneral-implementation.md).
 
 ## Why
@@ -59,6 +59,9 @@ as addresses, the same mechanism serves instance metadata.
 - [The control API](https://github.com/shakenfist/teneral/blob/develop/docs/control-api.md)
   -- how anything else reads and changes what teneral serves: the
   socket, the capabilities and the watch stream.
+- [The DHCPv4 front-end](https://github.com/shakenfist/teneral/blob/develop/docs/dhcpv4.md)
+  -- which messages are answered, where each option comes from, how
+  to run it, and what its parser refuses.
 - [Provenance](https://github.com/shakenfist/teneral/blob/develop/docs/provenance.md)
   -- where each behaviour came from, and why that question matters
   in an Apache-2.0 project that reimplements GPL software.

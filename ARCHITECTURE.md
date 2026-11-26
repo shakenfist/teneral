@@ -1,9 +1,10 @@
 # Architecture
 
 **This describes the intended shape of the system. The binding
-store at the middle of it and the control plane over it are built;
-the front-ends and datapaths are not yet.** The plan that builds
-the rest, and the research spikes that gate it, are in
+store at the middle of it, the control plane over it, and the first
+front-end -- DHCPv4, on a socket per interface -- are built; the
+other front-ends and the namespace datapath are not yet.** The plan
+that builds the rest, and the research spikes that gate it, are in
 [docs/plans/PLAN-teneral-implementation.md](docs/plans/PLAN-teneral-implementation.md).
 
 ## The idea
@@ -56,6 +57,22 @@ lookup result back into a wire response. They share socket
 plumbing and nothing else. A front-end holds no per-network state
 of its own; if it needs to remember something, that belongs in the
 store.
+
+The first exists, as the `teneral-dhcp` crate: DHCPv4, in three
+layers -- `wire` for bytes, `decide` for the questions it asks of the
+store and the leases it writes, and `datapath` for the sockets -- so
+that everything which decides what a client is told sits above the
+only part the repository's tests cannot reach. It serves DISCOVER,
+REQUEST, DECLINE, RELEASE and INFORM on the interfaces `teneral serve`
+is told to, answering each client from the network that claimed the
+interface the request arrived on, with the nine options a client that
+asked for nothing was measured receiving, every one derived from the
+store's lease time or from the interface itself. It does not serve
+BOOTP-only clients, relayed requests or any option outside those
+nine, and it serves no namespace: an interface in no namespace is
+attached under `root`. It depends on the store and not on the control
+plane. See [docs/dhcpv4.md](docs/dhcpv4.md). DNS, TFTP and the
+metadata service are not built.
 
 **The datapaths** are how a request reaches a front-end. There is
 one design, with a variation: a socket per interface, created
@@ -152,6 +169,9 @@ language, not the reason for the project.
 - [docs/binding-store.md](docs/binding-store.md) -- layer zero as
   built: the schema and its keys, the lease lifecycle and its
   durability point, the history and its bound, and the diagnostics.
+- [docs/dhcpv4.md](docs/dhcpv4.md) -- the DHCPv4 front-end as
+  built: which messages are answered, where each option comes from,
+  how to run it, and what its parser refuses and why.
 - [docs/provenance.md](docs/provenance.md) -- where each behaviour
   came from, and the licence reason that matters.
 - [docs/differential-rig.md](docs/differential-rig.md) -- how a

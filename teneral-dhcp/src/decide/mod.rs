@@ -5,10 +5,10 @@
 //! belongs to, which client is asking, whether that client may have
 //! the address it named, and whether the answer is an offer, an
 //! acknowledgement, a refusal or a silence -- all of it is settled
-//! here, above the sockets, because `make test` runs as an
-//! unprivileged uid and can bind neither port 67 nor an `AF_PACKET`
-//! socket. Anything decided below this line is decided where this
-//! repository's tests cannot see it, so nothing is.
+//! here, above the sockets, because `make test` cannot open an
+//! `AF_PACKET` socket and has one interface. Anything decided below
+//! this line is decided where this repository's tests cannot see it,
+//! so nothing is.
 //!
 //! # What this layer does not implement
 //!
