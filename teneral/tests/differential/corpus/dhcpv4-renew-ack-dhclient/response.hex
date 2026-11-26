@@ -1,0 +1,72 @@
+# The reply as it crossed the bridge, 358 octets, exactly as captured at Unix
+# time 1795724027.898983. case.toml beside this file carries the
+# capture's provenance and the docs/provenance.md rows these bytes
+# are evidence for.
+#
+# Bytes observed on a wire. Nothing here is derived from anybody's
+# source code, and nothing may be: dnsmasq is GPL-2/3 and teneral is
+# Apache-2.0, so an observation is the only lawful source for a
+# behaviour no RFC specifies. The annotations are a reading aid; the
+# bytes are what the rig asserts on.
+
+# Ethernet: dst fa:16:3e:00:01:0a, src fa:16:3e:00:01:01, type 0x0800
+fa 16 3e 00 01 0a                                # destination hardware address
+fa 16 3e 00 01 01                                # source hardware address
+08 00                                            # EtherType 0x0800, IPv4
+
+# IPv4: 10.0.0.1 -> 10.0.0.128, 344 octets in all
+45 c0                                            # version 4, header length, differentiated services
+01 58                                            # total length
+b8 cc 00 00                                      # identification, flags, fragment offset
+40 11                                            # time to live, protocol 17 (UDP)
+ab 88                                            # header checksum
+0a 00 00 01                                      # source address
+0a 00 00 80                                      # destination address
+
+# UDP: 67 -> 68, 324 octets
+00 43                                            # source port
+00 44                                            # destination port
+01 44                                            # length
+15 d6                                            # checksum
+
+# BOOTP: op 2, ACK
+02 01 06 00                                      # op, htype, hlen, hops
+e5 ed 12 59                                      # xid
+00 00 00 00                                      # secs, flags
+0a 00 00 80                                      # ciaddr 10.0.0.128
+0a 00 00 80                                      # yiaddr 10.0.0.128
+0a 00 00 01                                      # siaddr 10.0.0.1
+00 00 00 00                                      # giaddr 0.0.0.0
+
+# chaddr, 16 octets: fa:16:3e:00:01:0a:00:00:00:00:00:00:00:00:00:00
+fa 16 3e 00 01 0a 00 00                          # chaddr
+00 00 00 00 00 00 00 00                          # chaddr, continued
+
+# sname, 64 octets, and file, 128 octets.
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # sname
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # sname
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # sname
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # sname
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+
+# The magic cookie, and then the options.
+63 82 53 63                                      # magic cookie 99.130.83.99
+
+35 01 05                                         # option 53 message type: ACK
+36 04 0a 00 00 01                                # option 54 server identifier: 10.0.0.1
+33 04 00 00 00 78                                # option 51 lease time: 120s
+3a 04 00 00 00 38                                # option 58 T1: 56s
+3b 04 00 00 00 65                                # option 59 T2: 101s
+01 04 ff ff ff 00                                # option 1 subnet mask: 255.255.255.0
+1c 04 0a 00 00 ff                                # option 28 broadcast address: 10.0.0.255
+03 04 0a 00 00 01                                # option 3 router: 10.0.0.1
+06 04 0a 00 00 01                                # option 6 dns-server: 10.0.0.1
+0c 16 6c 62 72 31 2d 6c 62 72 6c 61 62 2d 31 37 39 35 37 32 33 30 38 39 # option 12 host name: 'lbr1-lbrlab-1795723089'
+ff                                               # option 255 end

@@ -67,10 +67,10 @@ pub(crate) const CLIENT_PORT: u16 = 68;
 ///
 /// Named rather than left as a branch inside the send so that the
 /// decision is a value a test can make without a socket, which is the
-/// only way this judgement can be checked where no privileged port can
-/// be bound.
+/// only way this judgement can be checked where no socket below the IP
+/// layer can be opened and there is one interface to send on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Delivery {
+pub enum Delivery {
     /// To every client on the link, because this client cannot be
     /// relied on to receive anything narrower.
     Broadcast,
@@ -234,7 +234,7 @@ impl Egress for Sender {
 /// real message: a refusal, a client renewing or asking for
 /// configuration alone, a client with no address that asked for
 /// broadcast, and a client with no address that did not.
-fn delivery(reply: &Reply<'_>) -> Result<Delivery> {
+pub fn delivery(reply: &Reply<'_>) -> Result<Delivery> {
     if reply.kind() == AnswerKind::Refusal {
         return Ok(Delivery::Broadcast);
     }

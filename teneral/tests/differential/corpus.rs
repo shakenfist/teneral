@@ -7,6 +7,7 @@
 //! capture, one directory per exchange.
 
 use serde::Deserialize;
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
 /// The corpus path as a reader of a failure message should see it,
@@ -38,10 +39,81 @@ pub struct Case {
     pub provenance: Vec<String>,
     /// The captured request, as a fixture file beside `case.toml`.
     pub request: String,
-    /// The captured reply, likewise.
-    pub response: String,
+    /// The captured reply, likewise -- absent where the capture
+    /// recorded no reply at all.
+    ///
+    /// A silence is a measurement: four of the behaviours this corpus
+    /// records are "the reference implementation did not answer
+    /// this", and a case that could not say so would have to leave
+    /// them out. The capture is what proves it: every frame that
+    /// crossed the bridge for the seconds either side of the request
+    /// is in the pcap the case names, and none of them is a reply.
+    #[serde(default)]
+    pub response: Option<String>,
     pub capture: Capture,
+    pub network: Configuration,
     pub comparison: Comparison,
+}
+
+/// The configuration the capture was taken against.
+///
+/// Data rather than prose, because a DHCP reply is not a function of
+/// the request alone: the lease time, the mask and three of the nine
+/// options an answer carries come from the network and the interface,
+/// so a rig that fed the subject nothing but bytes could only ever
+/// compare a packet nobody had configured. The harness builds a store
+/// from this and asks the subject to answer the captured request
+/// against it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Configuration {
+    /// The network the interface below belongs to.
+    pub name: String,
+    /// The interface the request arrived on, named within the
+    /// namespace an interface in no namespace of its own is attached
+    /// under. That namespace is not a field: there is one spelling of
+    /// it and the front-end owns it.
+    pub interface: String,
+    /// The address that interface was observed to hold, which is the
+    /// server identifier, the router and the nameserver.
+    pub server_address: Ipv4Addr,
+    /// The prefix beside it, in bits.
+    pub prefix_length: u8,
+    /// How long the network holds the addresses it gives out.
+    pub lease_seconds: i64,
+    /// The spans it may give addresses out of.
+    pub ranges: Vec<Range>,
+    /// The leases the server already held when the exchange was
+    /// captured.
+    ///
+    /// Part of the configuration in the same sense as the ranges: a
+    /// renewal, a release and a refusal are all answers to a client
+    /// the server has a record of, so a case for one of them that
+    /// started from an empty store would be asking a different
+    /// question. Each lease here was granted by an earlier exchange in
+    /// the same capture, which is what makes it a record of what was
+    /// there rather than a convenient fiction.
+    #[serde(default)]
+    pub leases: Vec<Held>,
+}
+
+/// One span of addresses a network may give out.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Range {
+    pub name: String,
+    pub first: Ipv4Addr,
+    pub last: Ipv4Addr,
+}
+
+/// One lease the server held when the exchange was captured.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Held {
+    pub address: Ipv4Addr,
+    /// The client holding it, by the hardware address an operator
+    /// would type.
+    pub mac: String,
 }
 
 /// Where the bytes came from. Every field here is provenance rather
@@ -71,7 +143,9 @@ pub struct Capture {
     /// accidental edit to a fixture fails here rather than changing
     /// what the corpus claims was observed.
     pub request_bytes: usize,
-    pub response_bytes: usize,
+    /// Absent exactly where `response` is.
+    #[serde(default)]
+    pub response_bytes: Option<usize>,
 }
 
 /// What the comparison asserts, and whether it can run yet.
@@ -82,10 +156,51 @@ pub struct Comparison {
     /// registers under.
     pub subject: String,
     pub status: Status,
-    /// What the comparison asserts, in prose, until there is code to
-    /// assert it. This is the case's specification, so it says what
-    /// must match and what deliberately need not.
+    /// Whether teneral answers this exchange at all.
+    ///
+    /// `answer` is the ordinary case. `silence` says teneral
+    /// deliberately says nothing -- either because the capture holds
+    /// no reply either, or because this is a request the reference
+    /// implementation serves and this front-end refuses.
+    #[serde(default)]
+    pub expect: Expect,
+    /// The fields of the reply that must match the capture, by name.
+    pub fields: Vec<String>,
+    /// The agreements within one reply that must hold, in the capture
+    /// and in teneral's answer alike.
+    ///
+    /// For the things that cannot be compared with the capture because
+    /// teneral legitimately chooses otherwise: which address comes out
+    /// of a pool is its own choice, so `yiaddr` is asserted to agree
+    /// with the address the reply was sent to rather than to be the
+    /// address dnsmasq picked.
+    #[serde(default)]
+    pub agree: Vec<String>,
+    /// The fields that must *differ*, because teneral differs on
+    /// purpose.
+    ///
+    /// Asserted rather than left out: a divergence nobody wrote down
+    /// is indistinguishable, a year later, from a case nobody wrote,
+    /// and a divergence that quietly stops being one should fail here
+    /// so that somebody decides whether the case or the code moved.
+    #[serde(default)]
+    pub diverges: Vec<String>,
+    /// What the comparison asserts, in prose. The field lists above
+    /// say what is checked; this says why, and what deliberately is
+    /// not checked at all.
     pub asserts: String,
+}
+
+/// Whether teneral answers an exchange.
+#[derive(Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Expect {
+    /// teneral puts a reply on the wire, and it is compared.
+    #[default]
+    Answer,
+    /// teneral puts nothing on the wire, which is the whole
+    /// assertion.
+    Silence,
 }
 
 /// Whether a case's comparison runs.

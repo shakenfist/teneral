@@ -1,0 +1,72 @@
+# One captured DHCPv4 exchange. See ../../README.md for what a case
+# is, and ../../../../../docs/differential-rig.md for how a capture
+# gets into this corpus lawfully.
+
+summary = "A DISCOVER whose chaddr is all zeroes, which dnsmasq serves and teneral refuses."
+
+# The docs/provenance.md rows these bytes are the evidence for, by
+# row id. The harness fails this case if the list is empty or if a
+# row id is not in that file.
+provenance = [
+    "dhcp-zero-chaddr-is-served",
+]
+
+request = "request.hex"
+response = "response.hex"
+
+[capture]
+observed = "2026-11-27"
+server = "dnsmasq 2.91-1+deb13u2, Debian 13.8, kernel 6.12.118+deb13-amd64, serving --dhcp-range=tag:gw-n1,10.0.0.100,10.0.0.150,12h and --dhcp-range=tag:gw-n2,10.0.0.200,10.0.0.250,12h on gw-n1 and gw-n2 with --bind-dynamic"
+client = "a request built octet by octet and sent on the bridge from a client endpoint by the probe script of experiment 6; the reply is the measurement and is dnsmasq 2.91-1+deb13u2's own"
+link_type = "EN10MB"
+# The capture file is kept outside this repository: a pcap is not an
+# artifact a reviewer can read, and the frames that matter are here as
+# hex text instead. The digest ties the two back together.
+pcap = "lbrlab-1795723089-dnsmasq-br-n1.pcap"
+pcap_sha256 = "fabde438aef41f22d4892fcf5e3a8cfa99a0d017506641708a2acef9b1c29e38"
+frames = "21 and 22 of 28"
+write_up = "linux-bridge-lab.md, experiment 6"
+request_bytes = 342
+response_bytes = 342
+
+[network]
+# The configuration the capture was taken against, as data: a DHCP
+# reply is not a function of the request alone.
+name = "n1"
+interface = "gw-n1"
+server_address = "10.0.0.1"
+prefix_length = 24
+lease_seconds = 43200
+
+[[network.ranges]]
+name = "pool"
+first = "10.0.0.100"
+last = "10.0.0.150"
+
+[comparison]
+subject = "dhcpv4"
+status = "compared"
+expect = "silence"
+fields = []
+agree = []
+diverges = []
+asserts = """
+A DISCOVER declaring six octets of hardware address and carrying
+sixteen zero octets in `chaddr`. dnsmasq answered it: an OFFER of
+10.0.0.101, broadcast, with the all-zero address written into the reply
+as the client's, and the same answer whether or not the client also
+presented a client identifier.
+
+teneral refuses the datagram, and this case asserts that refusal rather
+than recording a reply teneral does not send. The reason is the reply
+path and not fastidiousness: a client with no address is answered in a
+frame addressed to the hardware address it holds, and an all-zero
+hardware address is not one -- a frame sent to it would be delivered to
+whatever did answer for it, or to nothing. A client with no hardware
+address is addressable in principle, by its client identifier, and RFC
+4390 specifies exactly that shape for InfiniBand; serving it means a
+reply path this front-end does not have.
+
+The case exists so that the day teneral starts answering such a client
+is a day somebody decides to, rather than a day the behaviour changed.
+"""

@@ -39,6 +39,15 @@ fn discover() -> Request {
     parse(&Datagram::discover().bytes()).expect("a DISCOVER parses")
 }
 
+/// An INFORM from a client that already holds an address, parsed.
+fn inform() -> Request {
+    let mut datagram = Datagram::discover();
+    datagram.client_address = Ipv4Addr::new(10, 0, 0, 77);
+    datagram.options = options(&[option(53, &[INFORM])]);
+
+    parse(&datagram.bytes()).expect("an INFORM parses")
+}
+
 #[test]
 fn a_discover_parses_into_the_fields_the_client_presented() {
     let request = discover();
@@ -139,6 +148,100 @@ fn an_acknowledgement_carries_the_same_nine_as_an_offer() {
         option_value(&frame, 53),
         Some(vec![5]),
         "an acknowledgement is message type 5"
+    );
+}
+
+/// The octets RFC 1542 section 2.1 requires a BOOTP message to fill.
+const BOOTP_MINIMUM: usize = 300;
+
+/// Where the options area of an encoded reply ends.
+///
+/// The last octet that is not zero, which is the end option: the
+/// padding after it is zero octets and nothing before it can be last.
+/// Searching for the first `0xff` instead finds the subnet mask's
+/// value, which is how the first version of these tests failed.
+fn terminator(frame: &[u8]) -> usize {
+    let at = frame
+        .iter()
+        .rposition(|octet| *octet != 0)
+        .expect("an encoded reply is not all zeroes");
+
+    assert_eq!(
+        frame.get(at),
+        Some(&255_u8),
+        "the last octet that is not padding is the end option"
+    );
+    at
+}
+
+#[test]
+fn a_refusal_is_padded_out_to_the_bootp_minimum() {
+    // Three options and a terminator come to 250 octets, and a
+    // receiver implementing RFC 1542 section 2.1's length check is
+    // told to discard anything shorter than 300 -- silently, which is
+    // why not padding is the kind of defect nobody sees for hours.
+    let frame = Answer::refuse(&discover(), server()).encode();
+
+    assert_eq!(frame.len(), BOOTP_MINIMUM);
+    assert_eq!(
+        option_codes(&frame),
+        vec![53, 54],
+        "padding is not an option and must not read as one"
+    );
+    assert_eq!(
+        terminator(&frame),
+        249,
+        "two options end the message at 250 octets, so fifty of padding follow"
+    );
+}
+
+#[test]
+fn the_minimum_is_a_floor_and_never_a_ceiling() {
+    // Section 2.1's own NOTE requires a receiver to accept a message
+    // longer than the minimum, so the padding is a shortfall and not a
+    // size. No answer this layer builds overruns -- nine options is
+    // the largest and comes to 292 octets -- so what is asserted is
+    // the property that makes an overrun safe: the message is as long
+    // as its own content or the minimum, whichever is more, and every
+    // option record survives.
+    let frame = Answer::offer(&discover(), server(), OFFERED_ADDRESS, lease()).encode();
+    let content = terminator(&frame) + 1;
+
+    assert_eq!(option_codes(&frame), MEASURED_ORDER.to_vec());
+    assert_eq!(frame.len(), content.max(BOOTP_MINIMUM));
+    assert_eq!(
+        content, 292,
+        "nine options come to 292 octets, which is inside the minimum"
+    );
+    assert_eq!(
+        frame.get(content..),
+        Some([0_u8; 8].as_slice()),
+        "so eight octets of padding bring it up, and no option record was dropped"
+    );
+}
+
+#[test]
+fn the_padding_is_zero_octets_after_the_end_option_and_not_before_it() {
+    let frame = Answer::inform(&inform(), server()).encode();
+    let at = terminator(&frame);
+
+    assert_eq!(frame.len(), BOOTP_MINIMUM);
+    assert_eq!(
+        option_codes(&frame),
+        vec![53, 54, 1, 28, 3, 6],
+        "the six options are before the terminator, and the padding reads as none"
+    );
+    assert_eq!(
+        at,
+        frame.len() - 27,
+        "six options end the message twenty-six octets short of the minimum, so the \
+         padding is that long and sits past the terminator rather than between the options"
+    );
+    assert!(
+        frame
+            .get(at + 1..)
+            .is_some_and(|rest| !rest.is_empty() && rest.iter().all(|octet| *octet == 0)),
+        "and everything after the terminator is a zero octet"
     );
 }
 

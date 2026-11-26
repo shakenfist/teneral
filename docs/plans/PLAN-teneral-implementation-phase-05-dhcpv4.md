@@ -1436,3 +1436,98 @@ rather than done in a step whose subject is a timer. It also decided
 deliberately that the sweeper owes no provenance row, which is right:
 it deletes rows and appends events to a history whose wire is
 teneral's own.
+
+**2026-11-27, AEDT. Step 5g: the lab was deployed, as the operator
+ruled in the back brief.** Deployment `lbrlab-1795723089`, from the
+same playbook as the lab the earlier rows were taken in, after
+merging the thirteen commits the plan said were outstanding -- which
+they were, exactly thirteen, and the playbook and the write-up were
+both only on the remote. teneral served both overlapping
+`10.0.0.0/24` networks from one process as uid 1000 holding
+`cap_net_bind_service,cap_net_raw` and nothing else, which is the
+capability set this phase said it would need, with
+`cross_network_answers` at zero afterwards. The lab is left running
+on purpose: a re-measurement is two commands while it is up and
+impossible once it is gone, and the decision below is exactly the
+kind that wants one. Twelve observed rows and thirteen cases came out
+of it; the provenance record scopes the two deployments separately,
+because the second ran a later kernel and a later dnsmasq package and
+a row that said otherwise would be claiming more than was measured.
+
+**2026-11-27, AEDT. The replacement was emitting replies a
+conforming receiver is told to discard.** The step measured that the
+reference implementation pads every reply to the BOOTP minimum of
+three hundred octets and that teneral padded nothing -- 292, 274 and
+250 octets -- and it recorded the difference as a deliberate
+divergence in four cases and asked the management session to decide,
+which was right: decision 5's precedent is that the lab measures and
+the design decides. The answer came from reading RFC 1542 section 2.1
+rather than from comparing tastes. That section lists the consistency
+checks a BOOTP entity SHOULD perform on arrival, the first being that
+the IP and UDP lengths are large enough to hold the minimal
+three-hundred-octet BOOTP header, and then says that a message
+failing a check MUST be silently discarded. So this was not a
+divergence from anybody's preference: it was teneral sending
+datagrams a conforming client or relay agent is instructed to drop
+without a word, which is the failure this whole project is shaped
+around. Both clients in the lab accepted the short replies, and that
+is luck rather than vindication.
+
+Recording it as deliberate would have been worse than not recording
+it at all, because a divergence that says it was chosen is one nobody
+revisits. The reply is now padded, with the minimum as a floor and
+never a limit -- the same section's NOTE requires a receiver to
+accept a longer message -- and the padding goes after the end option
+as zero octets, which is the pad option's own code, so a receiver
+that keeps walking past the terminator reads padding rather than
+nonsense. `dhcp-reply-meets-the-bootp-length-check` is the row, cited
+to the section, and it names the tests that assert it as the other
+RFC-cited rows do. The observed row stays beside it unchanged: one
+says what was seen and the other what is required, and they are
+different claims. The five cases whose lengths now agree moved
+`payload-length` from the comparison's `diverges` list to its
+`fields` list, and those five were exactly the five the rig failed
+the moment the code changed, which is that list doing its job. Three
+cases keep a length divergence, and it is now the twenty-two octets
+of host name the reference adds and nothing else.
+
+**2026-11-27, AEDT. The citations would not have survived the week.**
+The six captures existed only in this session's scratchpad, which is
+cleaned on a schedule, while each case cited its pcap by a filename
+that existed nowhere on disk and the lab write-up recorded the
+digests under a third set of names -- the working directories they
+were taken in. Phase 1 had already set the convention, a directory
+under `/srv/nobackups` holding the capture beside its digest, and all
+six are now retained there under exactly the names the cases cite,
+with every digest verified against the write-up. The write-up's
+digest block names the retained files and says what the `run-*` names
+were. This is the one part of the lawful-capture process that cannot
+be checked by reading the diff, because what it asserts is that a
+file will still be there later.
+
+**2026-11-27, AEDT. What else the review changed in 5g, and the one
+measurement that bears on a decision already written down.** The step
+made `Delivery` and the function that chooses one public so that the
+rig can compare where a reply went and not only what it said; that is
+kept, because the delivery order is the one part of the send path
+that is judgement rather than a system call, and nothing in this
+repository may open the socket that would otherwise answer the
+question. Two more doc comments still carried the disproved claim
+that the test target cannot bind a privileged port, in the decision
+layer's seam and in the rig's own document, and both now name the
+barrier that is real. The step also surfaced a refusal in the store
+that read "there is no lease a live lease on ...", the kind being
+stated once by the error's own rendering and again by the identifier
+handed to it; that is fixed, the other six constructions of the same
+error were checked and were correct, and the test now asserts the
+whole rendered sentence rather than the fragment that let it through.
+
+Last, an unasked-for measurement worth keeping: a renewal ACK from
+the reference carries T1 and T2 *below* a half and seven-eighths of
+the lease, and lower again on each renewal -- 60/105, then 56/101,
+then 53/98, with the lease option reading the same number every time.
+The mechanism is not established and establishing it would mean
+reading dnsmasq, so three measurements are recorded and nothing is
+claimed about why. Decision 13 is still true of teneral and of a
+first grant, and `dhcp-unasked-option-set` is now scoped to a first
+grant so that it does not claim the fractions hold on a renewal.

@@ -1,0 +1,102 @@
+# One captured DHCPv4 exchange. See ../../README.md for what a case
+# is, and ../../../../../docs/differential-rig.md for how a capture
+# gets into this corpus lawfully.
+
+summary = "A REQUEST and ACK on the second of two overlapping networks."
+
+# The docs/provenance.md rows these bytes are the evidence for, by
+# row id. The harness fails this case if the list is empty or if a
+# row id is not in that file.
+provenance = [
+    "dhcp-unasked-option-set",
+    "dhcp-reply-unicast-to-offered",
+    "dhcp-reply-padded-to-bootp-minimum",
+    "dhcp-reply-names-itself-as-next-server",
+    "dhcp-ack-echoes-the-clients-host-name",
+]
+
+request = "request.hex"
+response = "response.hex"
+
+[capture]
+observed = "2026-11-27"
+server = "dnsmasq 2.91-1+deb13u2, Debian 13.8, kernel 6.12.118+deb13-amd64, serving --dhcp-range=tag:gw-n1,10.0.0.100,10.0.0.150,12h and --dhcp-range=tag:gw-n2,10.0.0.200,10.0.0.250,12h on gw-n1 and gw-n2 with --bind-dynamic"
+client = "ISC dhclient 4.4.3-P1 in a client endpoint of the bridge, address flushed first"
+link_type = "EN10MB"
+# The capture file is kept outside this repository: a pcap is not an
+# artifact a reviewer can read, and the frames that matter are here as
+# hex text instead. The digest ties the two back together.
+pcap = "lbrlab-1795723089-dnsmasq-br-n2.pcap"
+pcap_sha256 = "67efa7a44923624744de29a03bcaf1b530281606693ab95f50053bfe02ff40a1"
+frames = "3 and 4 of 4"
+write_up = "linux-bridge-lab.md, experiment 6"
+request_bytes = 342
+response_bytes = 358
+
+[network]
+# The configuration the capture was taken against, as data: a DHCP
+# reply is not a function of the request alone.
+name = "n2"
+interface = "gw-n2"
+server_address = "10.0.0.1"
+prefix_length = 24
+lease_seconds = 43200
+
+[[network.ranges]]
+name = "pool"
+first = "10.0.0.200"
+last = "10.0.0.250"
+
+[comparison]
+subject = "dhcpv4"
+status = "compared"
+fields = [
+    "op",
+    "htype",
+    "hlen",
+    "hops",
+    "xid",
+    "secs",
+    "flags",
+    "giaddr",
+    "chaddr",
+    "sname",
+    "file",
+    "ciaddr",
+    "option-53",
+    "option-54",
+    "option-51",
+    "option-58",
+    "option-59",
+    "option-1",
+    "option-28",
+    "option-3",
+    "option-6",
+    "ethernet-destination",
+    "ip-source",
+]
+agree = [
+    "yiaddr-matches-ip-destination",
+    "chaddr-matches-ethernet-destination",
+]
+diverges = [
+    "siaddr",
+    "option-codes",
+    "payload-length",
+]
+asserts = """
+The acknowledgement half of the second network's exchange. The client
+asks for 10.0.0.241, which is in this network's range and in no other
+network's, and is acknowledged it.
+
+A request for an address out of the *other* network's range is the
+failure this case is placed against: 10.0.0.241 is not inside
+10.0.0.100 to 10.0.0.150, so a front-end that answered from whichever
+network it found first would refuse this client rather than
+acknowledge it, and the comparison would fail on `option-53`.
+
+The declared divergences are the sibling case's: `siaddr`, and the
+host name dnsmasq adds as option 12, which is also the whole of why
+its message is 316 octets where teneral's is the 300 that RFC 1542
+section 2.1 makes the floor.
+"""

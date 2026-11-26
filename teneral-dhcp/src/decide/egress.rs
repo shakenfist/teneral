@@ -1,9 +1,9 @@
 //! The seam between deciding and sending.
 //!
 //! One trait with one method, and the narrowness is the point. The
-//! repository's test target cannot bind a privileged port or open an
-//! `AF_PACKET` socket, so whatever is decided below this line is
-//! decided where no test here can see it. Everything the socket layer
+//! repository's test target cannot open an `AF_PACKET` socket and has
+//! one interface, so whatever is decided below this line is decided
+//! where no test here can see it. Everything the socket layer
 //! needs in order to send is therefore gathered into [`Reply`] by the
 //! layer above, and what is left for the implementation is the one
 //! thing the lab measures directly: that the bytes went out of the

@@ -57,9 +57,16 @@ mod send;
 mod socket;
 
 pub use error::{Error, Result};
-pub use interface::Interfaces;
+pub use interface::{ETHERNET_ADDRESS_BYTES, Interfaces};
 pub use receive::{Arrived, Receiver};
-pub use send::Sender;
+// `Delivery` and the function that chooses one are public so that the
+// addressing of a reply can be read without a socket. The choice is
+// RFC 2131 section 4.1's algorithm and it is the one part of the send
+// path that is a judgement rather than a system call, so the
+// differential rig asks for it directly: a case compares where a
+// reply went as well as what it said, and nothing in this repository
+// may open the socket that would otherwise answer that.
+pub use send::{Delivery, Sender, delivery};
 
 use crate::wire::MAX_DATAGRAM_BYTES;
 use send::Served;

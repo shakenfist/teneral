@@ -1,0 +1,125 @@
+# One captured DHCPv4 exchange. See ../../README.md for what a case
+# is, and ../../../../../docs/differential-rig.md for how a capture
+# gets into this corpus lawfully.
+
+summary = "A REQUEST selecting the offered address, and the ACK dnsmasq 2.91 sent back."
+
+# The docs/provenance.md rows these bytes are the evidence for, by
+# row id. The harness fails this case if the list is empty or if a
+# row id is not in that file.
+provenance = [
+    "dhcp-unasked-option-set",
+    "dhcp-reply-unicast-to-offered",
+    "dhcp-reply-padded-to-bootp-minimum",
+    "dhcp-reply-names-itself-as-next-server",
+    "dhcp-ack-echoes-the-clients-host-name",
+]
+
+request = "request.hex"
+response = "response.hex"
+
+[capture]
+observed = "2026-11-27"
+server = "dnsmasq 2.91-1+deb13u2, Debian 13.8, kernel 6.12.118+deb13-amd64, serving --dhcp-range=tag:gw-n1,10.0.0.100,10.0.0.150,12h and --dhcp-range=tag:gw-n2,10.0.0.200,10.0.0.250,12h on gw-n1 and gw-n2 with --bind-dynamic"
+client = "ISC dhclient 4.4.3-P1 in a client endpoint of the bridge, address flushed first"
+link_type = "EN10MB"
+# The capture file is kept outside this repository: a pcap is not an
+# artifact a reviewer can read, and the frames that matter are here as
+# hex text instead. The digest ties the two back together.
+pcap = "lbrlab-1795723089-dnsmasq-br-n1.pcap"
+pcap_sha256 = "fabde438aef41f22d4892fcf5e3a8cfa99a0d017506641708a2acef9b1c29e38"
+frames = "3 and 4 of 28"
+write_up = "linux-bridge-lab.md, experiment 6"
+request_bytes = 342
+response_bytes = 358
+
+[network]
+# The configuration the capture was taken against, as data: a DHCP
+# reply is not a function of the request alone.
+name = "n1"
+interface = "gw-n1"
+server_address = "10.0.0.1"
+prefix_length = 24
+lease_seconds = 43200
+
+[[network.ranges]]
+name = "pool"
+first = "10.0.0.100"
+last = "10.0.0.150"
+
+[comparison]
+subject = "dhcpv4"
+status = "compared"
+fields = [
+    "op",
+    "htype",
+    "hlen",
+    "hops",
+    "xid",
+    "secs",
+    "flags",
+    "giaddr",
+    "chaddr",
+    "sname",
+    "file",
+    "ciaddr",
+    "option-53",
+    "option-54",
+    "option-51",
+    "option-58",
+    "option-59",
+    "option-1",
+    "option-28",
+    "option-3",
+    "option-6",
+    "ethernet-destination",
+    "ip-source",
+]
+agree = [
+    "yiaddr-matches-ip-destination",
+    "chaddr-matches-ethernet-destination",
+]
+diverges = [
+    "siaddr",
+    "option-codes",
+    "payload-length",
+]
+asserts = """
+The client has been offered 10.0.0.128 and asks for it, naming this
+server in option 54. Against the network the lab's gw-n1 was
+configured as, teneral acknowledges the address the client named:
+10.0.0.128 is inside the one range and nothing else holds it, so the
+front-end's own check of a named address passes and the store is asked
+to acquire it.
+
+Every field of the message that is not an address this server chose
+matches the capture: the echoed xid, secs, flags, chaddr, the empty
+sname and file, a zero ciaddr and a zero giaddr, and the value of each
+of the nine options dnsmasq was measured to send unasked -- the lease
+at 43200 seconds, T1 at half of it and T2 at seven-eighths, the mask
+and broadcast address from the prefix, and the router and nameserver
+defaulting to the server's own address. The reply goes below the IP
+layer to the hardware address the client holds, which is the one way an
+address nobody holds yet can be delivered to.
+
+Both messages are padded out to at least the BOOTP minimum of 300
+octets -- RFC 1542 section 2.1 has a receiver discard a shorter one
+silently -- so the length is not asserted to be equal here, because
+dnsmasq's is longer: the host name it adds takes it to 316, past the
+minimum, and section 2.1's own NOTE has a receiver accept that. The
+length is therefore declared divergent, and the divergence is the host
+name and nothing else.
+
+Two other differences are deliberate and are asserted rather than
+removed. `siaddr` carries dnsmasq's own address, naming itself as the
+next server in a boot sequence it does not serve; teneral has no boot
+server and sends zero. And the option *codes* differ because of the
+same host name, added as option 12 after the nine -- the option values
+the two share are compared, so a wrong lease time would still fail
+here.
+
+What is not compared at all: the IPv4 identification, the
+differentiated-services field and both checksums. For two of teneral's
+three delivery paths the kernel writes those, so they are not teneral's
+bytes, and the third recomputes them from the payload.
+"""

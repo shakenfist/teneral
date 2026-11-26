@@ -66,6 +66,20 @@ const ADDRESS_BITS: u8 = 32;
 /// anything.
 const LARGEST_OPTIONS_BYTES: usize = 3 + 8 * 6 + 1;
 
+/// The octets a BOOTP message is padded out to.
+///
+/// RFC 1542 section 2.1 lists the consistency checks a BOOTP entity
+/// SHOULD perform on arrival, the first of which is that the IP total
+/// length and the UDP length be large enough to hold "the minimal
+/// BOOTP header of 300 octets (in the UDP data field)" -- and then
+/// says that a message failing a check MUST be silently discarded. So
+/// a reply shorter than this is one a conforming receiver is told to
+/// drop without a word, and a server that does not pad is relying on
+/// its clients not having implemented the check. The same section's
+/// NOTE requires a receiver to accept a *longer* message, which is why
+/// the padding is a floor and never a limit.
+const BOOTP_MINIMUM_BYTES: usize = 300;
+
 /// Which answer this is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AnswerKind {
@@ -342,8 +356,13 @@ impl Answer {
     /// no offset that could be wrong, because the fields are pushed in
     /// the order RFC 2131 lists them rather than written into a buffer
     /// at computed positions.
+    ///
+    /// The result is padded out to [`BOOTP_MINIMUM_BYTES`], which is a
+    /// floor and not a size: an answer whose options run past it is
+    /// sent whole rather than truncated.
     pub fn encode(&self) -> Vec<u8> {
-        let mut frame = Vec::with_capacity(FIXED_BYTES + LARGEST_OPTIONS_BYTES);
+        let mut frame =
+            Vec::with_capacity(FIXED_BYTES + LARGEST_OPTIONS_BYTES.max(BOOTP_MINIMUM_BYTES));
 
         // The fixed BOOTP header, field by field, in order. `op`,
         // `htype`, `hlen`, `hops`: `hlen` describes the address
@@ -403,6 +422,16 @@ impl Answer {
             push_address(&mut frame, OPTION_DOMAIN_NAME_SERVER, self.server.address());
         }
         frame.push(OPTION_END);
+
+        // The padding goes after the terminator, not before it: the
+        // options area ends where the end option says it does, and a
+        // receiver that stops reading there must still see a datagram
+        // long enough to pass RFC 1542's length check. Zero octets
+        // because that is the pad option, so a receiver that keeps
+        // walking past the terminator reads padding rather than
+        // nonsense.
+        let shortfall = BOOTP_MINIMUM_BYTES.saturating_sub(frame.len());
+        pad(&mut frame, shortfall);
 
         frame
     }

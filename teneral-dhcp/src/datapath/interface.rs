@@ -47,7 +47,11 @@ use crate::wire::ServerFacts;
 const ADDRESS_BITS: u8 = 32;
 
 /// The octets an Ethernet address has.
-pub(crate) const ETHERNET_ADDRESS_BYTES: usize = 6;
+///
+/// Public because [`Interfaces::hardware_address`] returns an array of
+/// this length and [`crate::datapath::Delivery`] carries one, so
+/// anything naming either needs the number this crate used.
+pub const ETHERNET_ADDRESS_BYTES: usize = 6;
 
 /// A socket to ask interface questions through.
 ///

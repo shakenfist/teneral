@@ -7,24 +7,29 @@
 //! made in a lab rather than in a test container -- so the corpus is
 //! captured bytes, and the rig compares against those bytes.
 //!
-//! This is a frame rather than a working comparison. The repository
-//! holds no DHCP or DNS code yet, so there is nothing of teneral's to
-//! put beside a captured reply, and every case is `pending`. What the
-//! rig does check today is the link each case claims: that it names a
-//! row of `docs/provenance.md`, that the row exists, and that its
-//! fixtures decode to the bytes it says were observed. A case that
-//! names no row fails, because such a case asserts a behaviour on
-//! nobody's authority.
+//! Every case names a row of `docs/provenance.md`, that row has to
+//! exist, and the fixtures have to decode to the bytes the case says
+//! were observed. A case that names no row fails, because such a case
+//! asserts a behaviour on nobody's authority.
+//!
+//! Where a subject is registered the case is compared as well, field
+//! by field against the configuration it was captured under. That
+//! comparison reports every difference rather than the first: one byte
+//! offset says two frames differ, and a list of fields says what
+//! teneral got wrong.
 //!
 //! `make test` runs this. See `tests/differential/README.md` and
 //! `docs/differential-rig.md`.
 
+mod compare;
 mod corpus;
+mod dhcpv4;
 mod fixture;
+mod frame;
 mod provenance;
 mod subject;
 
-use corpus::{Case, Entry, Status};
+use corpus::{Case, Entry, Expect, Status};
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::ExitCode;
@@ -111,6 +116,17 @@ fn check(entry: &Entry, rows: &BTreeSet<String>, failures: &mut Vec<String>) {
     println!("                   client {}", case.capture.client);
     println!("                   write-up {}", case.capture.write_up);
 
+    println!(
+        "      network      {} on {} at {}/{}, lease {}s, {} range(s), {} lease(s) held",
+        case.network.name,
+        case.network.interface,
+        case.network.server_address,
+        case.network.prefix_length,
+        case.network.lease_seconds,
+        case.network.ranges.len(),
+        case.network.leases.len(),
+    );
+
     check_provenance(entry, case, rows, failures);
     let frames = check_fixtures(entry, case, failures);
     check_comparison(entry, case, frames, failures);
@@ -166,6 +182,12 @@ fn check_provenance(
 }
 
 /// The fixtures decode, and to the sizes the case says were observed.
+///
+/// A case with no `response` recorded no reply, which is a measurement
+/// and not an omission: four of this corpus's behaviours are "the
+/// reference implementation did not answer this". `response` and
+/// `response_bytes` have to be absent together, since one without the
+/// other is a case that has lost half of what it claims.
 fn check_fixtures(entry: &Entry, case: &Case, failures: &mut Vec<String>) -> Option<Frames> {
     let request = read_frame(
         &entry.dir,
@@ -174,23 +196,51 @@ fn check_fixtures(entry: &Entry, case: &Case, failures: &mut Vec<String>) -> Opt
         &entry.name,
         failures,
     );
-    let response = read_frame(
-        &entry.dir,
-        &case.response,
-        case.capture.response_bytes,
-        &entry.name,
-        failures,
-    );
+
+    let response = match (&case.response, case.capture.response_bytes) {
+        (Some(file), Some(bytes)) => {
+            match read_frame(&entry.dir, file, bytes, &entry.name, failures) {
+                Some(frame) => Recorded::Reply(frame),
+                None => Recorded::Unreadable,
+            }
+        }
+        (None, None) => Recorded::Silence,
+        (Some(_), None) | (None, Some(_)) => {
+            failures.push(format!(
+                "{}: `response` and `capture.response_bytes` have to be present together or \
+                 absent together. Absent means the capture recorded no reply, which is a \
+                 measurement; one without the other is a case that has mislaid half of what it \
+                 says was seen.",
+                entry.name
+            ));
+            Recorded::Unreadable
+        }
+    };
+
     match (request, response) {
-        (Some(request), Some(response)) => {
+        (Some(request), Recorded::Reply(response)) => {
             println!(
                 "      fixtures     ok: {} {} bytes, {} {} bytes",
                 case.request,
                 request.len(),
-                case.response,
+                case.response.as_deref().unwrap_or("-"),
                 response.len()
             );
-            Some(Frames { request, response })
+            Some(Frames {
+                request,
+                response: Some(response),
+            })
+        }
+        (Some(request), Recorded::Silence) => {
+            println!(
+                "      fixtures     ok: {} {} bytes, and no reply was captured",
+                case.request,
+                request.len()
+            );
+            Some(Frames {
+                request,
+                response: None,
+            })
         }
         _ => {
             println!("      fixtures     FAILED");
@@ -199,10 +249,21 @@ fn check_fixtures(entry: &Entry, case: &Case, failures: &mut Vec<String>) -> Opt
     }
 }
 
+/// What the capture holds where a reply would be.
+enum Recorded {
+    /// A reply, which decoded.
+    Reply(Vec<u8>),
+    /// No reply, which is the measurement.
+    Silence,
+    /// A reply that did not decode, already reported.
+    Unreadable,
+}
+
 /// One captured exchange's bytes.
 struct Frames {
     request: Vec<u8>,
-    response: Vec<u8>,
+    /// Absent where the capture recorded no reply.
+    response: Option<Vec<u8>>,
 }
 
 fn read_frame(
@@ -265,6 +326,24 @@ fn check_comparison(
         ));
     }
 
+    // A case that names no field assertions fails like a case that
+    // names no provenance row, and for the same reason: it reads as
+    // settled and establishes nothing. The exception is a case whose
+    // whole assertion is that teneral answers nothing, where there are
+    // no fields to name.
+    let named =
+        case.comparison.fields.len() + case.comparison.agree.len() + case.comparison.diverges.len();
+    if named == 0 && case.comparison.expect == Expect::Answer {
+        println!("      comparison   FAILED: the case names no field assertion");
+        failures.push(format!(
+            "{}: `comparison` names no field in `fields`, `agree` or `diverges`, so its \
+             comparison checks nothing while reporting that it ran. Name the fields that must \
+             match the capture, the agreements that must hold within a reply, and the fields \
+             teneral differs on deliberately.",
+            entry.name
+        ));
+    }
+
     let subject = subject::find(&case.comparison.subject);
     match (&case.comparison.status, subject) {
         (Status::Pending, None) => {
@@ -296,50 +375,43 @@ fn check_comparison(
             let Some(frames) = frames else {
                 return;
             };
-            match compare(subject, &frames) {
-                Ok(()) => println!(
-                    "      comparison   ok: `{}` matches the captured reply",
-                    case.comparison.subject
-                ),
+            let answered = match (subject.answer)(&case.network, &frames.request) {
+                Ok(answered) => answered,
                 Err(why) => {
                     println!("      comparison   FAILED");
-                    failures.push(format!("{}: {why}", entry.name));
+                    failures.push(format!(
+                        "{}: `{}` could not answer the captured request: {why}",
+                        entry.name, case.comparison.subject
+                    ));
+                    return;
                 }
+            };
+            let problems = compare::compare(
+                &case.comparison,
+                &frames.request,
+                frames.response.as_deref(),
+                &answered,
+            );
+            if problems.is_empty() {
+                if case.comparison.expect == Expect::Silence {
+                    println!(
+                        "      comparison   ok: teneral answered nothing, as the case asserts"
+                    );
+                    return;
+                }
+                println!(
+                    "      comparison   ok: {} field(s), {} agreement(s), {} declared \
+                     divergence(s)",
+                    case.comparison.fields.len(),
+                    case.comparison.agree.len(),
+                    case.comparison.diverges.len(),
+                );
+                return;
+            }
+            println!("      comparison   FAILED: {} problem(s)", problems.len());
+            for problem in problems {
+                failures.push(format!("{}: {problem}", entry.name));
             }
         }
     }
-}
-
-/// Teneral's answer to the captured request, against the captured
-/// reply.
-fn compare(subject: &subject::Subject, frames: &Frames) -> Result<(), String> {
-    let answer = (subject.answer)(&frames.request).map_err(|why| {
-        format!(
-            "`{}` could not answer the captured request: {why}",
-            subject.name
-        )
-    })?;
-    if answer == frames.response {
-        return Ok(());
-    }
-    let at = answer
-        .iter()
-        .zip(frames.response.iter())
-        .position(|(ours, theirs)| ours != theirs);
-    let detail = match at {
-        Some(offset) => format!(
-            "they first differ at byte {offset}: the capture has {:#04x} and `{}` produced \
-             {:#04x}",
-            frames.response[offset], subject.name, answer[offset]
-        ),
-        None => "one is a prefix of the other".to_owned(),
-    };
-    Err(format!(
-        "`{}` produced {} bytes and the captured reply is {} bytes; {detail}. The capture is \
-         the measurement, so a difference is either a defect here or a deliberate divergence \
-         -- and a deliberate one belongs in the case, asserted, rather than removed.",
-        subject.name,
-        answer.len(),
-        frames.response.len()
-    ))
 }

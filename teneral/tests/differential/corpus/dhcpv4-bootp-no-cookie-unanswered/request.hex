@@ -1,0 +1,59 @@
+# The request as it crossed the bridge, 342 octets, exactly as captured at Unix
+# time 1795723949.425903. case.toml beside this file carries the
+# capture's provenance and the docs/provenance.md rows these bytes
+# are evidence for.
+#
+# Bytes observed on a wire. Nothing here is derived from anybody's
+# source code, and nothing may be: dnsmasq is GPL-2/3 and teneral is
+# Apache-2.0, so an observation is the only lawful source for a
+# behaviour no RFC specifies. The annotations are a reading aid; the
+# bytes are what the rig asserts on.
+
+# Ethernet: dst ff:ff:ff:ff:ff:ff, src fa:16:3e:00:01:23, type 0x0800
+ff ff ff ff ff ff                                # destination hardware address
+fa 16 3e 00 01 23                                # source hardware address
+08 00                                            # EtherType 0x0800, IPv4
+
+# IPv4: 0.0.0.0 -> 255.255.255.255, 328 octets in all
+45 00                                            # version 4, header length, differentiated services
+01 48                                            # total length
+00 01 00 00                                      # identification, flags, fragment offset
+40 11                                            # time to live, protocol 17 (UDP)
+79 a5                                            # header checksum
+00 00 00 00                                      # source address
+ff ff ff ff                                      # destination address
+
+# UDP: 68 -> 67, 308 octets
+00 44                                            # source port
+00 43                                            # destination port
+01 34                                            # length
+eb bf                                            # checksum
+
+# BOOTP: op 1, no message type
+01 01 06 00                                      # op, htype, hlen, hops
+51 00 00 04                                      # xid
+00 00 80 00                                      # secs, flags
+00 00 00 00                                      # ciaddr 0.0.0.0
+00 00 00 00                                      # yiaddr 0.0.0.0
+00 00 00 00                                      # siaddr 0.0.0.0
+00 00 00 00                                      # giaddr 0.0.0.0
+
+# chaddr, 16 octets: fa:16:3e:00:01:23:00:00:00:00:00:00:00:00:00:00
+fa 16 3e 00 01 23 00 00                          # chaddr
+00 00 00 00 00 00 00 00                          # chaddr, continued
+
+# sname, 64 octets, and file, 128 octets.
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # sname
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # sname
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # sname
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # sname
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 # no magic cookie: this is plain BOOTP

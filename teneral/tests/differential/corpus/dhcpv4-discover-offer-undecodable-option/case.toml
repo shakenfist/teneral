@@ -1,0 +1,110 @@
+# One captured DHCPv4 exchange. See ../../README.md for what a case
+# is, and ../../../../../docs/differential-rig.md for how a capture
+# gets into this corpus lawfully.
+
+summary = "A DISCOVER carrying a host name that is not text, answered anyway."
+
+# The docs/provenance.md rows these bytes are the evidence for, by
+# row id. The harness fails this case if the list is empty or if a
+# row id is not in that file.
+provenance = [
+    "dhcp-undecodable-option-value-still-answered",
+    "dhcp-unasked-option-set",
+    "dhcp-reply-padded-to-bootp-minimum",
+    "dhcp-reply-names-itself-as-next-server",
+]
+
+request = "request.hex"
+response = "response.hex"
+
+[capture]
+observed = "2026-11-27"
+server = "dnsmasq 2.91-1+deb13u2, Debian 13.8, kernel 6.12.118+deb13-amd64, serving --dhcp-range=tag:gw-n1,10.0.0.100,10.0.0.150,12h and --dhcp-range=tag:gw-n2,10.0.0.200,10.0.0.250,12h on gw-n1 and gw-n2 with --bind-dynamic"
+client = "a request built octet by octet and sent on the bridge from a client endpoint by the probe script of experiment 6; the reply is the measurement and is dnsmasq 2.91-1+deb13u2's own"
+link_type = "EN10MB"
+# The capture file is kept outside this repository: a pcap is not an
+# artifact a reviewer can read, and the frames that matter are here as
+# hex text instead. The digest ties the two back together.
+pcap = "lbrlab-1795723089-dnsmasq-br-n1.pcap"
+pcap_sha256 = "fabde438aef41f22d4892fcf5e3a8cfa99a0d017506641708a2acef9b1c29e38"
+frames = "27 and 28 of 28"
+write_up = "linux-bridge-lab.md, experiment 6"
+request_bytes = 342
+response_bytes = 342
+
+[network]
+# The configuration the capture was taken against, as data: a DHCP
+# reply is not a function of the request alone.
+name = "n1"
+interface = "gw-n1"
+server_address = "10.0.0.1"
+prefix_length = 24
+lease_seconds = 43200
+
+[[network.ranges]]
+name = "pool"
+first = "10.0.0.100"
+last = "10.0.0.150"
+
+[comparison]
+subject = "dhcpv4"
+status = "compared"
+fields = [
+    "op",
+    "htype",
+    "hlen",
+    "hops",
+    "xid",
+    "secs",
+    "flags",
+    "giaddr",
+    "chaddr",
+    "sname",
+    "file",
+    "ciaddr",
+    "option-codes",
+    "option-53",
+    "option-54",
+    "option-51",
+    "option-58",
+    "option-59",
+    "option-1",
+    "option-28",
+    "option-3",
+    "option-6",
+    "ethernet-destination",
+    "ip-source",
+    "payload-length",
+]
+agree = []
+diverges = [
+    "siaddr",
+]
+asserts = """
+The option records are perfectly well framed and one value cannot be
+read: option 12 is specified as a character string and these six octets
+are not text in any encoding. Both implementations answer the client
+and neither uses the name.
+
+This is the behaviour teneral's parser was built around, and the case
+is what makes that choice a measured one rather than a guess. A framing
+error -- a record that runs past the end of the datagram -- means the
+option stream's boundaries cannot be trusted and the datagram goes. A
+value a decoder declines does not: the option is dropped, which code
+was dropped is recorded, and the client keeps its lease. The reason
+matters on an ordinary network, where a machine sending its name in a
+local codepage does exactly this, and losing the name should not cost
+the address.
+
+Both replies are broadcast, because the request asked for broadcast
+and the flag is read as a request for one. That is why neither
+`yiaddr` nor the hardware address the frame went to is asserted here:
+a broadcast reply is addressed to 255.255.255.255 and to every client
+on the link whatever address it carries, so the agreement the other
+OFFER cases assert does not hold of either side and asserting it would
+be asserting something false. The address each chose is its own and is
+not compared; the nine options, the mask and the destination are.
+
+Both replies are 300 octets, so the length is compared; `siaddr`
+diverges for the usual reason.
+"""

@@ -1,0 +1,67 @@
+# One captured DHCPv4 exchange. See ../../README.md for what a case
+# is, and ../../../../../docs/differential-rig.md for how a capture
+# gets into this corpus lawfully.
+
+summary = "A client giving its address back, which the protocol specifies no reply to."
+
+# The docs/provenance.md rows these bytes are the evidence for, by
+# row id. The harness fails this case if the list is empty or if a
+# row id is not in that file.
+provenance = [
+    "dhcp-release-removes-the-lease-and-is-not-answered",
+]
+
+request = "request.hex"
+
+[capture]
+observed = "2026-11-27"
+server = "dnsmasq 2.91-1+deb13u2, Debian 13.8, kernel 6.12.118+deb13-amd64, serving --dhcp-range=tag:gw-n1,10.0.0.100,10.0.0.150,12h and --dhcp-range=tag:gw-n2,10.0.0.200,10.0.0.250,12h on gw-n1 and gw-n2 with --bind-dynamic"
+client = "ISC dhclient 4.4.3-P1 in a client endpoint of the bridge, address flushed first, run with -r to release"
+link_type = "EN10MB"
+# The capture file is kept outside this repository: a pcap is not an
+# artifact a reviewer can read, and the frames that matter are here as
+# hex text instead. The digest ties the two back together.
+pcap = "lbrlab-1795723089-dnsmasq-br-n1.pcap"
+pcap_sha256 = "fabde438aef41f22d4892fcf5e3a8cfa99a0d017506641708a2acef9b1c29e38"
+frames = "19 of 28, and no reply among the other 27"
+write_up = "linux-bridge-lab.md, experiment 6"
+request_bytes = 342
+
+[network]
+# The configuration the capture was taken against, as data: a DHCP
+# reply is not a function of the request alone.
+name = "n1"
+interface = "gw-n1"
+server_address = "10.0.0.1"
+prefix_length = 24
+lease_seconds = 43200
+
+[[network.ranges]]
+name = "pool"
+first = "10.0.0.100"
+last = "10.0.0.150"
+
+[[network.leases]]
+address = "10.0.0.128"
+mac = "fa:16:3e:00:01:0a"
+
+[comparison]
+subject = "dhcpv4"
+status = "compared"
+expect = "silence"
+fields = []
+agree = []
+diverges = []
+asserts = """
+A RELEASE, unicast to the server from the address being given up, with
+the server identifier naming this server. RFC 2131 specifies no reply
+and dnsmasq sent none; the lease was gone from its lease file by the
+next write.
+
+teneral revokes the lease and sends nothing, so the assertion here is
+the silence. The address going back to the pool is a property of the
+store rather than of the wire and is asserted by the decision layer's
+own tests, in both of two networks holding the same address: a release
+in one network must not touch the other's lease on the same address,
+and that is a question no single capture can answer.
+"""
