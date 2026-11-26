@@ -1,8 +1,9 @@
 [workspace]
-# Three members. `teneral` is the daemon; `teneral-store` is the
-# binding store and `teneral-api` is the control plane over it. Each
-# of the two libraries is a crate rather than a module inside the
-# daemon for two reasons that are not tidiness.
+# Four members. `teneral` is the daemon; `teneral-store` is the
+# binding store, `teneral-api` is the control plane over it and
+# `teneral-dhcp` is the DHCPv4 front-end. Each of the three libraries
+# is a crate rather than a module inside the daemon for two reasons
+# that are not tidiness.
 #
 # The first is that this repository is teneral's core libraries, so
 # the store's public surface is an interface another repository links
@@ -26,7 +27,13 @@
 # crate sits on the far side of that boundary like any other consumer:
 # it reaches the store only through the trait, so a handler cannot
 # answer from anything the store would not have scoped.
-members = ["teneral", "teneral-api", "teneral-store"]
+#
+# `teneral-dhcp` is outside the daemon for a third reason, which is
+# mechanical: `teneral` has no lib target, so an integration test in
+# that crate cannot `use` anything in it. A front-end written inside
+# the binary would be a front-end the differential rig could not call,
+# and the rig is this project's stated way of proving wire behaviour.
+members = ["teneral", "teneral-api", "teneral-dhcp", "teneral-store"]
 
 # The MSRV-aware resolver: it prefers the newest dependency version
 # whose own `rust-version` the floor declared below can still build,

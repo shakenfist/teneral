@@ -383,10 +383,62 @@ step also lands a corpus of malformed inputs -- truncated at every
 field boundary, `hlen` at 0, 16, 17 and 255, an option that runs
 off the end, a zero-length and a 65507-byte datagram, options with
 a length that overruns, a magic cookie that is wrong, and a
-`chaddr` of all zeroes -- asserting that each is refused and none
-panics. A panic in this layer is a remote denial of service
-against every network this process serves, which is why
-`AGENTS.md` makes that lint `deny` rather than `warn`.
+`chaddr` of all zeroes -- each with a test that names it. Most are
+refused; `hlen` of exactly 16 is the boundary and is *accepted*,
+because 16 is the field's size and a guard that refused it would be
+an off-by-one shipped as a safety check. A panic in this layer is a
+remote denial of service against every network this process serves,
+which is why `AGENTS.md` makes that lint `deny` rather than `warn`.
+
+**A framing error refuses the datagram and a bad value does not.**
+This distinction was not in the plan and arrived from the step,
+which found that the decoder stops at the first option it cannot
+read and returns *success* -- so a packet with one bad option would
+have parsed cleanly and short, silently missing whatever followed,
+which could be the requested address or the client's identifier. The
+answer is to walk the option TLVs before decoding, and then the two
+failures are distinguishable and must be treated differently. A TLV
+that runs past the end, or a length byte that is not there, means the
+option stream's boundaries cannot be trusted, so the datagram goes. A
+value a typed decoder declines does not: the option is dropped, the
+request records which code was dropped, and the client is still
+answered. The reason is that the strict reading falls on ordinary
+clients -- a Windows machine with a non-ASCII name sends option 12 in
+a local codepage, and losing that name should cost the name and not
+the lease. Nothing is lost on the options that matter, because each
+of those is asked for by name and its absence is already a refusal.
+
+**Five narrowings the parser makes that this plan did not ask for,
+kept deliberately.** A message whose `op` is not a request is
+refused, because a reply arriving on port 67 is another server's
+traffic rather than a question, and a message type outside the five a
+client sends is refused for the same reason. A plain BOOTP request,
+which carries no message type at all, is refused, so this front-end
+serves no BOOTP-only client -- the reference implementation does, and
+that is a feature not built rather than an accident. And a message
+with `hlen` of zero is refused, as is one whose `chaddr` is all
+zeroes. Both are addressable in
+principle -- a client with no hardware address is identified by its
+client identifier, and RFC 4390 specifies exactly that shape for
+InfiniBand -- but this project's reply path hand-builds an Ethernet
+frame, and neither case leaves an address to send it to. Every one of the
+five is a refusal with a named error that the daemon logs rather than
+a silent drop, 5g measures what the reference implementation does
+with each, and 5h documents them as limits rather than leaving them
+to be found.
+
+**The cost of a packet is a constant.** Dropping an option and
+decoding again is a pass over the whole datagram, and the number of
+passes is bounded by the number of codes the decoder has a type for
+-- so a datagram packed with two-byte records whose values are all
+refused would buy a sender some sixty full decodes for one packet.
+The datapath answers one packet at a time per socket by decision 9,
+so that amplification would land on the one thread serving every
+network in the process. Four drops is the bound, and beyond it the
+datagram is refused: a client offering one or two options this
+decoder declines is the ordinary case the paragraph above is about,
+and one offering five is not a client whose lease anybody is
+protecting.
 
 When dhcproto next publishes, the question becomes whether the
 floor in `Cargo.toml` can require it and the guard can go. That is
@@ -653,8 +705,8 @@ something to compare.
 | 5d | high | opus | none | The decision layer: a parsed request plus its arrival interface, against a `BindingStore`. Read decisions 2, 6 and 11, finding 10, `docs/binding-store.md`'s lookup and lease-lifecycle sections, and the `lease-address-selection-order` and `selector-client-id-over-chaddr` provenance rows. The store already implements address selection, reservations, pools and the precedence order -- **do not reimplement any of it**; assemble a `ClientIdentity` from what the packet presents and ask. The path is: `interface_owner(namespace, ifname)` to get the network, refuse with a log line if nothing claimed it, then `lookup_binding_on_interface` for a reservation, then `allocate_lease` or `acquire_lease` or `renew_lease` or `revoke_lease` as decision 6's table says. The actor is `Actor::Daemon("dhcpv4")`. The send side is a trait with one method, so this layer is tested against a recorder. Tests: every row of decision 6's table, and **every one of them with two networks holding the same address** -- a DISCOVER arriving on each network's interface from the same MAC gets each network's own answer, a REQUEST for an address held in the other network is NAKed rather than ACKed, and a RELEASE in one network leaves the other's lease alone. That is the project's central correctness property and this is the layer where it is decided. Also: a request whose `giaddr` is non-zero is dropped with one log line, and an INFORM gets options and no lease. Report the test count. Commit subject: "Answer a DHCPv4 client from the binding store." |
 | 5e | high | opus | none | The datapath and the daemon. Read decisions 7, 8, 9 and 14, and the `sock-*` and `netns-*` provenance rows -- every behaviour here is already measured and none of it is to be rediscovered. The receive path: one wildcard-bound UDP socket per served interface (a socket bound to the interface's own address never sees `255.255.255.255`), `IP_PKTINFO` for the arrival ifindex and the datagram's destination, and the interface name from an `ioctl` on a socket rather than from `/sys/class/net`. The reply path: `AF_PACKET` with a hand-built Ethernet/IPv4/UDP frame when the client has no address, and UDP with the egress named per message when it does; the BROADCAST flag is a request for broadcast and never permission to unicast. Phase 1d's spike (iii) in `docs/plans/PLAN-teneral-implementation-phase-01-research-spikes.md:974` built exactly this in Rust and a real client accepted it -- read it and follow what it found, including the privilege. Then the daemon: `--dhcp-interface` repeatable, `--dhcp-port` defaulting to 67 with its testing purpose in the help, the startup line decision 14 specifies, a refusal to start when a named interface is claimed by no network, and shutdown ordered so the sockets close before the store does (`serve.rs` has the existing order and its comment). Nothing here may bind 67 in a test: `make test` runs as a non-root uid with no capabilities and the bind returns `EACCES`, which is why the port is a flag. Say in your report which parts you could not test and why. Commit subject: "Serve DHCPv4 on a socket per interface." |
 | 5f | medium | opus | none | The sweeper. Read decision 10, and the `sweep_expired_leases` documentation in `teneral-store/src/store.rs:570` -- particularly the paragraph saying nothing in the store waits for it, which is the premise the chosen interval rests on. A timer in the daemon, `--sweep-interval` in seconds defaulting to 86400, no sweep at startup, running over every network the store holds, with `Actor::Daemon("sweeper")`. It logs what it removed per network, and a sweep that removed nothing logs nothing. Tests: with the store's injectable clock (`teneral-store/src/clock.rs`), a lapsed lease is removed and its event appears; a live lease is not; a lease in one network is swept while the same address in another network is left alone; and a sweep that finds nothing writes no event and reports no position. Do not add a grace period -- decision 10 explains why it is future work rather than this step. Commit subject: "Sweep lapsed leases on a daily timer." |
-| 5g | high | opus | none | The lab, the captures and the rig. **Do not deploy anything until the management session confirms the back brief's gate has been answered yes** -- this step touches real infrastructure. Then: `cd` to the `homelab-deployments-lfs` checkout, `git pull` (the local `main` is 13 commits behind the merge that carries the lab), deploy `playbooks/linux-bridge-lab-debian-13.yml`, and leave the gateways in the root configuration (`lbr-lab-gateway show` to confirm). Read `docs/linux-bridge-lab.md` in that repository and `docs/differential-rig.md` here, especially *How a captured pair gets into the corpus lawfully*, which is six numbered steps and is not optional: the versions, the `tcpdump` command, the pcap kept outside this repository with its sha256 recorded, the frames as annotated hex, and the write-up. Capture dnsmasq first, then stop it and run teneral on the same bridges with the same ranges -- a `make release` binary copied in, run with `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW` -- and capture the same exchanges. What the phase needs: a DISCOVER/OFFER and a REQUEST/ACK from each of the two overlapping networks, a renewal, a RELEASE, an INFORM, and a NAK. Add the provenance rows the captures support, with their write-ups, and the cases that cite them. Then the rig: the `[network]` table in `case.toml`, the subject signature carrying it, field-wise comparison reporting every difference rather than the first, and the existing `dhcpv4-discover-offer-dhclient` case flipped from `pending` to `compared`. Correct `docs/differential-rig.md:192-203`, which promises byte comparison. Nothing in this step reads dnsmasq's source, and no measurement is taken anywhere but the lab. Report the lab's identifier, the versions, and every row id you added. Commit subject: "Compare teneral's DHCPv4 bytes with dnsmasq's." |
-| 5h | medium | sonnet | none | Documentation and fold-back. This step writes no front-end code. `docs/binding-store.md` is not in this step: the lease time was written into it when 5a landed, because leaving a sentence saying a network is a name and nothing else would have left a false claim in the tree for six steps. Read it rather than rewriting it. (1) `docs/dhcpv4.md`: the front-end as a reference for somebody with no plan in hand -- the three layers, which messages are answered and what the others get, the option set with each option's source, the lease time and where it is configured, the namespace `/` and why, the capability set and how to run it by hand, the sweeper and the stickiness it chose, and the recorded-holder behaviour from decision 11 with its cause and consequence. (2) `ARCHITECTURE.md`: the front-end layer's first member exists, with what it serves and what it does not. This is a shape change, so it belongs there. The stale claim about protocol options was already corrected by this plan's commit, in the paragraph that lists what is deferred -- check it and do not correct it twice. (3) `AGENTS.md`: only conventions that changed -- a fourth crate, the namespace `/` for an interface in no namespace, and the rule that a wire behaviour without a provenance row is not shipped if it is not already there. Nothing else; every line there costs context on every task. (4) `docs/development.md`: the new crate in the layout, and that `make test` cannot bind privileged ports so the datapath's socket layer is proved in the lab. (5) Fold back into the master plan: phase 5's row, and the *Future work* entries this phase closes or rewrites -- the sweep-interval entry (now chosen, with the grace period named as what would decouple the two), the client-identifier entry (declined, with where it is now documented), the differential-rig entry (the lab was redeployed, with what it produced), and new entries for the deferred option table and the DECLINE exclusion. Write each in full rather than naming it. The view-bound entry was already rewritten by this plan's commit, which is where it was found to name the wrong phase; read it rather than rewriting it. Commit subject: "Document the DHCPv4 front-end." |
+| 5g | high | opus | none | The lab, the captures and the rig. **Do not deploy anything until the management session confirms the back brief's gate has been answered yes** -- this step touches real infrastructure. Then: `cd` to the `homelab-deployments-lfs` checkout, `git pull` (the local `main` is 13 commits behind the merge that carries the lab), deploy `playbooks/linux-bridge-lab-debian-13.yml`, and leave the gateways in the root configuration (`lbr-lab-gateway show` to confirm). Read `docs/linux-bridge-lab.md` in that repository and `docs/differential-rig.md` here, especially *How a captured pair gets into the corpus lawfully*, which is six numbered steps and is not optional: the versions, the `tcpdump` command, the pcap kept outside this repository with its sha256 recorded, the frames as annotated hex, and the write-up. Capture dnsmasq first, then stop it and run teneral on the same bridges with the same ranges -- a `make release` binary copied in, run with `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW` -- and capture the same exchanges. What the phase needs: a DISCOVER/OFFER and a REQUEST/ACK from each of the two overlapping networks, a renewal, a RELEASE, an INFORM, and a NAK. Four behaviours came out of 5c with no provenance row and have to be measured here rather than guessed: whether the reference implementation pads a reply to the BOOTP minimum of 300 bytes, which teneral does not do and a 274-byte reply was accepted by one client; what it does with `hlen` of zero, with a `chaddr` of all zeroes and with a plain BOOTP request carrying no message type, all three of which teneral refuses; and what it does with an option whose value will not decode, where teneral drops the option and answers anyway. Add the provenance rows the captures support, with their write-ups, and the cases that cite them. Then the rig: the `[network]` table in `case.toml`, the subject signature carrying it, field-wise comparison reporting every difference rather than the first, and the existing `dhcpv4-discover-offer-dhclient` case flipped from `pending` to `compared`. Correct `docs/differential-rig.md:192-203`, which promises byte comparison. Nothing in this step reads dnsmasq's source, and no measurement is taken anywhere but the lab. Report the lab's identifier, the versions, and every row id you added. Commit subject: "Compare teneral's DHCPv4 bytes with dnsmasq's." |
+| 5h | medium | sonnet | none | Documentation and fold-back. This step writes no front-end code. `docs/binding-store.md` is not in this step: the lease time was written into it when 5a landed, because leaving a sentence saying a network is a name and nothing else would have left a false claim in the tree for six steps. Read it rather than rewriting it. (1) `docs/dhcpv4.md`: the front-end as a reference for somebody with no plan in hand -- the three layers, which messages are answered and what the others get, the option set with each option's source, the lease time and where it is configured, the namespace `/` and why, the capability set and how to run it by hand, the sweeper and the stickiness it chose, the recorded-holder behaviour from decision 11 with its cause and consequence, and the limits the parser imposes -- `hlen` of zero, an all-zero hardware address, a reply or a non-client message type, a plain BOOTP request, more than four undecodable options, and an option whose value will not decode -- each with what it costs. (2) `ARCHITECTURE.md`: the front-end layer's first member exists, with what it serves and what it does not. This is a shape change, so it belongs there. The stale claim about protocol options was already corrected by this plan's commit, in the paragraph that lists what is deferred -- check it and do not correct it twice. (3) `AGENTS.md`: only conventions that changed -- a fourth crate, the namespace `/` for an interface in no namespace, and the rule that a wire behaviour without a provenance row is not shipped if it is not already there. Nothing else; every line there costs context on every task. (4) `docs/development.md`: the new crate in the layout, and that `make test` cannot bind privileged ports so the datapath's socket layer is proved in the lab. (5) Fold back into the master plan: phase 5's row, and the *Future work* entries this phase closes or rewrites -- the sweep-interval entry (now chosen, with the grace period named as what would decouple the two), the client-identifier entry (declined, with where it is now documented), the differential-rig entry (the lab was redeployed, with what it produced), and new entries for the deferred option table, the DECLINE exclusion, and the size of the DHCPv4 decoder's dependency subtree -- fifty-seven crates, most of them a DNS library the decoder needs for its domain-name options, which phase 6 wants anyway and which arrives a phase early rather than needlessly. Write each in full rather than naming it. The view-bound entry was already rewritten by this plan's commit, which is where it was found to name the wrong phase; read it rather than rewriting it. Commit subject: "Document the DHCPv4 front-end." |
 
 ## Risks and mitigations
 
@@ -1025,3 +1077,58 @@ to have, which this falsified. The step reported it rather than
 editing it, correctly, since that file documents the API and not the
 client; the management session replaced the enumeration with the
 property that is now true and testable.
+
+**2026-11-26, AEDT. Step 5c: the wire layer, and a defect in the
+decoder's contract.** Tests 239 to 284, of which 45 are the new
+crate's. `teneral-dhcp` holds `wire` only: `parse` for bytes in,
+`Answer` and `encode` for bytes out, no store, no socket and no
+clock, which is what makes every question about a malformed packet
+answerable in a unit test. The encoder is this project's own rather
+than the dependency's, because that crate holds options in a map
+keyed by code and so emits them in code order, while the order an
+answer's options are written in is a measured property of the bytes;
+the test walks the encoded frame and asserts the nine codes of
+`dhcp-unasked-option-set` in the order they were observed.
+
+The dependency costs fifty-seven crates and the lockfile went from
+eighty-eight packages to a hundred and forty-five. `hickory-proto`
+is non-optional in the decoder, for the domain-name options, and
+brings the bulk -- including a URL parser, the ICU normaliser and an
+Android binding that never builds on Linux. `make deny` passes with
+`exceptions` still empty, so no licence decision was dodged, and
+phase 6 wants that library anyway, so it arrives a phase early
+rather than needlessly. It is recorded in *Future work* so that the
+alternative -- a hand-written codec with no dependency -- stays a
+decision somebody can take rather than one that was never noticed.
+
+Three rounds of review, and each came from checking the round before
+it rather than from the step being wrong.
+
+The step found that the decoder stops at the first option it cannot
+read and returns **success**, so a packet with one bad option parses
+cleanly and short. What it loses is whatever followed, which can be
+the requested address or the client's identifier -- the two fields
+that decide which address a client gets. Nothing downstream could
+have known. The fix is to walk the option records before decoding,
+and it was the step's own find rather than the plan's.
+
+The first review changed what that fix does. It refused the whole
+datagram whenever a framed option was missing from the decoded set,
+which would have denied service to any client sending a name the
+decoder would not take -- a Windows machine with a non-ASCII name
+does exactly that. Two facts were then checked rather than assumed:
+an option code the decoder has no type for is surfaced as an unknown
+rather than dropped, so the strict check was never firing on vendor
+or private-use codes; and a declined value really did take the
+records after it, so filtering the result could not have recovered
+them. Hence the split now in decision 5, and a re-decode rather than
+a filter, which keeps the decoder's concatenation rule for a value
+split across several records.
+
+The second review bounded that re-decode. A pass decodes the whole
+datagram, and the passes are bounded only by the number of codes the
+decoder has a type for, so a sender could buy some sixty full
+decodes with one packet and spend them on the single thread that
+answers every network. Four drops, then the datagram is refused.
+Each of the three rounds is a case of the same thing: the cost of a
+packet must be a constant the receiver chose.
