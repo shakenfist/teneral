@@ -355,7 +355,7 @@ by the time it was executed.
 | 2. Repository foundations | [PLAN-teneral-implementation-phase-02-foundations.md](PLAN-teneral-implementation-phase-02-foundations.md) | Complete | teneral `482edf7..8fa1b4b` |
 | 3. The binding store | [PLAN-teneral-implementation-phase-03-binding-store.md](PLAN-teneral-implementation-phase-03-binding-store.md) | Complete | teneral `a6189fc..190425f` |
 | 4. The control API | [PLAN-teneral-implementation-phase-04-control-api.md](PLAN-teneral-implementation-phase-04-control-api.md) | Complete | teneral `14dce3a..5a2ef38` |
-| 5. DHCPv4 front-end | PLAN-teneral-implementation-phase-05-dhcpv4.md | Proposed | |
+| 5. DHCPv4 front-end | [PLAN-teneral-implementation-phase-05-dhcpv4.md](PLAN-teneral-implementation-phase-05-dhcpv4.md) | In progress | |
 | 6. DNS front-end | PLAN-teneral-implementation-phase-06-dns.md | Proposed | |
 | 7. Home IPAM v1 | PLAN-teneral-implementation-phase-07-home-ipam.md | Proposed | |
 | 8. Namespace datapath | PLAN-teneral-implementation-phase-08-netns-datapath.md | Proposed | |
@@ -367,9 +367,11 @@ Phases 1 to 4 are complete. The first two said that they were the
 only ones that would be scheduled, because the operator had other
 projects in flight and had said this one should not proceed past
 the prototype until those were further along; he resumed it on
-2026-11-23. Phases 5 to 11 remain `Proposed` rather than `Not
-started`, which is the honest status and should not be promoted to
-make the table look busier.
+2026-11-23. Phase 5 is `In progress` as of 2026-11-26: its plan is
+written and awaits review, and its survey found that the store holds
+none of the configuration a DHCPv4 answer needs. Phases 6 to 11
+remain `Proposed` rather than `Not started`, which is the honest
+status and should not be promoted to make the table look busier.
 
 Phases 2, 3 and 4 all landed on `develop` without a pull request,
 because there is still no remote, so their `Merged` cells carry a
@@ -1247,8 +1249,12 @@ chosen to defer to here, so that we do not forget them.
   the diagnostics report it beside the bound, because the bound is
   enforced on the views this daemon opened and the count is every
   view in the process -- the arrangement that notices the day they
-  disagree, which phase 8 will make matter by sharing the process
-  with a datapath.
+  disagree, which phase 5 makes matter by putting a datapath in this
+  process. The permits are `pub(crate)`, so the datapath cannot take
+  one and does not: it bounds itself by answering one packet at a
+  time per socket, so the views it can hold at once is the number of
+  interfaces an operator configured rather than a number a client can
+  drive. Phase 8 then multiplies that by the namespaces it serves.
 * **Content blobs have no capability yet.** Reading one is its own
   capability, because a blob holds credentials, and it arrives with
   the blobs in phase 10. Capabilities are rows of text rather than a

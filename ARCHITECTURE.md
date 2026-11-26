@@ -46,8 +46,9 @@ bindings and leases, with the event log that gives the control
 plane's cursor a total order. It also holds the tokens a consumer
 authenticates with, and every write names the actor that made it --
 a token, a local peer, or a named part of the daemon -- on both the
-event and the row. Zones and records and content blobs are deferred
-to the layers that will consume them. See
+event and the row. Zones and records, content blobs and protocol
+options are all deferred to the layers that will consume them: the
+store holds no option of any kind today. See
 [docs/binding-store.md](docs/binding-store.md).
 
 **The front-ends** each turn a wire request into a lookup and a
