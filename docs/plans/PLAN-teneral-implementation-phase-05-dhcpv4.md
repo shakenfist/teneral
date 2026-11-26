@@ -638,7 +638,7 @@ than one that did not come up.
 
 ## Step plan
 
-Sequential, every step. All seven write to the same worktree and
+Sequential, every step. All eight write to the same worktree and
 run `cargo` through the `Makefile` into one build image, so two at
 once would trip over each other's `target/` and each other's
 half-finished tree. The order is also a dependency order: nothing
@@ -648,19 +648,20 @@ something to compare.
 
 | Step | Effort | Model | Isolation | Brief for sub-agent |
 |------|--------|-------|-----------|---------------------|
-| 5a | high | opus | none | The one piece of configuration a DHCPv4 answer needs. Read decision 3 and finding 1 of this phase file first. (1) `teneral-store/src/migrations/0008_lease_time.sql`: `ALTER TABLE network ADD COLUMN lease_seconds INTEGER NOT NULL DEFAULT 43200`, with a `CHECK` that it is positive -- follow 0007's shape for an added NOT NULL column on a STRICT table, and register it in `teneral-store/src/schema.rs` beside 0007, raising `SCHEMA_VERSION` from 7 to 8. (2) `Network` in `teneral-store/src/model.rs:30` gains the field; every construction site in the crate follows. (3) A new `update_network(actor, network, lease_seconds, expected: &Cursor)` on `BindingStore`, compare-and-set on the cursor like `update_address_range` (`store.rs:342`) -- read that one and match it, including the refusal when the position is stale. It appends an event like every other write and returns the position. Run `scripts/check-store-trait.sh` and confirm it reports the new method as `network`-scoped and cursor-returning. (4) The API: a `UpdateNetworkRequest` in `teneral-api/proto/teneral.v1.proto` beside the other network operations, the handler in `operations.rs`, the capability in `authz.rs`'s exhaustive `required_capability` match (`write`), the field on the `Network` resource message **and** in `resource.rs`'s converter and in the event-state mapping, and the row in `docs/control-api.md`'s networks table. `scripts/check-api-docs.sh` must still report every operation documented, both ways. (5) `teneral/src/cli.rs` and `client.rs`: the debugging client gains the subcommand, following the shape of the address-range one. (6) Tests: two networks holding the same address, one with a changed lease time and one without, asserting each reads its own; a stale-cursor refusal; and the default appearing on a network created without one. Do not add a `--lease-time` flag anywhere -- decision 3 says why. Commit subject: "Give a network the lease time it hands out." |
-| 5b | high | opus | none | The wire layer, and nothing above it. Read decisions 2, 4, 5 and 13, and `docs/provenance.md`'s `dhcp-unasked-option-set` row. Create the `teneral-dhcp` crate: `publish = false` (phase 4 found that cargo-deny's wildcard-path allowance does not reach publishable crates), `rust-version.workspace = true`, the workspace lints inherited, `dhcproto = "0.15.0"` and nothing else beyond `teneral-store` -- and **not** `teneral-api` (decision 1). Add it to the workspace members and to `[workspace.dependencies]`. Then `wire`: a parse that refuses `hlen > 16` **before** any `chaddr` accessor is called and a datagram over 1500 bytes before it is parsed, returning a named error per cause; an `Answer` type holding the parameters decision 4's table lists; and an encoder producing the nine options in the measured order with T1 and T2 at a half and seven-eighths. The malformed corpus is the point of this step, not a side-effect: the inputs decision 5 names, each asserting a named refusal and no panic, as table-driven tests with the input described in the test name. Mutate your own guard to prove the tests see it -- copy the tree, remove the `hlen` check, confirm a named test fails, restore from the copy, each run under `timeout` -- and report which test killed it and the script's path. `make lint`, `make test` and `make deny` must all be clean, including the per-crate store check at the end of lint; run `make fetch` before `make deny` so the new dependency tree resolves. Commit subject: "Parse and build DHCPv4 messages safely." |
-| 5c | high | opus | none | The decision layer: a parsed request plus its arrival interface, against a `BindingStore`. Read decisions 2, 6 and 11, finding 10, `docs/binding-store.md`'s lookup and lease-lifecycle sections, and the `lease-address-selection-order` and `selector-client-id-over-chaddr` provenance rows. The store already implements address selection, reservations, pools and the precedence order -- **do not reimplement any of it**; assemble a `ClientIdentity` from what the packet presents and ask. The path is: `interface_owner(namespace, ifname)` to get the network, refuse with a log line if nothing claimed it, then `lookup_binding_on_interface` for a reservation, then `allocate_lease` or `acquire_lease` or `renew_lease` or `revoke_lease` as decision 6's table says. The actor is `Actor::Daemon("dhcpv4")`. The send side is a trait with one method, so this layer is tested against a recorder. Tests: every row of decision 6's table, and **every one of them with two networks holding the same address** -- a DISCOVER arriving on each network's interface from the same MAC gets each network's own answer, a REQUEST for an address held in the other network is NAKed rather than ACKed, and a RELEASE in one network leaves the other's lease alone. That is the project's central correctness property and this is the layer where it is decided. Also: a request whose `giaddr` is non-zero is dropped with one log line, and an INFORM gets options and no lease. Report the test count. Commit subject: "Answer a DHCPv4 client from the binding store." |
-| 5d | high | opus | none | The datapath and the daemon. Read decisions 7, 8, 9 and 14, and the `sock-*` and `netns-*` provenance rows -- every behaviour here is already measured and none of it is to be rediscovered. The receive path: one wildcard-bound UDP socket per served interface (a socket bound to the interface's own address never sees `255.255.255.255`), `IP_PKTINFO` for the arrival ifindex and the datagram's destination, and the interface name from an `ioctl` on a socket rather than from `/sys/class/net`. The reply path: `AF_PACKET` with a hand-built Ethernet/IPv4/UDP frame when the client has no address, and UDP with the egress named per message when it does; the BROADCAST flag is a request for broadcast and never permission to unicast. Phase 1d's spike (iii) in `docs/plans/PLAN-teneral-implementation-phase-01-research-spikes.md:974` built exactly this in Rust and a real client accepted it -- read it and follow what it found, including the privilege. Then the daemon: `--dhcp-interface` repeatable, `--dhcp-port` defaulting to 67 with its testing purpose in the help, the startup line decision 14 specifies, a refusal to start when a named interface is claimed by no network, and shutdown ordered so the sockets close before the store does (`serve.rs` has the existing order and its comment). Nothing here may bind 67 in a test: `make test` runs as a non-root uid with no capabilities and the bind returns `EACCES`, which is why the port is a flag. Say in your report which parts you could not test and why. Commit subject: "Serve DHCPv4 on a socket per interface." |
-| 5e | medium | opus | none | The sweeper. Read decision 10, and the `sweep_expired_leases` documentation in `teneral-store/src/store.rs:570` -- particularly the paragraph saying nothing in the store waits for it, which is the premise the chosen interval rests on. A timer in the daemon, `--sweep-interval` in seconds defaulting to 86400, no sweep at startup, running over every network the store holds, with `Actor::Daemon("sweeper")`. It logs what it removed per network, and a sweep that removed nothing logs nothing. Tests: with the store's injectable clock (`teneral-store/src/clock.rs`), a lapsed lease is removed and its event appears; a live lease is not; a lease in one network is swept while the same address in another network is left alone; and a sweep that finds nothing writes no event and reports no position. Do not add a grace period -- decision 10 explains why it is future work rather than this step. Commit subject: "Sweep lapsed leases on a daily timer." |
-| 5f | high | opus | none | The lab, the captures and the rig. **Do not deploy anything until the management session confirms the back brief's gate has been answered yes** -- this step touches real infrastructure. Then: `cd` to the `homelab-deployments-lfs` checkout, `git pull` (the local `main` is 13 commits behind the merge that carries the lab), deploy `playbooks/linux-bridge-lab-debian-13.yml`, and leave the gateways in the root configuration (`lbr-lab-gateway show` to confirm). Read `docs/linux-bridge-lab.md` in that repository and `docs/differential-rig.md` here, especially *How a captured pair gets into the corpus lawfully*, which is six numbered steps and is not optional: the versions, the `tcpdump` command, the pcap kept outside this repository with its sha256 recorded, the frames as annotated hex, and the write-up. Capture dnsmasq first, then stop it and run teneral on the same bridges with the same ranges -- a `make release` binary copied in, run with `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW` -- and capture the same exchanges. What the phase needs: a DISCOVER/OFFER and a REQUEST/ACK from each of the two overlapping networks, a renewal, a RELEASE, an INFORM, and a NAK. Add the provenance rows the captures support, with their write-ups, and the cases that cite them. Then the rig: the `[network]` table in `case.toml`, the subject signature carrying it, field-wise comparison reporting every difference rather than the first, and the existing `dhcpv4-discover-offer-dhclient` case flipped from `pending` to `compared`. Correct `docs/differential-rig.md:192-203`, which promises byte comparison. Nothing in this step reads dnsmasq's source, and no measurement is taken anywhere but the lab. Report the lab's identifier, the versions, and every row id you added. Commit subject: "Compare teneral's DHCPv4 bytes with dnsmasq's." |
-| 5g | medium | sonnet | none | Documentation and fold-back. This step writes no front-end code. (1) `docs/dhcpv4.md`: the front-end as a reference for somebody with no plan in hand -- the three layers, which messages are answered and what the others get, the option set with each option's source, the lease time and where it is configured, the namespace `/` and why, the capability set and how to run it by hand, the sweeper and the stickiness it chose, and the recorded-holder behaviour from decision 11 with its cause and consequence. (2) `ARCHITECTURE.md`: the front-end layer's first member exists, with what it serves and what it does not. This is a shape change, so it belongs there. The stale claim about protocol options was already corrected by this plan's commit, in the paragraph that lists what is deferred -- check it and do not correct it twice. (3) `AGENTS.md`: only conventions that changed -- a fourth crate, the namespace `/` for an interface in no namespace, and the rule that a wire behaviour without a provenance row is not shipped if it is not already there. Nothing else; every line there costs context on every task. (4) `docs/development.md`: the new crate in the layout, and that `make test` cannot bind privileged ports so the datapath's socket layer is proved in the lab. (5) `docs/binding-store.md`: the lease time on the network. (6) Fold back into the master plan: phase 5's row, and the *Future work* entries this phase closes or rewrites -- the sweep-interval entry (now chosen, with the grace period named as what would decouple the two), the client-identifier entry (declined, with where it is now documented), the differential-rig entry (the lab was redeployed, with what it produced), and new entries for the deferred option table, the DECLINE exclusion and the grace period that would decouple the sweep from the stickiness. Write each in full rather than naming it. The view-bound entry was already rewritten by this plan's commit, which is where it was found to name the wrong phase; read it rather than rewriting it. Commit subject: "Document the DHCPv4 front-end." |
+| 5a | high | opus | none | The one piece of configuration a DHCPv4 answer needs. Read decision 3 and finding 1 of this phase file first. (1) `teneral-store/src/migrations/0008_lease_time.sql`: `ALTER TABLE network ADD COLUMN lease_seconds INTEGER NOT NULL DEFAULT 43200`, with a `CHECK` that it is positive -- follow 0007's shape for an added NOT NULL column on a STRICT table, and register it in `teneral-store/src/schema.rs` beside 0007, raising `SCHEMA_VERSION` from 7 to 8. (2) `Network` in `teneral-store/src/model.rs:30` gains the field; every construction site in the crate follows. (3) A new `update_network(actor, network, lease_seconds, expected: &Cursor)` on `BindingStore`, compare-and-set on the cursor like `update_address_range` (`store.rs:342`) -- read that one and match it, including the refusal when the position is stale. It appends an event like every other write and returns the position. Run `scripts/check-store-trait.sh` and confirm it reports the new method as `network`-scoped and cursor-returning. (4) The API: a `UpdateNetworkRequest` in `teneral-api/proto/teneral.v1.proto` beside the other network operations, the handler in `operations.rs`, the capability in `authz.rs`'s exhaustive `required_capability` match (`write`), the field on the `Network` resource message **and** in `resource.rs`'s converter and in the event-state mapping, and the row in `docs/control-api.md`'s networks table. `scripts/check-api-docs.sh` must still report every operation documented, both ways. (5) Tests: two networks holding the same address, one with a changed lease time and one without, asserting each reads its own; a stale-cursor refusal; and the default appearing on a network created without one. The debugging client is not touched here: it has no write subcommand of any kind to extend, which is what step 5b is for. Do not add a `--lease-time` flag anywhere -- decision 3 says why. Commit subject: "Give a network the lease time it hands out." |
+| 5b | medium | opus | none | Let the debugging client write what it reads. The premise this step exists for was found by checking another step's brief: `teneral/src/cli.rs` exposes `get`, `explain`, `diagnostics`, `mint-token`, `mint-epoch` and `watch`, and **no write of any kind**, so nothing in this repository can create a network, attach an interface or configure a range -- and step 5g cannot configure the lab it deploys. Read `teneral/src/client.rs` in full first: `one()` sends a `request::Kind` and prints the response, `get()` builds the read requests, and `selector`, `cursor_from`, `scope_from` and `capability_from` are the argument parsers to reuse rather than duplicate. Add one subcommand per write operation the server already serves -- the networks, attachments, address ranges and bindings in `docs/control-api.md`'s tables, the lease revocation, and `update_network` from 5a -- taking `--expected EPOCH:SEQUENCE` where the operation needs a position, with the help text saying it comes from a `get`. Nothing new goes in `teneral-api`: every one of these requests exists in the schema and the server serves it already, so a change in that crate means something has been misread. Add a test that names each write operation in the schema and asserts the client builds a request for it, so an operation added later without a subcommand fails rather than being quietly unreachable. Commit subject: "Let the debugging client configure a daemon." |
+| 5c | high | opus | none | The wire layer, and nothing above it. Read decisions 2, 4, 5 and 13, and `docs/provenance.md`'s `dhcp-unasked-option-set` row. Create the `teneral-dhcp` crate: `publish = false` (phase 4 found that cargo-deny's wildcard-path allowance does not reach publishable crates), `rust-version.workspace = true`, the workspace lints inherited, `dhcproto = "0.15.0"` and nothing else beyond `teneral-store` -- and **not** `teneral-api` (decision 1). Add it to the workspace members and to `[workspace.dependencies]`. Then `wire`: a parse that refuses `hlen > 16` **before** any `chaddr` accessor is called and a datagram over 1500 bytes before it is parsed, returning a named error per cause; an `Answer` type holding the parameters decision 4's table lists; and an encoder producing the nine options in the measured order with T1 and T2 at a half and seven-eighths. The malformed corpus is the point of this step, not a side-effect: the inputs decision 5 names, each asserting a named refusal and no panic, as table-driven tests with the input described in the test name. Mutate your own guard to prove the tests see it -- copy the tree, remove the `hlen` check, confirm a named test fails, restore from the copy, each run under `timeout` -- and report which test killed it and the script's path. `make lint`, `make test` and `make deny` must all be clean, including the per-crate store check at the end of lint; run `make fetch` before `make deny` so the new dependency tree resolves. Commit subject: "Parse and build DHCPv4 messages safely." |
+| 5d | high | opus | none | The decision layer: a parsed request plus its arrival interface, against a `BindingStore`. Read decisions 2, 6 and 11, finding 10, `docs/binding-store.md`'s lookup and lease-lifecycle sections, and the `lease-address-selection-order` and `selector-client-id-over-chaddr` provenance rows. The store already implements address selection, reservations, pools and the precedence order -- **do not reimplement any of it**; assemble a `ClientIdentity` from what the packet presents and ask. The path is: `interface_owner(namespace, ifname)` to get the network, refuse with a log line if nothing claimed it, then `lookup_binding_on_interface` for a reservation, then `allocate_lease` or `acquire_lease` or `renew_lease` or `revoke_lease` as decision 6's table says. The actor is `Actor::Daemon("dhcpv4")`. The send side is a trait with one method, so this layer is tested against a recorder. Tests: every row of decision 6's table, and **every one of them with two networks holding the same address** -- a DISCOVER arriving on each network's interface from the same MAC gets each network's own answer, a REQUEST for an address held in the other network is NAKed rather than ACKed, and a RELEASE in one network leaves the other's lease alone. That is the project's central correctness property and this is the layer where it is decided. Also: a request whose `giaddr` is non-zero is dropped with one log line, and an INFORM gets options and no lease. Report the test count. Commit subject: "Answer a DHCPv4 client from the binding store." |
+| 5e | high | opus | none | The datapath and the daemon. Read decisions 7, 8, 9 and 14, and the `sock-*` and `netns-*` provenance rows -- every behaviour here is already measured and none of it is to be rediscovered. The receive path: one wildcard-bound UDP socket per served interface (a socket bound to the interface's own address never sees `255.255.255.255`), `IP_PKTINFO` for the arrival ifindex and the datagram's destination, and the interface name from an `ioctl` on a socket rather than from `/sys/class/net`. The reply path: `AF_PACKET` with a hand-built Ethernet/IPv4/UDP frame when the client has no address, and UDP with the egress named per message when it does; the BROADCAST flag is a request for broadcast and never permission to unicast. Phase 1d's spike (iii) in `docs/plans/PLAN-teneral-implementation-phase-01-research-spikes.md:974` built exactly this in Rust and a real client accepted it -- read it and follow what it found, including the privilege. Then the daemon: `--dhcp-interface` repeatable, `--dhcp-port` defaulting to 67 with its testing purpose in the help, the startup line decision 14 specifies, a refusal to start when a named interface is claimed by no network, and shutdown ordered so the sockets close before the store does (`serve.rs` has the existing order and its comment). Nothing here may bind 67 in a test: `make test` runs as a non-root uid with no capabilities and the bind returns `EACCES`, which is why the port is a flag. Say in your report which parts you could not test and why. Commit subject: "Serve DHCPv4 on a socket per interface." |
+| 5f | medium | opus | none | The sweeper. Read decision 10, and the `sweep_expired_leases` documentation in `teneral-store/src/store.rs:570` -- particularly the paragraph saying nothing in the store waits for it, which is the premise the chosen interval rests on. A timer in the daemon, `--sweep-interval` in seconds defaulting to 86400, no sweep at startup, running over every network the store holds, with `Actor::Daemon("sweeper")`. It logs what it removed per network, and a sweep that removed nothing logs nothing. Tests: with the store's injectable clock (`teneral-store/src/clock.rs`), a lapsed lease is removed and its event appears; a live lease is not; a lease in one network is swept while the same address in another network is left alone; and a sweep that finds nothing writes no event and reports no position. Do not add a grace period -- decision 10 explains why it is future work rather than this step. Commit subject: "Sweep lapsed leases on a daily timer." |
+| 5g | high | opus | none | The lab, the captures and the rig. **Do not deploy anything until the management session confirms the back brief's gate has been answered yes** -- this step touches real infrastructure. Then: `cd` to the `homelab-deployments-lfs` checkout, `git pull` (the local `main` is 13 commits behind the merge that carries the lab), deploy `playbooks/linux-bridge-lab-debian-13.yml`, and leave the gateways in the root configuration (`lbr-lab-gateway show` to confirm). Read `docs/linux-bridge-lab.md` in that repository and `docs/differential-rig.md` here, especially *How a captured pair gets into the corpus lawfully*, which is six numbered steps and is not optional: the versions, the `tcpdump` command, the pcap kept outside this repository with its sha256 recorded, the frames as annotated hex, and the write-up. Capture dnsmasq first, then stop it and run teneral on the same bridges with the same ranges -- a `make release` binary copied in, run with `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW` -- and capture the same exchanges. What the phase needs: a DISCOVER/OFFER and a REQUEST/ACK from each of the two overlapping networks, a renewal, a RELEASE, an INFORM, and a NAK. Add the provenance rows the captures support, with their write-ups, and the cases that cite them. Then the rig: the `[network]` table in `case.toml`, the subject signature carrying it, field-wise comparison reporting every difference rather than the first, and the existing `dhcpv4-discover-offer-dhclient` case flipped from `pending` to `compared`. Correct `docs/differential-rig.md:192-203`, which promises byte comparison. Nothing in this step reads dnsmasq's source, and no measurement is taken anywhere but the lab. Report the lab's identifier, the versions, and every row id you added. Commit subject: "Compare teneral's DHCPv4 bytes with dnsmasq's." |
+| 5h | medium | sonnet | none | Documentation and fold-back. This step writes no front-end code. (1) `docs/dhcpv4.md`: the front-end as a reference for somebody with no plan in hand -- the three layers, which messages are answered and what the others get, the option set with each option's source, the lease time and where it is configured, the namespace `/` and why, the capability set and how to run it by hand, the sweeper and the stickiness it chose, and the recorded-holder behaviour from decision 11 with its cause and consequence. (2) `ARCHITECTURE.md`: the front-end layer's first member exists, with what it serves and what it does not. This is a shape change, so it belongs there. The stale claim about protocol options was already corrected by this plan's commit, in the paragraph that lists what is deferred -- check it and do not correct it twice. (3) `AGENTS.md`: only conventions that changed -- a fourth crate, the namespace `/` for an interface in no namespace, and the rule that a wire behaviour without a provenance row is not shipped if it is not already there. Nothing else; every line there costs context on every task. (4) `docs/development.md`: the new crate in the layout, and that `make test` cannot bind privileged ports so the datapath's socket layer is proved in the lab. (5) `docs/binding-store.md`: the lease time on the network. (6) Fold back into the master plan: phase 5's row, and the *Future work* entries this phase closes or rewrites -- the sweep-interval entry (now chosen, with the grace period named as what would decouple the two), the client-identifier entry (declined, with where it is now documented), the differential-rig entry (the lab was redeployed, with what it produced), and new entries for the deferred option table, the DECLINE exclusion and the grace period that would decouple the sweep from the stickiness. Write each in full rather than naming it. The view-bound entry was already rewritten by this plan's commit, which is where it was found to name the wrong phase; read it rather than rewriting it. Commit subject: "Document the DHCPv4 front-end." |
 
 ## Risks and mitigations
 
 **A cross-network defect in the decision layer.** This is the
 project's signature failure and this phase is the first place a
-packet reaches it. Mitigation: every test in 5c runs two networks
+packet reaches it. Mitigation: every test in 5d runs two networks
 holding the same address, and the lab runs both networks at once
 through one process so the end-to-end case is measured rather than
 reasoned about. The management session re-runs the two-network
@@ -672,7 +673,7 @@ to confirm it rather than assumed.
 **A panic in the parser.** One process serves every network, so a
 malformed packet that panics is a remote denial of service against
 all of them. Mitigation: the `hlen` guard before any accessor, the
-malformed corpus in 5b, `unwrap_used = "deny"` inherited from the
+malformed corpus in 5c, `unwrap_used = "deny"` inherited from the
 workspace, and a mutation run proving the corpus kills the guard's
 removal. The management session reproduces one mutant itself, on a
 copy, under `timeout`.
@@ -696,17 +697,17 @@ own file inherits it as a given rather than a choice.
 **dhcproto publishes a release mid-phase.** Then the guard may be
 droppable and the floor in `Cargo.toml` is the question.
 Mitigation: the guard is correct either way and is not removed in
-this phase; 5b records the version it resolved, and the *Future
+this phase; 5c records the version it resolved, and the *Future
 work* entry already says to watch for the release.
 
 **The lab drifts from what was measured.** The lab is deployed
 from one command and deliberately not kept, so a second
 deployment is a second set of MACs, uptimes and versions.
-Mitigation: 5f records the versions with every capture, as
+Mitigation: 5g records the versions with every capture, as
 `docs/differential-rig.md` requires, and a case whose write-up
 does not name a command and its output is not a case.
 
-**Scope creep into an option table.** The temptation in 5a and 5c
+**Scope creep into an option table.** The temptation in 5a and 5d
 is to add "just the domain name" or "just the MTU", and each one
 is a schema decision made by the wrong person. Mitigation:
 decision 4 names the nine options and their sources, the deferred
@@ -738,67 +739,71 @@ than ticking it.
 8. The schema version is 8, the migration is forward-only, and a
    store created by 0001-0007 opens and reports the default lease
    time without an operator writing one.
-9. `teneral-dhcp` depends on `teneral-store` and not on
+9. Every write operation the server serves is reachable from the
+   debugging client, asserted by a test that names them rather
+   than by counting subcommands by hand, and the lab in 5g was
+   configured with that client and nothing else.
+10. `teneral-dhcp` depends on `teneral-store` and not on
    `teneral-api`, checked by reading its `Cargo.toml` and by
    `cargo tree -p teneral-dhcp` showing no `teneral-api`.
-10. A DHCPv4 datagram with `hlen` of 17 and one of 255 are each
+11. A DHCPv4 datagram with `hlen` of 17 and one of 255 are each
     refused with a named error, and neither panics, in a test whose
     name says which input it carries.
-11. Every input in decision 5's malformed list has a test, and a
+12. Every input in decision 5's malformed list has a test, and a
     copy of the tree with the `hlen` guard removed fails a named
     one. The mutant, the test that killed it and the script's path
     are recorded.
-12. Two networks holding the same address, asserted for every row
+13. Two networks holding the same address, asserted for every row
     of decision 6's table: DISCOVER, REQUEST in both states,
     DECLINE, RELEASE and INFORM.
-13. The nine options of `dhcp-unasked-option-set` appear in an
+14. The nine options of `dhcp-unasked-option-set` appear in an
     OFFER in the measured order, with T1 at half the lease and T2
     at seven-eighths, asserted against the bytes rather than
     against the builder's inputs.
-14. An INFORM is answered with options, no `yiaddr` and no lease
+15. An INFORM is answered with options, no `yiaddr` and no lease
     time, and no lease row is written.
-15. A REQUEST naming another server's identifier produces no
+16. A REQUEST naming another server's identifier produces no
     reply, and a REQUEST for an address another client holds
     produces a NAK.
-16. A non-zero `giaddr` produces no reply and exactly one log
+17. A non-zero `giaddr` produces no reply and exactly one log
     line naming the relay.
-17. An interface with no address, or with more than one, is
+18. An interface with no address, or with more than one, is
     refused with a log line naming the interface rather than
     answered from a guess.
-18. The sweeper removes a lapsed lease and leaves a live one,
+19. The sweeper removes a lapsed lease and leaves a live one,
     writes no event when nothing expired, and sweeps one network
     without touching the same address in another.
-19. The daemon refuses to start when `--dhcp-interface` names an
+20. The daemon refuses to start when `--dhcp-interface` names an
     interface no network has claimed, and the refusal names it.
-20. The daemon's startup line names, per served interface, the
+21. The daemon's startup line names, per served interface, the
     network, the namespace, the derived address and prefix, and
     the lease time -- read from a real run, not from the source.
-21. `teneral serve` with no `--dhcp-interface` behaves exactly as
+22. `teneral serve` with no `--dhcp-interface` behaves exactly as
     phase 4 shipped it, proved by phase 4's own daemon tests still
     passing unchanged.
-22. The lab was deployed, teneral served both overlapping networks
+23. The lab was deployed, teneral served both overlapping networks
     through one process, and a real client bound an address on
     each -- with the client's own output recorded, not teneral's.
-23. `cross_network_answers` is zero in the diagnostics after the
+24. `cross_network_answers` is zero in the diagnostics after the
     lab run, read from the running daemon.
-24. Every new provenance row cites an RFC section or a named
+25. Every new provenance row cites an RFC section or a named
     observed-behaviour test, each new row is cited by at least one
     case, and the rig fails a case citing a row that does not
     exist.
-25. `dhcpv4-discover-offer-dhclient` is `compared` rather than
+26. `dhcpv4-discover-offer-dhclient` is `compared` rather than
     `pending`, the rig's subject registration and the case's
     status agree, and a deliberately wrong field in the subject
     makes the rig fail naming that field.
-26. No document says the binding store holds protocol options, and
+27. No document says the binding store holds protocol options, and
     `grep -rn 'protocol options' ARCHITECTURE.md docs/` returns
     only accurate sentences.
-27. `docs/dhcpv4.md` exists and states the lease time's home, the
+28. `docs/dhcpv4.md` exists and states the lease time's home, the
     namespace `/`, the capability set, the sweeper's interval with
     what it chose, and the recorded-holder behaviour.
-28. The master plan's phase 5 row and every *Future work* entry
+29. The master plan's phase 5 row and every *Future work* entry
     this phase closes or rewrites are updated, and each new
     deferral is written in full rather than named.
-29. Nothing this phase started is still running: no teneral
+30. Nothing this phase started is still running: no teneral
     process on this host or in the lab, no container, no `cargo`
     on the host, and the lab either torn down or reported as
     deliberately left up.
@@ -820,14 +825,14 @@ interface a request arrived on, as dnsmasq was observed to do.
 
 Four things want your answer.
 
-**The lab.** Step 5f deploys
+**The lab.** Step 5g deploys
 `playbooks/linux-bridge-lab-debian-13.yml` to real infrastructure,
 runs teneral in it with `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW`,
 and captures the exchanges. Without it the phase ships a front-end
 whose cases are still `pending`, which the plan's own success
 criteria say is incomplete. I will not deploy anything until you
 say so. The alternative, if now is the wrong time, is to land 5a
-to 5e and 5g and leave 5f as a short follow-on phase.
+to 5f and 5h and leave 5g as a short follow-on phase.
 
 **The lease time on the network rather than on the range**
 (decision 3). It is where I would put it, and the argument for the
@@ -855,3 +860,36 @@ field, and `root`, which `ip netns` can also create.
 
 Written as the phase runs. The date, with its timezone, on each
 entry.
+
+**2026-11-26, AEDT. The back brief.** All four points were put to
+the operator before any step ran and all four came back as the plan
+had them: the lab is deployed in this phase rather than deferred,
+the lease time goes on the network rather than on the address range,
+DECLINE gets the revoke-and-log answer with the exclusion written up
+as future work, and the namespace for an interface in no namespace
+is `/`. Nothing in the plan changed because of the answers, so the
+decisions stand as written rather than as amended.
+
+**2026-11-26, AEDT. A step was added before any step ran, because
+the plan was wrong.** Checking 5a's brief against the tree -- which
+is done to each brief before it is sent, since an agent will build
+on a false premise and hand it back as a finding -- found that the
+claim it rested on was mine and false. The brief said the debugging
+client would gain a subcommand "following the shape of the
+address-range one". There is no such shape: `teneral/src/cli.rs`
+offers `get`, `explain`, `diagnostics`, `mint-token`, `mint-epoch`
+and `watch`, and no write of any kind. Phase 4 shipped a server
+serving every write in the schema and a client that can reach none
+of them.
+
+That is not a cosmetic miss. Step 5g deploys a lab and configures
+two overlapping networks over the control socket, and nothing in
+this repository could have done it -- the phase would have arrived
+at its most important step needing a throwaway program nobody had
+planned to write. So the client's writes became step 5b, before
+anything that depends on being able to configure a daemon, and the
+rest of the table shifted by one letter. The definition of done
+gained the item that makes it checkable: every write the server
+serves is reachable from the client, asserted by a test rather than
+counted by hand, and the lab is configured with that client and
+nothing else.
