@@ -83,6 +83,26 @@ fn a_request_that_names_a_server_and_an_address_carries_both() {
 }
 
 #[test]
+fn the_two_class_options_are_carried_as_the_bytes_they_arrived_as() {
+    // Not as text, which is what the layer above turns them into when
+    // they are text at all. An option whose bytes are not UTF-8 comes
+    // from a real client, and reading it here would decide on that
+    // layer's behalf what such a client presents.
+    let mut datagram = Datagram::discover();
+    datagram.options = options(&[
+        option(53, &[DISCOVER]),
+        option(77, b"tills"),
+        option(60, &[0x66, 0x77, 0xff]),
+    ]);
+
+    let request = parse(&datagram.bytes()).expect("a DISCOVER with two classes parses");
+
+    assert_eq!(request.user_class, Some(b"tills".to_vec()));
+    assert_eq!(request.vendor_class, Some(vec![0x66, 0x77, 0xff]));
+    assert_eq!(request.not_understood, vec![]);
+}
+
+#[test]
 fn a_relay_address_is_carried_rather_than_refused() {
     // The layer above drops a relayed request and logs the address it
     // came through, which it cannot do if the parse threw it away.

@@ -15,14 +15,15 @@
 //! - [`wire`] is bytes to a parsed request, and a set of answer
 //!   parameters back to bytes. No store, no socket, no clock. Every
 //!   malformed-packet test and every option-encoding test lives here.
-//! - the decision layer is a parsed request plus the interface it
-//!   arrived on, asked of the store, producing an answer or a
-//!   silence. It is where a network is resolved from an interface and
-//!   where a lease is written.
+//! - [`decide`] is a parsed request plus the interface it arrived on,
+//!   asked of the store, producing an answer or a silence. It is
+//!   where a network is resolved from an interface, where what a
+//!   packet presents becomes an identity the store will match, and
+//!   where a lease is written. Every two-network test lives here.
 //! - the datapath is the sockets, and the frame that reaches a client
 //!   with no address.
 //!
-//! Only the first of those exists so far.
+//! The first two of those exist so far.
 //!
 //! The reason for that shape is that `make test` runs as an
 //! unprivileged uid with no capabilities, so it can bind neither port
@@ -38,4 +39,5 @@
 //! that had acquired a dependency on the store, and that is worth
 //! reading as a change at the call site.
 
+pub mod decide;
 pub mod wire;

@@ -182,14 +182,24 @@ knob (`:1193`) and asks this phase to choose it knowing that.
 Decision 10 chooses, and says which of the two it optimised for.
 
 **7. Nothing reserves a namespace name for interfaces that are in
-no namespace.** An attachment's identity is `(namespace, ifname)`,
-the namespace is a required string everywhere it appears
-(`teneral/src/cli.rs:126,203`), nothing validates it and nothing
-defaults it. A datapath with no namespaces has to pass something,
-and whatever it passes becomes the name an operator must type to
-attach an interface -- and the name phase 8 has to agree with.
-Decision 8 picks it, and it is the decision in this plan with the
-longest reach for its size.
+no namespace, and one character is already forbidden.** An
+attachment's identity is `(namespace, ifname)`, the namespace is a
+required string everywhere it appears
+(`teneral/src/cli.rs:126,203`), and nothing defaults it. A datapath
+with no namespaces has to pass something, and whatever it passes
+becomes the name an operator must type to attach an interface -- and
+the name phase 8 has to agree with.
+
+The first version of this finding said nothing validates it, which
+was false, and decision 8 was written on that falsehood and had to
+be rewritten when step 5d hit it. `attach_interface` runs
+`validate_name_part` on both halves (`teneral-store/src/ops.rs:1246`),
+which refuses `/` -- because an attachment's identity reaches an
+event as one string with the two halves joined by that character, and
+the store refuses it in the parts rather than escaping it, so that
+`a/b` plus `c` and `a` plus `b/c` cannot become one event. The
+comment there makes exactly the argument this plan made for choosing
+`/` and reaches the opposite conclusion from it.
 
 **8. The `dhcproto` claim still holds, and was checked rather than
 carried forward.** crates.io reports 0.15.0 of 2026-05-19 as the
@@ -509,27 +519,46 @@ an `ioctl` on a socket and never from `/sys/class/net`
 there is one namespace, and is the difference between working and
 silently wrong in phase 8.
 
-### 8. The namespace an interface with no namespace is attached under is `/`
+### 8. The namespace an interface in no namespace is attached under is `root`
 
-An attachment is identified by `(namespace, ifname)`; the
-namespace is required, opaque and unvalidated (finding 7). This
-phase has to pass something, and the string it picks is the one an
-operator types for the rest of the project's life.
+An attachment is identified by `(namespace, ifname)`; the namespace
+is required and opaque. This phase has to pass something, and the
+string it picks is the one an operator types for the rest of the
+project's life and the one phase 8 has to agree with.
 
-It is `/`. Not an empty string, which is indistinguishable from a
-field somebody forgot to fill in and which the CLI would have to
-be taught to accept. Not `root`, because `ip netns add root`
-succeeds, so a deployment with a namespace of that name would have
-two different things with one identity -- and the only defence
-would be validation in the store, which is a schema rule invented
-to protect a naming choice. No name `ip netns` can create contains
-a `/`, because those names are filenames under `/var/run/netns`,
-so `/` cannot collide with a real namespace and needs no
-validation anywhere.
+It was `/` and could not be. The argument was that no name `ip netns`
+can create contains a slash, those names being filenames, so `/`
+could never collide with a real namespace and would need no
+validation anywhere. The store had got there first and drawn the
+opposite conclusion: finding 7 above has the detail, and the short
+version is that `/` is the character an attachment's two halves are
+joined by in its event identity, so the store refuses it in either
+half. The choice was unimplementable rather than merely awkward, and
+step 5d found it by trying.
 
-The cost is that it reads like a typo in `teneral attach-interface
-home / br-n1`. That is paid in the help text, in `docs/`, and in the
-line the daemon logs at startup naming the namespace it is serving.
+So it is `root`. Not an empty string, which is indistinguishable
+from a field somebody forgot to fill in. Not `.`, which reads as
+"here" and is unforgeable for the same filename reason, but which a
+consumer that ever puts an attachment's identity in a URL path would
+have silently collapsed, this project having a web interface in its
+future.
+
+`root` can collide, because `ip netns add root` succeeds, and that is
+acceptable for a reason worth stating rather than waved at: the
+collision is loud. An attachment's primary key is
+`(namespace, ifname)`, so an interface in the initial namespace and
+an interface of the same name inside a namespace called `root` claim
+one identity, and the second claim is refused naming the holder.
+Nothing leaks between networks and nothing is answered wrongly; an
+operator is told they cannot attach that interface. A deployment that
+has a namespace called `root` *and* serves an identically named
+interface in both is pathological, and the worst it gets is a
+refusal it can work around by renaming its namespace. Weighed against
+a store change to the identity format every event already carries,
+that is the cheaper end of the trade.
+
+The cost is paid in the help text, in `docs/`, and in the line the
+daemon logs at startup naming the namespace it is serving.
 
 ### 9. The datapath handles one packet at a time per socket, and so bounds its own views
 
@@ -747,7 +776,7 @@ something to compare.
 | 5e | high | opus | none | The datapath and the daemon. Read decisions 7, 8, 9 and 14, and the `sock-*` and `netns-*` provenance rows -- every behaviour here is already measured and none of it is to be rediscovered. The receive path: one wildcard-bound UDP socket per served interface (a socket bound to the interface's own address never sees `255.255.255.255`), `IP_PKTINFO` for the arrival ifindex and the datagram's destination, and the interface name from an `ioctl` on a socket rather than from `/sys/class/net`. The reply path: `AF_PACKET` with a hand-built Ethernet/IPv4/UDP frame when the client has no address, and UDP with the egress named per message when it does; the BROADCAST flag is a request for broadcast and never permission to unicast. Phase 1d's spike (iii) in `docs/plans/PLAN-teneral-implementation-phase-01-research-spikes.md:974` built exactly this in Rust and a real client accepted it -- read it and follow what it found, including the privilege. Then the daemon: `--dhcp-interface` repeatable, `--dhcp-port` defaulting to 67 with its testing purpose in the help, the startup line decision 14 specifies, a refusal to start when a named interface is claimed by no network, and shutdown ordered so the sockets close before the store does (`serve.rs` has the existing order and its comment). Nothing here may bind 67 in a test: `make test` runs as a non-root uid with no capabilities and the bind returns `EACCES`, which is why the port is a flag. Say in your report which parts you could not test and why. Commit subject: "Serve DHCPv4 on a socket per interface." |
 | 5f | medium | opus | none | The sweeper. Read decision 10, and the `sweep_expired_leases` documentation in `teneral-store/src/store.rs:570` -- particularly the paragraph saying nothing in the store waits for it, which is the premise the chosen interval rests on. A timer in the daemon, `--sweep-interval` in seconds defaulting to 86400, no sweep at startup, running over every network the store holds, with `Actor::Daemon("sweeper")`. It logs what it removed per network, and a sweep that removed nothing logs nothing. Tests: with the store's injectable clock (`teneral-store/src/clock.rs`), a lapsed lease is removed and its event appears; a live lease is not; a lease in one network is swept while the same address in another network is left alone; and a sweep that finds nothing writes no event and reports no position. Do not add a grace period -- decision 10 explains why it is future work rather than this step. Commit subject: "Sweep lapsed leases on a daily timer." |
 | 5g | high | opus | none | The lab, the captures and the rig. **Do not deploy anything until the management session confirms the back brief's gate has been answered yes** -- this step touches real infrastructure. Then: `cd` to the `homelab-deployments-lfs` checkout, `git pull` (the local `main` is 13 commits behind the merge that carries the lab), deploy `playbooks/linux-bridge-lab-debian-13.yml`, and leave the gateways in the root configuration (`lbr-lab-gateway show` to confirm). Read `docs/linux-bridge-lab.md` in that repository and `docs/differential-rig.md` here, especially *How a captured pair gets into the corpus lawfully*, which is six numbered steps and is not optional: the versions, the `tcpdump` command, the pcap kept outside this repository with its sha256 recorded, the frames as annotated hex, and the write-up. Capture dnsmasq first, then stop it and run teneral on the same bridges with the same ranges -- a `make release` binary copied in, run with `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW` -- and capture the same exchanges. What the phase needs: a DISCOVER/OFFER and a REQUEST/ACK from each of the two overlapping networks, a renewal, a RELEASE, an INFORM, and a NAK. Four behaviours came out of 5c with no provenance row and have to be measured here rather than guessed: whether the reference implementation pads a reply to the BOOTP minimum of 300 bytes, which teneral does not do and a 274-byte reply was accepted by one client; what it does with `hlen` of zero, with a `chaddr` of all zeroes and with a plain BOOTP request carrying no message type, all three of which teneral refuses; and what it does with an option whose value will not decode, where teneral drops the option and answers anyway. Add the provenance rows the captures support, with their write-ups, and the cases that cite them. Then the rig: the `[network]` table in `case.toml`, the subject signature carrying it, field-wise comparison reporting every difference rather than the first, and the existing `dhcpv4-discover-offer-dhclient` case flipped from `pending` to `compared`. Correct `docs/differential-rig.md:192-203`, which promises byte comparison. Nothing in this step reads dnsmasq's source, and no measurement is taken anywhere but the lab. Report the lab's identifier, the versions, and every row id you added. Commit subject: "Compare teneral's DHCPv4 bytes with dnsmasq's." |
-| 5h | medium | sonnet | none | Documentation and fold-back. This step writes no front-end code. `docs/binding-store.md` is not in this step: the lease time was written into it when 5a landed, because leaving a sentence saying a network is a name and nothing else would have left a false claim in the tree for six steps. Read it rather than rewriting it. (1) `docs/dhcpv4.md`: the front-end as a reference for somebody with no plan in hand -- the three layers, which messages are answered and what the others get, the option set with each option's source, the lease time and where it is configured, the namespace `/` and why, the capability set and how to run it by hand, the sweeper and the stickiness it chose, the recorded-holder behaviour from decision 11 with its cause and consequence, and the limits the parser imposes -- `hlen` of zero, an all-zero hardware address, a reply or a non-client message type, a plain BOOTP request, more than four undecodable options, and an option whose value will not decode -- each with what it costs. (2) `ARCHITECTURE.md`: the front-end layer's first member exists, with what it serves and what it does not. This is a shape change, so it belongs there. The stale claim about protocol options was already corrected by this plan's commit, in the paragraph that lists what is deferred -- check it and do not correct it twice. (3) `AGENTS.md`: only conventions that changed -- a fourth crate, the namespace `/` for an interface in no namespace, and the rule that a wire behaviour without a provenance row is not shipped if it is not already there. Nothing else; every line there costs context on every task. (4) `docs/development.md`: the new crate in the layout, and that `make test` cannot bind privileged ports so the datapath's socket layer is proved in the lab. (5) Fold back into the master plan: phase 5's row, and the *Future work* entries this phase closes or rewrites -- the sweep-interval entry (now chosen, with the grace period named as what would decouple the two), the client-identifier entry (declined, with where it is now documented), the differential-rig entry (the lab was redeployed, with what it produced), and new entries for the deferred option table, the DECLINE exclusion, and the size of the DHCPv4 decoder's dependency subtree -- fifty-seven crates, most of them a DNS library the decoder needs for its domain-name options, which phase 6 wants anyway and which arrives a phase early rather than needlessly. Write each in full rather than naming it. The view-bound entry was already rewritten by this plan's commit, which is where it was found to name the wrong phase; read it rather than rewriting it. Commit subject: "Document the DHCPv4 front-end." |
+| 5h | medium | sonnet | none | Documentation and fold-back. This step writes no front-end code. `docs/binding-store.md` is not in this step: the lease time was written into it when 5a landed, because leaving a sentence saying a network is a name and nothing else would have left a false claim in the tree for six steps. Read it rather than rewriting it. (1) `docs/dhcpv4.md`: the front-end as a reference for somebody with no plan in hand -- the three layers, which messages are answered and what the others get, the option set with each option's source, the lease time and where it is configured, the namespace `root`, why it is not `/`, and the collision it accepts, the capability set and how to run it by hand, the sweeper and the stickiness it chose, the recorded-holder behaviour from decision 11 with its cause and consequence, and the limits the parser imposes -- `hlen` of zero, an all-zero hardware address, a reply or a non-client message type, a plain BOOTP request, more than four undecodable options, and an option whose value will not decode -- each with what it costs. (2) `ARCHITECTURE.md`: the front-end layer's first member exists, with what it serves and what it does not. This is a shape change, so it belongs there. The stale claim about protocol options was already corrected by this plan's commit, in the paragraph that lists what is deferred -- check it and do not correct it twice. (3) `AGENTS.md`: only conventions that changed -- a fourth crate, the namespace `root` for an interface in no namespace, and the rule that a wire behaviour without a provenance row is not shipped if it is not already there. Nothing else; every line there costs context on every task. (4) `docs/development.md`: the new crate in the layout, and that `make test` cannot bind privileged ports so the datapath's socket layer is proved in the lab. (5) Fold back into the master plan: phase 5's row, and the *Future work* entries this phase closes or rewrites -- the sweep-interval entry (now chosen, with the grace period named as what would decouple the two), the client-identifier entry (declined, with where it is now documented), the differential-rig entry (the lab was redeployed, with what it produced), and new entries for the deferred option table, the DECLINE exclusion, and the size of the DHCPv4 decoder's dependency subtree -- fifty-seven crates, most of them a DNS library the decoder needs for its domain-name options, which phase 6 wants anyway and which arrives a phase early rather than needlessly. Write each in full rather than naming it. The view-bound entry was already rewritten by this plan's commit, which is where it was found to name the wrong phase; read it rather than rewriting it. Commit subject: "Document the DHCPv4 front-end." |
 
 ## Risks and mitigations
 
@@ -780,11 +809,15 @@ cannot be deployed, which is why it is a back-brief gate rather
 than an assumption.
 
 **The namespace string is hard to change later.** Decision 8 picks
-`/` and an operator's attachments are keyed by it, so changing it
+`root` and an operator's attachments are keyed by it, so changing it
 after a deployment exists means a migration of rows a human typed.
 Mitigation: it is decided here rather than in phase 8, the
 collision argument is the reason rather than taste, and phase 8's
-own file inherits it as a given rather than a choice.
+own file inherits it as a given rather than a choice. This risk
+materialised inside the phase rather than after it -- the first
+choice was refused by the store and the second was made with the
+first one's reasoning in hand -- which is the cheapest time for it
+to have happened.
 
 **dhcproto publishes a release mid-phase.** Then the guard may be
 droppable and the floor in `Cargo.toml` is the question.
@@ -884,9 +917,11 @@ than ticking it.
 25. `cross_network_answers` is zero in the diagnostics after the
     lab run, read from the running daemon.
 26. Every new provenance row cites an RFC section or a named
-    observed-behaviour test, each new row is cited by at least one
-    case, and the rig fails a case citing a row that does not
-    exist.
+    observed-behaviour test. Each **observed** row is cited by at
+    least one case, and the rig fails a case citing a row that does
+    not exist. An RFC-cited row names the tests that assert it
+    instead, which is what the rows already in the file do and what
+    this item said wrongly until a row arrived to show it.
 27. `dhcpv4-discover-offer-dhclient` is `compared` rather than
     `pending`, the rig's subject registration and the case's
     status agree, and a deliberately wrong field in the subject
@@ -895,7 +930,7 @@ than ticking it.
     `grep -rn 'protocol options' ARCHITECTURE.md docs/` returns
     only accurate sentences.
 29. `docs/dhcpv4.md` exists and states the lease time's home, the
-    namespace `/`, the capability set, the sweeper's interval with
+    namespace `root`, the capability set, the sweeper's interval with
     what it chose, and the recorded-holder behaviour.
 30. The master plan's phase 5 row and every *Future work* entry
     this phase closes or rewrites are updated, and each new
@@ -964,7 +999,10 @@ the lease time goes on the network rather than on the address range,
 DECLINE gets the revoke-and-log answer with the exclusion written up
 as future work, and the namespace for an interface in no namespace
 is `/`. Nothing in the plan changed because of the answers, so the
-decisions stand as written rather than as amended.
+decisions stood as written rather than as amended -- but the
+namespace did not survive contact with the store, and the note on
+step 5d below records what replaced it and why the operator chose
+again rather than being told.
 
 **2026-11-26, AEDT. A step was added before any step ran, because
 the plan was wrong.** Checking 5a's brief against the tree -- which
@@ -1198,3 +1236,68 @@ definition of done gained the only test that can see a divergence:
 one that renders a value from a packet, configures a binding with the
 value an operator would type, and matches the packet against it. A
 test of the renderer alone would be asserting it against itself.
+
+**2026-11-27, AEDT. Step 5d: the decision layer, and the namespace
+that could not be.** Tests 284 to 313, of which 28 are the decision
+layer's and 23 use two networks holding the same address. The five
+that do not are the cases where no second network can leak: an
+unclaimed interface, a hardware address that is not six octets, a
+vendor class that is not text, an option the parser dropped, and the
+front-end's own attribution on a lease it wrote.
+
+**Decision 8 was unimplementable and the operator chose again.** The
+step tried to attach an interface under `/` and the store refused
+it. `attach_interface` runs `validate_name_part` on both halves, and
+that function refuses the separator because an attachment's identity
+reaches an event as the two halves joined by it -- with a comment
+making precisely the argument this plan made for choosing `/`, and
+drawing the opposite conclusion from it. Finding 7's premise was
+false and decision 8 rested on it. The step did the right thing: it
+documented the contradiction, used a declared placeholder, and left
+the choice alone rather than quietly picking one. The management
+session verified the refusal, put the three live options to the
+operator -- a word that can collide loudly, a dot that cannot
+collide but that URL normalisation would eat, or changing an
+identity format every event already carries -- and he chose `root`.
+Decision 8, finding 7, the risk entry, the done item, the help text
+5b had already shipped and both doc comments in the new crate are
+corrected. The spelling reaches one constant in this layer, which is
+what the step's placeholder comment was written to make true.
+
+**A second RFC-cited row, and the first that arrived the way the
+provenance record expected.** The step's first version treated a
+REQUEST with no server identifier as a NAK whenever the store had no
+live lease, with "it lapsed" and "there never was one here" as one
+case. RFC 2131 section 4.3.2 divides them: where the server has no
+record of the client it MUST remain silent, for the stated reason
+that two non-communicating servers have to coexist on one wire, and
+it is only where there *is* a record that disagrees that a NAK is
+right. The cost of getting that wrong is not pedantic -- two DHCP
+servers on one bridge is what a migration looks like, and a teneral
+that NAKed every other server's clients when they rebooted would
+break the network it was added to. The branch now turns on the
+fields the section names, which the parsed request already carried,
+and `dhcp-init-reboot-silence-without-a-record` is the row, with
+what counts as a record and the decision to emit no warning marked
+as teneral's own.
+
+That row also corrected a definition-of-done item of this plan's:
+it asked that every new provenance row be cited by a differential
+case, which is true of an observed row and not of an RFC-cited one.
+The two rows already in the file name the tests that assert them
+instead, and the item now says so.
+
+**An extra kept on its own argument, verified rather than taken.**
+The step added a check of a client's named address against the
+network's ranges and bindings before acquiring a lease, saying the
+store would otherwise hand out an address another client's binding
+reserves. That is true: `acquire_lease` checks that the network
+exists and that nobody holds a live lease, and nothing else. It is
+also right that the store is permissive there -- a consumer that
+chooses its own addresses may legitimately name one outside every
+range -- and a client on the wire must not be able to talk its way
+past a reservation, so the check belongs in the front-end. Also
+kept: the request gaining the user and vendor class options that
+decision 15 specifies and 5c did not carry, a dropped attribute
+being noted rather than fatal, and a release or a decline asking
+what the client holds rather than re-deriving its holder.

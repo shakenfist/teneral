@@ -33,7 +33,7 @@ below were all taken before any code existed, in a lab that was
 deliberately not kept: a measurement recorded only in a running
 lab is a measurement that disappears with it.
 
-All but one of the rows below are observed behaviour rather than
+All but three of the rows below are observed behaviour rather than
 an RFC citation, measured on 2026-11-21 in the Linux-bridge lab whose
 write-up is `docs/linux-bridge-lab.md` in the private
 `homelab-deployments-lfs` repository -- dnsmasq 2.91 on Debian 13,
@@ -43,19 +43,23 @@ that holds the command and its verbatim output. None of these rows
 is a reading of anybody's source, and none of them should be
 restated as "what dnsmasq does" without the measurement behind it.
 
-The exceptions are `selector-client-id-over-chaddr` and
-`lease-address-selection-order`, which are this file's RFC-cited
-rows and both arrived with the binding store rather than with a
-front-end. That order was expected: the sentence here used to say
+The exceptions are this file's RFC-cited rows.
+`selector-client-id-over-chaddr` and
+`lease-address-selection-order` arrived with the binding store
+rather than with a front-end. That order was expected: the sentence
+here used to say
 RFC rows would arrive with the first front-end implementing a
 specified algorithm, and it was wrong because the store's lookup is
 where client identification is decided, and the store's allocation
 is where an address is chosen, several phases before anything
 parses a packet. An RFC row is owed by whichever layer implements
 the specified rule, which is not always the layer that puts bytes
-on a wire.
+on a wire. `dhcp-init-reboot-silence-without-a-record` is the
+first row that arrived the way that sentence expected, from the
+DHCPv4 front-end's decision layer, and it is a MUST rather than the
+SHOULD the other two sit on.
 
-Both of those rows cite a rule the RFC specifies and stop there.
+Each of those rows cites a rule the RFC specifies and stops there.
 Where a specification settles part of a question and leaves the
 rest open, the row says what it covers and the open part is
 documented as this project's own in `api-design.md` rather than
@@ -109,3 +113,4 @@ same commit as the cases.
 | `netns-held-fd-keeps-namespace` | **A held file descriptor keeps a deleted network namespace alive, with its interfaces**, after `ip netns del` has removed the name and the mount and the descriptor no longer resolves to a path. | Observed, Linux 6.12 / CPython 3.13 | `linux-bridge-lab.md`, experiment 5 -> *8. A held descriptor keeps a deleted namespace alive* |
 | `selector-client-id-over-chaddr` | **A client identifier outranks the hardware address when identifying a client.** Where a client supplies a client identifier, a server MUST use that identifier to identify the client; the contents of `chaddr` are the MUST-use fallback only where no client identifier was supplied. This fixes the top two places of teneral's selector precedence, whose remaining steps are unspecified and are documented as this project's own in `api-design.md` rather than given a row here. | RFC 2131 section 4.2 | RFC 2131 s4.2; the order is asserted by `the_precedence_is_the_published_one` and `the_highest_precedence_selector_a_client_presents_is_the_one_that_matches` |
 | `lease-address-selection-order` | **The order a server considers addresses in when a client has none**: the address the client already holds under its current lease, ELSE the address it held under a now-expired or released lease if that address is in the pool and not already allocated, ELSE the address it asked for in the Requested IP Address option if that address is valid and not already allocated, ELSE a new address from the pool. The steps are tried in turn and the keyword is SHOULD, not MUST. Two things are *not* from this source and are documented as teneral's own in `api-design.md`: which address the last step picks, the section saying nothing about it and teneral choosing the lowest free one; and the reading of "valid" as falling inside one of the network's configured ranges. | RFC 2131 section 4.3.1 | RFC 2131 s4.3.1; the four steps are asserted by `the_address_a_client_already_holds_is_the_first_thing_considered`, `the_address_a_client_held_until_it_lapsed_comes_back_before_the_pool_does`, `the_address_a_client_asks_for_is_given_only_if_nothing_holds_it` and `the_pool_offers_the_lowest_free_address_and_each_network_has_its_own` |
+| `dhcp-init-reboot-silence-without-a-record` | **A server with no record of a client MUST NOT answer that client's REQUEST sent while it is checking a remembered address.** Such a request names no server identifier, carries a zero `ciaddr` and puts the address the client remembers in the Requested IP Address option. Where the server has no record of the client it MUST remain silent and MAY warn the administrator, which the section gives its own reason for: the peaceful coexistence of non-communicating servers on one wire. Where the server does have a record and the client's notion of its address is not correct, it SHOULD reply with a DHCPNAK -- so the division is between having no record of the client and having one that disagrees with it. Two things are *not* from this source and are teneral's own: what counts as a record, which teneral reads as a lease the client holds in that network live or lapsed or a binding configured for it there; and the choice to emit no warning, the section making it a MAY. | RFC 2131 section 4.3.2 | RFC 2131 s4.3.2; the division is asserted by `a_rebooting_client_no_network_has_a_record_of_is_not_answered`, `a_rebooting_client_with_a_lapsed_lease_is_refused_there_and_not_answered_elsewhere`, `a_rebooting_client_with_a_live_lease_elsewhere_is_not_answered_here` and `a_binding_is_a_record_of_a_client_that_has_never_held_an_address` |

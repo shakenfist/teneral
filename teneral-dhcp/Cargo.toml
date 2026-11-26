@@ -26,16 +26,17 @@ publish = false
 workspace = true
 
 [dependencies]
-# The binding store belongs here and is not here yet. `wire` is bytes
-# in both directions with no store, no socket and no clock, which is
-# what makes every question about a malformed packet answerable in a
-# unit test, and cargo warns about a dependency nothing uses. The
-# decision layer is what adds it, as `teneral-store = { workspace =
-# true }`, with its path and its version requirement coming from the
-# workspace manifest. What will *not* be added is `teneral-api`: a
-# front-end is a consumer of the store and not of the control plane,
-# and a dependency the other way round would put the layers in a
-# cycle.
+# The binding store: the source of truth for every answer this crate
+# gives, and the only thing the decision layer reads or writes. Its
+# path and the reason it carries no version requirement are in the
+# workspace manifest.
+#
+# What is deliberately *not* here is `teneral-api`. A front-end is a
+# consumer of the store and not of the control plane, so a dependency
+# the other way round would put the layers in a cycle and make the
+# layer diagram a lie. `cargo tree -p teneral-dhcp` showing no
+# `teneral-api` is what checks it.
+teneral-store = { workspace = true }
 
 # The DHCPv4 message decoder.
 #
@@ -66,3 +67,13 @@ workspace = true
 # dependency later does, so a release is a reason to revisit the floor
 # here rather than to remove the guard.
 dhcproto = { version = "0.15.0", default-features = false }
+
+[dev-dependencies]
+# The runtime, to drive the tests and only the tests. The store's
+# interface is asynchronous, and a test of the decision layer asks a
+# real store real questions, so it needs somewhere to await them: `rt`
+# is the single-threaded runtime and `macros` is `#[tokio::test]`. The
+# multi-threaded flavour is not needed to await a channel, and the
+# crate itself picks no runtime at all -- that choice belongs to the
+# binary.
+tokio = { version = "1.54.1", default-features = false, features = ["rt", "macros"] }

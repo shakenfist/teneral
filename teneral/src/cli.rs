@@ -200,8 +200,7 @@ pub enum ClientCommand {
         connection: ClientArgs,
         network: String,
         /// The namespace the interface is in. An interface in no
-        /// namespace at all is attached under `/`, which is a name no
-        /// namespace can have.
+        /// namespace at all is attached under `root`.
         namespace: String,
         ifname: String,
     },

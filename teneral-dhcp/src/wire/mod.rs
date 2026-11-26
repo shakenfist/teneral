@@ -68,8 +68,14 @@ mod request;
 mod behaviour;
 #[cfg(test)]
 mod malformed;
+// Reachable from the decision layer's tests as well as from this
+// module's own. A datagram assembled field by field is what lets a
+// test above this layer say "this client, presenting this, on this
+// interface" without hand-building a BOOTP header, and a second
+// builder beside this one would be a second thing to keep agreeing
+// with the parser.
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 pub use answer::{Answer, AnswerKind, LeaseSeconds, ServerFacts};
 pub use error::{Error, Result};

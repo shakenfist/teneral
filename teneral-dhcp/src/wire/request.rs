@@ -124,6 +124,19 @@ pub struct Request {
     /// Option 61: the identifier the client chose for itself, which
     /// outranks its hardware address when identifying it.
     pub client_identifier: Option<Vec<u8>>,
+    /// Option 77: the class the client's own operator configured it
+    /// with, naming a role that many clients may share.
+    ///
+    /// Bytes rather than text, as the option is on the wire. There is
+    /// no canonical written form for it, so deciding what an operator
+    /// would have typed is a choice the layer above makes, and this
+    /// field is what arrived rather than a reading of it.
+    pub user_class: Option<Vec<u8>>,
+    /// Option 60: the class the client's software reports, naming a
+    /// product or a firmware family.
+    ///
+    /// Bytes, for the reason above.
+    pub vendor_class: Option<Vec<u8>>,
     /// Option 12: the name the client asked to be known by.
     pub hostname: Option<String>,
     /// The options the datagram framed and the decoder would not read.
@@ -244,6 +257,14 @@ pub fn parse(datagram: &[u8]) -> Result<Request> {
         },
         client_identifier: match message.opts().get(OptionCode::ClientIdentifier) {
             Some(DhcpOption::ClientIdentifier(identifier)) => Some(identifier.clone()),
+            _ => None,
+        },
+        user_class: match message.opts().get(OptionCode::UserClass) {
+            Some(DhcpOption::UserClass(class)) => Some(class.clone()),
+            _ => None,
+        },
+        vendor_class: match message.opts().get(OptionCode::ClassIdentifier) {
+            Some(DhcpOption::ClassIdentifier(class)) => Some(class.clone()),
             _ => None,
         },
         hostname: match message.opts().get(OptionCode::Hostname) {
