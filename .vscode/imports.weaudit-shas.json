@@ -1,0 +1,137 @@
+{
+  "version": 1,
+  "files": {
+    ".github/workflows/codeql-analysis.yml": {
+      "sha": "f9e0c8a01e5341267947151fefab721c5a7a3842",
+      "date": "2026-11-16",
+      "imported": {
+        "repo": "shakenfist/development",
+        "reviewer": "mikal",
+        "path": ".github/workflows/codeql-analysis.yml",
+        "commit": "28ebac12ef1aa4d9a05d6400e073602aa8f4ecdf",
+        "verified": true
+      }
+    },
+    ".github/workflows/export-repo-config.yml": {
+      "sha": "b9b3936053b8685ef0ae47f656b2f35aa62ba637",
+      "date": "2026-09-27",
+      "imported": {
+        "repo": "shakenfist/development",
+        "reviewer": "mikal",
+        "path": ".github/workflows/export-repo-config.yml",
+        "commit": "149c6f72446e3fa4fc53e7eaa3a6e77a84ef3994",
+        "verified": true
+      }
+    },
+    ".github/workflows/pr-re-review.yml": {
+      "sha": "0f38d90143c93506f8c823ca6baf6ed2c7eef132",
+      "date": "2026-11-16",
+      "imported": {
+        "repo": "shakenfist/development",
+        "reviewer": "mikal",
+        "path": ".github/workflows/pr-re-review.yml",
+        "commit": "28ebac12ef1aa4d9a05d6400e073602aa8f4ecdf",
+        "verified": true
+      }
+    },
+    ".github/workflows/pr-retest.yml": {
+      "sha": "189610eb241bbecbf11c6459f874c97ff80c0359",
+      "date": "2026-10-20",
+      "imported": {
+        "repo": "shakenfist/development",
+        "reviewer": "mikal",
+        "path": ".github/workflows/pr-retest.yml",
+        "commit": "97f5904b313dc403c0f287c78f0d99b65e584b36",
+        "verified": true
+      }
+    },
+    ".github/workflows/prune-reviews.yml": {
+      "sha": "0c0cfe362b24e6bc67ccf1ddd09dacc722a0524f",
+      "date": "2026-11-01",
+      "imported": {
+        "repo": "shakenfist/development",
+        "reviewer": "mikal",
+        "path": ".github/workflows/prune-reviews.yml",
+        "commit": "d8055a5e16965c0780483c737cca94caeabe81d8",
+        "verified": true
+      }
+    },
+    ".github/workflows/renovate.yml": {
+      "sha": "d545d6072a11ee5ecdcaf01cb23aba1879b241d4",
+      "date": "2026-11-16",
+      "imported": {
+        "repo": "shakenfist/development",
+        "reviewer": "mikal",
+        "path": ".github/workflows/renovate.yml",
+        "commit": "28ebac12ef1aa4d9a05d6400e073602aa8f4ecdf",
+        "verified": true
+      }
+    },
+    "renovate.json": {
+      "sha": "34bc3ba88cc9475eb7bc7f9ca99d05d0be6a828b",
+      "date": "2026-11-17",
+      "imported": {
+        "repo": "shakenfist/development",
+        "reviewer": "mikal",
+        "path": "templates/renovate/renovate.json",
+        "commit": "eb964fc3f69b728152be391bf46af7a39dbbd688",
+        "verified": true
+      }
+    },
+    "tools/ci-prune-reviews.sh": {
+      "sha": "3c00a9489c0b571bfdd0d1f1170344cfc33b44ff",
+      "date": "2026-11-01",
+      "imported": {
+        "repo": "shakenfist/development",
+        "reviewer": "mikal",
+        "path": "templates/review-tracking/ci-prune-reviews.sh",
+        "commit": "d8055a5e16965c0780483c737cca94caeabe81d8",
+        "verified": true
+      }
+    },
+    "tools/propose-release.sh": {
+      "sha": "17276962a0f92590fafe059cac68e5d44026f388",
+      "date": "2026-10-20",
+      "imported": {
+        "repo": "shakenfist/development",
+        "reviewer": "mikal",
+        "path": "templates/release-automation-rust/propose-release.sh",
+        "commit": "0f000d84b07093fe65093671e32862c03e436990",
+        "verified": true
+      }
+    },
+    "tools/review-tracking.sh": {
+      "sha": "fcadd30b9cea7aec8c747c7f43ef1864bc01bbef",
+      "date": "2026-10-28",
+      "imported": {
+        "repo": "shakenfist/development",
+        "reviewer": "mikal",
+        "path": "templates/review-tracking/review-tracking.sh",
+        "commit": "94b8a1385ce1562efc7deb40a2b8710270a9985b",
+        "verified": true
+      }
+    },
+    "tools/sign-release-tag.sh": {
+      "sha": "cc23ebc95fbcdeec23224323fe9bd9c36a85e585",
+      "date": "2026-10-30",
+      "imported": {
+        "repo": "shakenfist/development",
+        "reviewer": "mikal",
+        "path": "templates/release-automation-rust/sign-release-tag.sh",
+        "commit": "a2837f2dc7cf5fd792fca58e98c40e70a4d126bc",
+        "verified": true
+      }
+    },
+    "tools/tag-release.sh": {
+      "sha": "16a49ce3cf6bfa3420093406c981401eaab19c90",
+      "date": "2026-10-22",
+      "imported": {
+        "repo": "shakenfist/development",
+        "reviewer": "mikal",
+        "path": "templates/release-automation-rust/tag-release.sh",
+        "commit": "2f456d17e82894f4a015057e8973237080d1131e",
+        "verified": true
+      }
+    }
+  }
+}
