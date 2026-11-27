@@ -56,6 +56,14 @@ and each of them has already been decided:
   networks holding the same address.** This is the project's
   central correctness property, and one network proves nothing
   about it.
+- **No test binds a listening socket in a test process that also
+  starts child processes.** Tests are threads of one process and
+  `Command::spawn` forks and execs inside one call, so for the
+  moment between the two a child holds a copy of every descriptor
+  that was open: a listener bound and dropped is still answering, in
+  that child, until it execs. `stale_socket` in
+  `teneral/tests/daemon.rs` makes a stale socket by killing a real
+  daemon instead, and says why.
 - **The store's interface is asynchronous, and the store owns the
   threads its blocking happens on.** A caller that reaches for
   `tokio::task::spawn_blocking` around a store call has misread the

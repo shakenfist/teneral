@@ -5,13 +5,17 @@
 //! outcome, and everything that waits does so with a bound. A daemon
 //! left running after a failed assertion would hold its socket and its
 //! store for the rest of the machine's uptime.
+//!
+//! Nothing here binds a listening socket of its own, and
+//! [`stale_socket`] says why not: these tests are threads of one
+//! process, and a descriptor one of them holds is a descriptor another
+//! one's child can be holding a moment later.
 
 use std::fs;
 use std::io::Read;
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
@@ -24,19 +28,6 @@ const BINARY: &str = env!("CARGO_BIN_EXE_teneral");
 const BOUND: Duration = Duration::from_secs(20);
 
 static NEXT: AtomicU32 = AtomicU32::new(0);
-
-/// Held while a descriptor is being created or while a child is being
-/// started. A child inherits every descriptor open in the process for
-/// the moment between `fork` and `exec`, so a socket one test has
-/// just closed can be kept alive by another test's child, and "nothing
-/// is listening" is then briefly untrue.
-static SPAWNING: Mutex<()> = Mutex::new(());
-
-fn spawning() -> std::sync::MutexGuard<'static, ()> {
-    SPAWNING
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
 
 /// A directory one test owns, removed when it ends.
 struct Directory(PathBuf);
@@ -90,7 +81,6 @@ impl Daemon {
         extra: &[&str],
     ) -> Self {
         let errors = directory.0.join(format!("{label}.stderr"));
-        let _spawning = spawning();
         let child = Command::new(BINARY)
             .arg("serve")
             .arg("--store")
@@ -151,6 +141,13 @@ impl Daemon {
         }
     }
 
+    /// Kill it outright and reap it, which is how a daemon dies when
+    /// it is given no chance to clean up after itself.
+    fn kill(&mut self) {
+        self.child.kill().expect("the daemon to be killable");
+        self.child.wait().expect("the daemon to be reapable");
+    }
+
     /// Ask it to stop the way systemd does, and wait for it.
     fn terminate(&mut self) -> ExitStatus {
         let status = Command::new("sh")
@@ -184,10 +181,42 @@ fn wait_until_answering(socket: &Path) {
     }
 }
 
+/// Leave behind what a killed daemon leaves: a socket file at
+/// `directory`'s socket path with nothing listening on it.
+///
+/// Made by killing a daemon rather than by binding a `UnixListener`
+/// here and dropping it, which is the shorter way and is a race. These
+/// tests are threads of one process, and `Command::spawn` forks and
+/// execs inside a single call while the other threads run on: between
+/// that fork and that exec the child holds a copy of every descriptor
+/// this process had open, so a listener bound and dropped in the
+/// microseconds either side of somebody else's spawn is still
+/// listening, in their child, until it execs. `SOCK_CLOEXEC` does not
+/// help, because it closes the descriptor *at* the exec, which is the
+/// end of the window rather than the start of it. Observed as this
+/// test's own precondition failing about twice in forty runs, with
+/// `/proc/net/unix` naming the holder as a child that had not yet
+/// replaced its image.
+///
+/// A socket this process never held cannot be copied out of it, so the
+/// file is left by a daemon that is sent SIGKILL once it is serving. It
+/// is given a store of its own, so that what the next daemon opens is
+/// the socket question and not a half-written database as well.
+fn stale_socket(directory: &Directory) {
+    let mut daemon = Daemon::spawn(
+        directory,
+        "killed",
+        &directory.0.join("killed.sqlite"),
+        &directory.socket(),
+    );
+    daemon.wait_until_serving();
+    wait_until_answering(&directory.socket());
+    daemon.kill();
+}
+
 /// Run the binary to completion with `arguments`, returning its exit
 /// status and everything it printed.
 fn run(arguments: &[&str]) -> (ExitStatus, String, String) {
-    let spawned = spawning();
     let mut child = Command::new(BINARY)
         .args(arguments)
         .stdin(Stdio::null())
@@ -195,7 +224,6 @@ fn run(arguments: &[&str]) -> (ExitStatus, String, String) {
         .stderr(Stdio::piped())
         .spawn()
         .expect("the binary to start");
-    drop(spawned);
 
     let mut stdout = child.stdout.take().expect("a piped stdout");
     let mut stderr = child.stderr.take().expect("a piped stderr");
@@ -295,8 +323,7 @@ fn a_live_daemon_stops_a_second_starting_on_its_socket() {
 fn a_stale_socket_file_does_not_stop_a_daemon_starting() {
     let directory = Directory::new("stale");
 
-    // What a killed daemon leaves: a socket file nothing is behind.
-    drop(UnixListener::bind(directory.socket()).expect("a socket to leave behind"));
+    stale_socket(&directory);
     assert!(directory.socket().exists());
     let probe = UnixStream::connect(directory.socket());
     assert!(

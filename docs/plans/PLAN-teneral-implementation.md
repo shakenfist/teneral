@@ -1380,20 +1380,6 @@ chosen to defer to here, so that we do not forget them.
   `teneral-store` that two other crates adopt, which is a change to
   a crate whose feature list the build deliberately polices, so it was
   not done in a step whose subject was a timer.
-* **A flake in phase 4's daemon suite stands unexplained.**
-  `a_stale_socket_file_does_not_stop_a_daemon_starting` fails on its
-  own precondition roughly twice in twenty runs: it binds a
-  `UnixListener`, drops it, and asserts that connecting to the path
-  fails, and sometimes the connection succeeds. Closing a listener
-  and connecting to its path twenty thousand times on one host was
-  refused every time, so something was holding the path, and the
-  standard library's `SOCK_CLOEXEC` should have stopped a child
-  inheriting it. Nothing is claimed about why. Start by dumping
-  `/proc/net/unix` for that path at the moment the probe succeeds,
-  which names the holder and is the one piece of evidence nobody has.
-  The daemon is not shown to be at fault: the two tests that assert
-  the behaviour this one sets up for passed in every run.
-
 * **An offer's lease term is the network's full one, and a shorter
   one would need a measurement first.** A DISCOVER writes a lease for
   the whole lease time before the OFFER is sent, so an unauthenticated

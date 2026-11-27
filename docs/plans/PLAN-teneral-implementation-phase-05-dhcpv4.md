@@ -1144,6 +1144,8 @@ by dumping `/proc/net/unix` for that path at the moment the probe
 succeeds, which names the holder and its state and is the one piece
 of evidence nobody has.
 
+Resolved on 2026-11-27, in the last entry of these notes.
+
 **2026-11-26, AEDT. Step 5b: the client reaches the whole schema,
 not just the writes.** Tests 234 to 239. The step was widened before
 it ran, by the same check that created it: the client reached ten of
@@ -1701,3 +1703,58 @@ either the head of a list a successful `getifaddrs` wrote or a
 previous entry's `ifa_next`, both valid while the owning value lives,
 and the null check precedes the dereference. A list walk through FFI
 cannot be written in a way that proves this to the query.
+
+**2026-11-27, AEDT. The phase-4 flake, chased to its mechanism and
+fixed.** `a_stale_socket_file_does_not_stop_a_daemon_starting` failed
+27 times in 150 runs of its suite on this host, so the earlier reading
+of twice in twenty was if anything kind. The step the first
+investigation was missing is that `SOCK_CLOEXEC` closes a descriptor
+*at* the exec, which is the end of the window and not its start.
+`Command::spawn` forks and execs inside one call while the other
+tests' threads run on, so a child holds a copy of every descriptor
+this process had open from the fork until that exec: a listener bound
+and dropped in those microseconds is still listening, in somebody
+else's child, until it replaces its image. The suite's `SPAWNING`
+mutex was written for exactly this hazard and describes it correctly,
+but it was taken by the two fork sites and not by the bind, so it
+serialised the forks against each other and never against the thing
+it existed to protect.
+
+Demonstrated rather than reasoned about. A short program binds a
+listener, lets a second thread spawn a child whose `pre_exec` sleeps,
+closes the listener from the first thread, and connects: the connect
+succeeds while that child is short of its exec and is refused once it
+reaches it. `/proc/net/unix` with a walk of `/proc/*/fd` names the
+holder as that child, still carrying its parent's command line
+because it has not yet replaced its image, which is the evidence the
+entry above asked for.
+
+The fix removes the contradiction rather than locking around it. The
+test process no longer holds a listening socket on a path it then
+claims is dead: `stale_socket` starts a daemon, waits until it is
+serving, and sends it SIGKILL, which is how a stale socket comes to
+exist in production too, and a socket this process never held cannot
+be copied out of it. The mutex went with it, because with no
+descriptor left to protect, a lock taken on one side only reads as
+protection -- which is how this was missed the first time. Measured
+interleaved on one host: 0 failures in 150 runs after the change,
+against 27 in 150 before it.
+
+Five mutants, each on a copy of the file and under `timeout`; four are
+killed by the test that names them, and the fifth is reported as
+surviving. Leaving the stale socket file in place instead of removing
+it changes nothing any test can see, because `bind_at_mode` binds at a
+neighbouring name and renames into place, and a rename replaces an
+existing file. So the daemon's explicit removal of a stale socket is
+redundant rather than load-bearing, and the API suite's
+`a_socket_file_with_nothing_behind_it_is_removed_rather_than_inherited`
+cannot tell removal from replacement. Nothing was changed for it: the
+removal is cheap, it names what it is doing if it fails, and the
+guarantee is the rename's either way.
+
+`teneral-api`'s stale-socket test binds and drops a listener the same
+way, and is safe only because nothing in that crate's tests starts a
+child process. That is now written beside it. The rule the daemon
+suite follows is not available there -- its daemon is an in-process
+listener, so the test process must hold one -- and the invariant to
+keep is instead the absence of forks.
