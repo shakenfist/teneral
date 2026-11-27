@@ -271,7 +271,9 @@ async fn answer_on(
             // as a server that listens and says nothing.
             Err(failure) => {
                 log(&format!(
-                    "reading a datagram on {}: {failure}; DHCPv4 can no longer be served on it,                      and this daemon is stopping rather than holding the port without answering",
+                    "reading a datagram on {}: {failure}; DHCPv4 can no longer be served \
+                     on it, and this daemon is stopping rather than holding the port \
+                     without answering",
                     receiver.ifname()
                 ));
 
@@ -293,12 +295,44 @@ mod tests {
     use tokio::sync::watch;
 
     use super::{
-        Cost, FAILURES_BEFORE_THE_SOCKET_IS_BLAMED, ReceiveFailure, after, wait_for_failure,
+        Answerable, Cost, FAILURES_BEFORE_THE_SOCKET_IS_BLAMED, ReceiveFailure, after, answerable,
+        wait_for_failure,
     };
 
     /// Long enough to be sure a future that was going to resolve has,
     /// and short enough that four of them are not felt.
     const A_MOMENT: Duration = Duration::from_millis(50);
+
+    #[test]
+    fn a_datagram_from_the_interface_this_socket_serves_is_answered_from_it() {
+        assert_eq!(
+            answerable(Some("gw-n1"), "gw-n1"),
+            Answerable::From("gw-n1")
+        );
+    }
+
+    #[test]
+    fn a_datagram_that_arrived_on_another_interface_is_dropped_and_names_it() {
+        // Two networks, each with an interface, in one daemon: the
+        // whole point of asking the kernel where a datagram came from
+        // is that answering this one from gw-n1's network is the
+        // cross-network answer this project exists to prevent. The
+        // name travels with the refusal so that the line logged about
+        // it can say which interface it was.
+        assert_eq!(
+            answerable(Some("gw-n2"), "gw-n1"),
+            Answerable::ArrivedElsewhere("gw-n2")
+        );
+    }
+
+    #[test]
+    fn a_datagram_whose_interface_has_no_name_is_dropped_rather_than_assumed() {
+        // The socket serves exactly one interface, so an index that
+        // cannot be named is probably that interface -- and probably
+        // is not an answer. Nothing confirmed where this datagram
+        // arrived, so nothing may be derived from where it did not.
+        assert_eq!(answerable(None, "gw-n1"), Answerable::ArrivedNowhereNamed);
+    }
 
     #[test]
     fn a_datagram_the_kernel_could_not_describe_costs_only_that_datagram() {
@@ -442,6 +476,46 @@ pub async fn wait_for_failure(watcher: Option<watch::Receiver<bool>>) {
     }
 }
 
+/// Whether a datagram may be answered, and from which interface.
+///
+/// Carries the name rather than answering yes, so that a caller cannot
+/// go on to answer from a name this did not approve: the name a reply
+/// is derived from is the name the network is resolved from, and the
+/// one failure this whole project is shaped around is one network's
+/// answer leaving by another's interface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Answerable<'a> {
+    /// Yes, from the named interface.
+    From(&'a str),
+    /// No: the interface index the kernel reported has no name here,
+    /// so where the datagram arrived cannot be established at all.
+    ArrivedNowhereNamed,
+    /// No: it arrived on an interface this socket does not serve.
+    ArrivedElsewhere(&'a str),
+}
+
+/// Judge one datagram's arrival against the interface being served.
+///
+/// A separate function for the same reason [`after`] is one: the loop
+/// around it owns a socket the build container may not open, so a
+/// branch left inside it is a branch no test can reach. This is the
+/// daemon's own check that a request is answered from the network that
+/// claimed the interface it actually arrived on, and it is worth more
+/// than its two comparisons.
+///
+/// An index with no name is refused rather than assumed. The shortcut
+/// is tempting -- this socket serves exactly one interface, so an
+/// unnameable index is *probably* that one -- and it is the same
+/// mistake in a different costume: answering from an interface nothing
+/// confirmed the datagram arrived on.
+fn answerable<'a>(arrived_on: Option<&'a str>, served: &str) -> Answerable<'a> {
+    match arrived_on {
+        None => Answerable::ArrivedNowhereNamed,
+        Some(name) if name == served => Answerable::From(name),
+        Some(name) => Answerable::ArrivedElsewhere(name),
+    }
+}
+
 /// Answer one datagram, or say why it was not answered.
 async fn answer(receiver: &Receiver, decider: &Decider<Sender>, ifindex: u32, datagram: &[u8]) {
     // The name the kernel has for the interface the datagram arrived
@@ -449,25 +523,29 @@ async fn answer(receiver: &Receiver, decider: &Decider<Sender>, ifindex: u32, da
     // agree, the socket serving one interface, and asking is what
     // makes the network a request is answered from follow the kernel's
     // own account of where it came from.
-    let arrived_on = match receiver.name_of(ifindex) {
-        Ok(ifname) => ifname,
-        Err(error) => {
+    let named = receiver.name_of(ifindex);
+    if let Err(error) = &named {
+        log(&format!(
+            "a datagram arrived on interface {ifindex}, which has no name: {error}"
+        ));
+    }
+    let named = named.ok();
+
+    let arrived_on = match answerable(named.as_deref(), receiver.ifname()) {
+        Answerable::From(name) => name,
+        // Already logged above, where the error that explains it was
+        // in hand.
+        Answerable::ArrivedNowhereNamed => return,
+        Answerable::ArrivedElsewhere(name) => {
             log(&format!(
-                "a datagram arrived on interface {ifindex}, which has no name: {error}"
+                "a datagram that arrived on {name} reached the socket serving {}, and was \
+                 dropped rather than answered from the wrong network",
+                receiver.ifname()
             ));
 
             return;
         }
     };
-    if arrived_on != receiver.ifname() {
-        log(&format!(
-            "a datagram that arrived on {arrived_on} reached the socket serving {}, and was \
-             dropped rather than answered from the wrong network",
-            receiver.ifname()
-        ));
-
-        return;
-    }
 
     let facts = match receiver.facts() {
         Ok(facts) => facts,
@@ -493,7 +571,7 @@ async fn answer(receiver: &Receiver, decider: &Decider<Sender>, ifindex: u32, da
 
     let arrival = Arrival {
         namespace: datapath::UNNAMESPACED,
-        ifname: &arrived_on,
+        ifname: arrived_on,
         server: facts,
     };
 

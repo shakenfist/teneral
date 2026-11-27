@@ -464,6 +464,33 @@ fn a_lease_time_no_option_can_carry_is_refused() {
 }
 
 #[test]
+fn a_lease_too_short_to_derive_the_two_times_from_is_refused() {
+    // A different refusal from the one above, because the option
+    // carries one second perfectly well: what cannot be carried is the
+    // answer. Half of one second and seven eighths of it are both
+    // zero, so the client would be told to start renewing at once and
+    // given no interval to do it in.
+    assert_eq!(
+        LeaseSeconds::new(1),
+        Err(Error::LeaseTimeTooShort {
+            seconds: 1,
+            shortest: 2
+        })
+    );
+
+    // Two is the shortest that works, and it works because both
+    // derived times come out non-zero -- which is what makes two the
+    // bound rather than a number somebody liked.
+    let shortest = LeaseSeconds::new(2).expect("two seconds is a lease a client can act on");
+    assert_eq!(shortest.seconds(), 2);
+    assert!(shortest.renewal() > 0, "half of the shortest lease");
+    assert!(
+        shortest.rebinding() > 0,
+        "seven eighths of the shortest lease"
+    );
+}
+
+#[test]
 fn a_message_type_is_the_one_the_client_sent() {
     let kinds = [
         (DISCOVER, RequestKind::Discover),

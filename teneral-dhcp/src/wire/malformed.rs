@@ -380,6 +380,69 @@ fn an_option_code_the_decoder_has_no_type_for_is_not_treated_as_unreadable() {
 }
 
 #[test]
+fn the_option_overload_code_is_reported_by_the_decoder_rather_than_consumed() {
+    // The walk identifies a dropped option as the first framed code
+    // missing from the decoded options, which is sound for a code the
+    // decoder refuses and unsound for one it consumes without
+    // reporting. Option 52 is the candidate a reader would worry
+    // about: it says the options continue in `sname` and `file`, so a
+    // decoder might read it and surface nothing. dhcproto 0.15 gives
+    // it a type and keys it like any other, which this pins -- because
+    // if a later version consumed it instead, this walk would read it
+    // as undecodable, strip it, and silently lose every option after
+    // it in the datagram, the requested address and the client
+    // identifier among them. That is the precise failure the walk
+    // exists to prevent, so it is checked rather than reasoned about.
+    let mut datagram = Datagram::discover();
+    datagram.options = options(&[
+        option(53, &[1]),
+        option(52, &[3]),
+        option(50, &[10, 0, 0, 128]),
+        option(61, &[0x01, 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc]),
+    ]);
+
+    let request = parse(&datagram.bytes()).expect("option overload is not a refusal");
+
+    assert_eq!(request.not_understood, vec![]);
+    assert_eq!(
+        request.requested_address,
+        Some(Ipv4Addr::new(10, 0, 0, 128))
+    );
+    assert_eq!(
+        request.client_identifier,
+        Some(vec![0x01, 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc])
+    );
+}
+
+#[test]
+fn padding_between_options_is_not_read_as_an_option_that_would_not_decode() {
+    // The other half of the same soundness argument. The decoder does
+    // consume two codes without reporting them -- the pad and the end
+    // -- and the walk is sound because it records neither. A pad
+    // recorded as a framed option would come back as code 0 "not
+    // understood", which is a false note about the datagram and spends
+    // one of the four drops the cap allows on a byte that means
+    // nothing.
+    let mut datagram = Datagram::discover();
+    let mut area = option(53, &[1]);
+    area.push(0);
+    area.extend_from_slice(&option(61, &[0x01, 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc]));
+    area.push(0);
+    area.push(0);
+    area.push(255);
+    datagram.options = area;
+
+    let request = parse(&datagram.bytes()).expect("padding is not a refusal");
+
+    assert_eq!(request.not_understood, vec![]);
+    assert_eq!(request.kind, RequestKind::Discover);
+    assert_eq!(
+        request.client_identifier,
+        Some(vec![0x01, 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc])
+    );
+}
+
+#[test]
 fn a_message_type_whose_value_will_not_decode_is_still_a_refusal() {
     // The other side of the division. An option teneral acts on is
     // asked for by name, so one that was dropped is one that is

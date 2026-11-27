@@ -34,6 +34,18 @@ repos:
         pass_filenames: false
         files: ^(.*/)?(Cargo\.toml|Cargo\.lock|deny\.toml)$
 
+      # The inside of a string literal, which nothing else in this
+      # suite reads: rustfmt cannot reflow one, clippy has no opinion
+      # about its contents, and a test asserting a message `contains`
+      # a value passes straight over a gap in the middle of it. Pure
+      # text, so it needs no container and is gated on `.rs` only to
+      # keep it off everything else.
+      - id: wrapped-strings
+        name: string literals wrapped without a continuation
+        entry: ./scripts/check-wrapped-strings.sh
+        language: script
+        files: \.rs$
+
   # GitHub Actions workflow linter. The config declares the self-hosted
   # runner labels these workflows use, so a label that does not exist
   # on the fleet fails here rather than leaving a job queued for a

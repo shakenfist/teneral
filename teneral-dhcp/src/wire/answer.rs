@@ -174,18 +174,34 @@ impl ServerFacts {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LeaseSeconds(u32);
 
+/// The shortest lease the two derived times can be derived from.
+///
+/// Below this, half the lease and seven-eighths of it are both zero,
+/// which tells a client to renew immediately and gives it no interval
+/// to do it in. The bound is here as well as in the store because this
+/// is the layer that does the deriving: the store refuses an operator
+/// who types one, and this refuses a row that reached the column some
+/// other way, which is the only way a value this short can arrive.
+const SHORTEST_DERIVABLE_LEASE: u32 = 2;
+
 impl LeaseSeconds {
     /// The lease time a network is configured with.
     ///
-    /// Zero and below are refused along with anything the option
-    /// cannot carry. A lease of no seconds is not a shorter lease, it
-    /// is an answer no client can use, and the store's own constraint
-    /// already says a lease time is positive -- so a value arriving
-    /// here outside the range means something between the two has
-    /// gone wrong and should be visible rather than rounded.
+    /// Three values are refused, and all three are answers no client
+    /// can use rather than shorter leases: zero, anything the option's
+    /// 32 bits cannot carry, and anything below
+    /// [`SHORTEST_DERIVABLE_LEASE`]. The store refuses all three too,
+    /// and that is not a duplicate of this -- a refusal there is a
+    /// sentence an operator reads about a number they typed, and a
+    /// refusal here is what stops a row that arrived around the API
+    /// being served to a client.
     pub fn new(seconds: i64) -> Result<Self> {
         match u32::try_from(seconds) {
             Ok(0) | Err(_) => Err(Error::LeaseTimeNotRepresentable { seconds }),
+            Ok(seconds) if seconds < SHORTEST_DERIVABLE_LEASE => Err(Error::LeaseTimeTooShort {
+                seconds,
+                shortest: SHORTEST_DERIVABLE_LEASE,
+            }),
             Ok(seconds) => Ok(LeaseSeconds(seconds)),
         }
     }

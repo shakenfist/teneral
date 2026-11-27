@@ -1417,6 +1417,26 @@ chosen to defer to here, so that we do not forget them.
   assert the options came back. That is the largest untested surface
   the front-end has: the lab covers it, and the lab is not CI.
 
+* **A `ciaddr` the protocol forbids is still answered to.** RFC 2131
+  section 4.1's rule for addressing a reply turns on `ciaddr` alone,
+  and this front-end implements it that way: a non-zero `ciaddr` is
+  unicast to before the broadcast flag or the offered address are
+  looked at. But a client in INIT state MUST send `ciaddr` as zero, so
+  on a DISCOVER -- and on a REQUEST in SELECTING or INIT-REBOOT -- a
+  non-zero `ciaddr` is a field only a non-conforming or hostile sender
+  fills in, and the result is that a sender on the link can make the
+  server unicast a ~300-octet reply to any on-link address it names.
+  The victim drops it, the transaction id not being its own, so the
+  amplification is about one to one. The fix is to take `ciaddr` only
+  from the message kinds whose state may set it -- a REQUEST with no
+  server identifier, an INFORM, a RELEASE -- and every narrowing of
+  that shape is a new addressing rule rather than section 4.1's, so it
+  needs a provenance row and a measurement of what the reference
+  implementation does with each of those messages. Measure it with the
+  lab up; do not narrow it blind, because the obvious narrowings either
+  break the INFORM path or unicast above IP to an address the client
+  does not hold yet.
+
 * **A renewal that also names a server identifier is refused.** The
   dispatch branches on the server identifier alone, so a REQUEST
   carrying both it and a non-zero `ciaddr` takes the selecting path,

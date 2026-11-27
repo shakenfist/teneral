@@ -193,11 +193,23 @@ const LEASE_SECONDS_FLOOR: i64 = 2;
 
 /// Refuse a lease time that is not a duration a client could be given.
 ///
-/// The column carries the same two bounds, and this is not a
-/// duplicate of them: the constraint is what holds if something writes
-/// the table without coming through here, and it reports a violated
-/// CHECK rather than which value was wrong and why. An operator who
-/// typed a number gets the sentence; the database keeps the guarantee.
+/// Three bounds, and the column carries two of them: this is not a
+/// duplicate of those, because the constraint is what holds if
+/// something writes the table without coming through here, and it
+/// reports a violated CHECK rather than which value was wrong and why.
+/// An operator who typed a number gets the sentence; the database
+/// keeps the guarantee.
+///
+/// The floor is the bound the column does not carry, and saying so is
+/// the point of this paragraph. SQLite cannot tighten a CHECK on an
+/// existing column -- the constraint can only be replaced by rebuilding
+/// the table, which for this one means copying the table every other
+/// resource references -- and the value it would guard against is one
+/// no caller can reach, the control API being the only writer. What
+/// backs the floor instead is the front-end: the layer that derives
+/// the renewal and rebinding times refuses a lease it cannot derive
+/// them from, so a row of one second written around this function is
+/// not served to a client either.
 fn validate_lease_seconds(value: i64) -> Result<()> {
     if value <= 0 {
         return Err(Error::Invalid {
@@ -210,7 +222,9 @@ fn validate_lease_seconds(value: i64) -> Result<()> {
         return Err(Error::Invalid {
             what: "lease time",
             detail: format!(
-                "it is {value} seconds, and the renewal and rebinding times derived from a lease                  that short are both zero; the shortest lease a client can be told what to do                  with is {LEASE_SECONDS_FLOOR}"
+                "it is {value} seconds, and the renewal and rebinding times derived from a \
+                 lease that short are both zero; the shortest lease a client can be told \
+                 what to do with is {LEASE_SECONDS_FLOOR}"
             ),
         });
     }

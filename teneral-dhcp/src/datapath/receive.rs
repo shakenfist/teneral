@@ -16,10 +16,14 @@
 //! datagram and makes the interface the kernel's answer rather than a
 //! string somebody typed.
 //!
-//! The destination address is carried because it distinguishes a
-//! broadcast from a unicast without parsing anything, which is how a
-//! client that already has an address is told from one that does not
-//! before any decision is made about either.
+//! The destination address is carried as the kernel's own account of
+//! where the datagram was addressed, and nothing reads it: it is
+//! asserted in this module's tests and is there for a packet trace to
+//! be checked against. It is deliberately not what tells a client that
+//! holds an address from one that does not. That decision is made in
+//! the send path from `ciaddr` and the broadcast flag, which is RFC
+//! 2131 section 4.1's own rule, and a second way of reaching the same
+//! conclusion would be a second rule to keep in step with it.
 
 use std::fmt;
 use std::io;

@@ -118,6 +118,7 @@ The hooks today:
 |------|---------------|
 | `rust-check` | The workspace, when a `.rs` file changed: `cargo fmt --all --check`, then `cargo clippy --workspace --all-targets -- -D warnings`. |
 | `cargo-deny` | `Cargo.toml`, `Cargo.lock` and `deny.toml`, for licences, bans and sources -- so a change to the policy is checked by the policy. |
+| `wrapped-strings` | The `.rs` files that changed, for a string literal wrapped across source lines without the `\` that joins them -- which leaves a run of spaces in the middle of a user-visible message that nothing else in this suite can see. |
 | `actionlint` | The workflow files, including their embedded shell. Its runner-label list is `.github/actionlint.yaml`. |
 | `trailing-whitespace`, `end-of-file-fixer`, `check-yaml`, `check-merge-conflict` | Everything, except that the two rewriting hooks skip weAudit's review marks under `.vscode/`, which are generated without a trailing newline. |
 | `shellcheck` | Shell under `scripts/` and `tools/`, with `-x` so a sourced sibling is followed. |
@@ -130,6 +131,19 @@ on the host and there is one description of how a container is
 started. Each is gated on the files it has an opinion about: starting
 a container costs seconds, and a hook that does it on every unrelated
 commit is a hook people learn to skip.
+
+`wrapped-strings` is the one hook here that reads neither Rust as a
+language nor a file as a whole: it looks for a run of spaces between
+two word characters inside a `.rs` file, which is what a literal
+wrapped without its `\` leaves behind, and which no formatter
+produces. Two such literals reached one pull request -- the detail of
+an API refusal and a line of the daemon's log, both user-visible text
+in a stream documented as one line per message -- and neither rustfmt,
+clippy nor the tests over those messages noticed, because a test that
+asserts a message `contains` a value is satisfied by a message with a
+gap in it. A line that aligns something inside a literal on purpose
+and trips the check anyway says `aligned-on-purpose` in a comment on
+the same line.
 
 One check is run by hand rather than hooked.
 `scripts/check-store-trait.sh` reads the binding store's traits and

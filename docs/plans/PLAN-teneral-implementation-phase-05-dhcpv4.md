@@ -1758,3 +1758,91 @@ child process. That is now written beside it. The rule the daemon
 suite follows is not available there -- its daemon is an in-process
 listener, so the test process must hold one -- and the invariant to
 keep is instead the absence of forks.
+
+**2026-11-28, AEDT. Review round 2: 1 fix, 1 document, 6 consider, 2
+none.** Down from round 1's 2 fix, 1 document, 8 consider, 1 none, and
+every item in it is about code round 1 wrote or about the original
+change -- none of it about code the reviewer itself asked for, which is
+the loop still converging rather than feeding itself.
+
+The `fix` item is the round's lesson. Two string literals written in
+round 1 -- the detail of the new lease-time refusal and the daemon's
+log line for a dead socket -- carry a run of eighteen to twenty-two
+spaces in the middle of a user-visible sentence, because they were
+wrapped across source lines without the backslash that joins them.
+Nothing in the gate could see it: rustfmt cannot reflow a string
+literal, clippy has no opinion about the inside of one, and the test
+over the refusal asserted `detail.contains(&value.to_string())`, which
+a message with a gap in it satisfies. So the class is now checked
+rather than the two instances fixed: `scripts/check-wrapped-strings.sh`
+looks for a run of spaces between two word characters in a `.rs` file,
+it is a `pre-commit` hook, and CI's lint tier runs
+`pre-commit run --all-files` -- so this is enforced on the next pull
+request without a workflow change. The refusal's own test now asserts
+the sentence has no gap, which is what would have caught it.
+
+The `document` item and two of the `consider` items were claims this
+phase made false. `docs/control-api.md` said two lease times are
+refused when round 1 added a third, and now names all three with the
+floor's reason. `receive.rs`'s module doc said the arrival destination
+is how a client holding an address is told from one that does not,
+which is not what the code does -- that decision is made in the send
+path from `ciaddr` and the broadcast flag, section 4.1's own rule --
+so the comment now says the field is the kernel's account, asserted in
+tests and read by nothing, and says why a second way of reaching the
+same conclusion is not wanted. And `validate_lease_seconds` claimed
+the column carries the same bounds it does, which stopped being true
+when the floor was added: SQLite cannot tighten a CHECK on an existing
+column without rebuilding the table every other resource references,
+and the value it would guard against is one no caller can reach. What
+backs the floor instead is `LeaseSeconds::new`, which now refuses a
+lease it cannot derive the renewal and rebinding times from -- the
+layer that does the deriving being the right place for it -- with a
+refusal of its own, because the existing one says the option cannot
+carry the value and the option carries one second perfectly well.
+
+One `consider` item asked for a test rather than a change, and reading
+the dependency answered it. The walk that drops an option whose value
+the decoder declines identifies it as the first framed code missing
+from the decoded options, which is unsound for a code the decoder
+consumes without reporting; option 52, option overload, was the
+candidate. In dhcproto 0.15 it is a first-class code with a type, so it
+is reported like any other, and the only codes consumed without being
+reported are the pad and the end -- which are the two the framing walk
+never records. Both halves are now pinned by a test, because what
+would change them is a dependency bump.
+
+The last `consider` item taken is the one that matters most for this
+project. `answer` in `teneral/src/dhcp.rs` had four branches and no
+test could reach any of them, the function owning a socket the build
+container may not open; one of those branches is the daemon's own check
+that a request is answered from the network that claimed the interface
+it actually arrived on. The judgement is now a function beside
+`after()`, for the same reason `after()` is one, and it carries the
+approved name rather than returning a yes -- so a caller cannot answer
+from a name the judgement did not approve. An index the kernel cannot
+name is refused rather than assumed to be the one interface this socket
+serves, which is the same mistake in a different costume.
+
+Two were declined. The eagerly-opened packet socket is already in the
+master plan's *Future work* with this shape. The other is a security
+item and the reviewer's own rationale is the reason: a non-zero
+`ciaddr` on a DISCOVER is a field the protocol forbids, and answering
+to it lets a sender on the link make the server unicast a reply to any
+on-link address it names, at about one-to-one amplification. Section
+4.1's rule as written does turn on `ciaddr` alone, so narrowing it is a
+new addressing rule, which needs a provenance row and a measurement --
+and the class is wider than the DISCOVER the review found, a REQUEST in
+SELECTING or INIT-REBOOT being answered the same way, which is more
+reason to settle it with a measurement than to patch one message kind.
+It is recorded in *Future work* with both of those notes.
+
+Eight mutants, all eight behaving as stated, which takes the running
+total across the three sets to twenty-two. Two of the eight are not
+cargo mutants: one runs the new hook against the two literals from the
+commit before this round and confirms it names both while passing the
+fixed tree, and one confirms that reporting the served interface's name
+in place of the arrival's does not compile -- `Answerable` borrows from
+the arrival, so the mix-up the enum exists to prevent is refused by the
+compiler rather than by a test. 375 tests pass, up from 369, and the
+differential rig reports thirteen cases checked with none failed.

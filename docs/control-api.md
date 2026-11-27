@@ -351,8 +351,12 @@ caller that computed a new lease time from the one it read and wrote it
 without the position would write over somebody else's change with
 nothing saying so, and what that would cost is every client renewing in
 between being told the wrong number for as long as it holds its
-address. A lease time of zero or less, or one too large to be sent to a
-client at all, is refused as `INVALID_REQUEST`.
+address. Three lease times are refused as `INVALID_REQUEST`: zero or
+less, which is not a duration; anything below two seconds, because the
+renewal and rebinding times a client is told are half and
+seven-eighths of the lease and both come out as zero below that; and
+anything too large to be sent to a client at all, the field it travels
+in being 32 bits wide.
 
 ### Attachments
 

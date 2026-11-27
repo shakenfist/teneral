@@ -735,6 +735,17 @@ async fn a_lease_time_no_client_could_be_given_is_refused() {
             Error::Invalid { what, detail } => {
                 assert_eq!(*what, "lease time");
                 assert!(detail.contains(&value.to_string()), "{detail}");
+                // The sentence is what an operator reads, so it is
+                // asserted as a sentence. `contains` alone passes over
+                // a literal that was wrapped across source lines
+                // without the backslash that joins them, which is a
+                // run of spaces in the middle of the message and has
+                // happened here.
+                assert!(!detail.contains("  "), "a gap in the middle of {detail:?}");
+                assert!(
+                    detail.ends_with(|last: char| last.is_alphanumeric()),
+                    "{detail}"
+                );
             }
             other => panic!("expected a refusal naming the value, got {other:?}"),
         }

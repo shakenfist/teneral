@@ -201,6 +201,24 @@ pub enum Error {
         /// The configured value.
         seconds: i64,
     },
+
+    /// A lease time the two times derived from it come out as zero
+    /// from.
+    ///
+    /// Separate from the variant above because the option carries this
+    /// value perfectly well: what cannot be carried is the answer. A
+    /// client is told when to start renewing and when to start looking
+    /// for another server, at half the lease and seven-eighths of it,
+    /// and below two seconds both are zero -- which tells it to renew
+    /// at once and gives it no interval to do it in. The store refuses
+    /// such a value from an operator; this is what refuses one that
+    /// reached the column another way.
+    LeaseTimeTooShort {
+        /// The configured value.
+        seconds: u32,
+        /// The shortest value the derivation works for.
+        shortest: u32,
+    },
 }
 
 impl fmt::Display for Error {
@@ -273,6 +291,12 @@ impl fmt::Display for Error {
             Error::LeaseTimeNotRepresentable { seconds } => write!(
                 formatter,
                 "a lease of {seconds} seconds is not a duration the lease time option can carry"
+            ),
+            Error::LeaseTimeTooShort { seconds, shortest } => write!(
+                formatter,
+                "a lease of {seconds} seconds leaves nothing to tell a client about renewing, \
+                 half of it and seven eighths of it both being zero, and {shortest} is the \
+                 shortest lease those two times can be derived from"
             ),
         }
     }
