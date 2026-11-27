@@ -58,7 +58,7 @@ mod socket;
 
 pub use error::{Error, Result};
 pub use interface::{ETHERNET_ADDRESS_BYTES, Interfaces};
-pub use receive::{Arrived, Receiver};
+pub use receive::{Arrived, ReceiveFailure, Receiver};
 // `Delivery` and the function that chooses one are public so that the
 // addressing of a reply can be read without a socket. The choice is
 // RFC 2131 section 4.1's algorithm and it is the one part of the send

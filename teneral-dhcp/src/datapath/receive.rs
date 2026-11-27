@@ -21,6 +21,7 @@
 //! client that already has an address is told from one that does not
 //! before any decision is made about either.
 
+use std::fmt;
 use std::io;
 use std::net::Ipv4Addr;
 
@@ -43,6 +44,74 @@ pub struct Arrived {
     /// with no address, and the interface's own address from a client
     /// that has one.
     pub destination: Ipv4Addr,
+}
+
+/// Why one read of a socket produced no datagram to answer.
+///
+/// The division is the only one a caller can act on: whether the next
+/// read is worth attempting. A datagram that could not be understood
+/// costs that datagram, and a socket that cannot be read costs
+/// everything that would have arrived on it -- so the first is a line
+/// in a log and the second is a reason to stop.
+///
+/// [`Receiver::receive`] can report either, and which one is read
+/// from whether the kernel gave an errno. The conditions this crate
+/// synthesises all describe one datagram: its control message did not
+/// fit, or the kernel attached no arrival interface to it, or it was
+/// longer than the buffer the kernel was given. An errno is the socket
+/// itself answering, and the one exception is `EINTR`, which says a
+/// signal arrived during the call and nothing at all about the socket.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ReceiveFailure {
+    /// This datagram cannot be answered. The socket is still good and
+    /// the next datagram is worth waiting for.
+    Datagram(io::Error),
+    /// The socket could not be read. Nothing further will arrive on
+    /// it.
+    Socket(io::Error),
+}
+
+impl ReceiveFailure {
+    /// Whether this cost one datagram rather than the socket.
+    ///
+    /// On the type rather than at the call site because the caller
+    /// that gets this wrong either stops serving an interface over a
+    /// single malformed control message or spins forever on a socket
+    /// that will never be readable again.
+    pub fn is_per_datagram(&self) -> bool {
+        matches!(self, ReceiveFailure::Datagram(_))
+    }
+}
+
+impl From<io::Error> for ReceiveFailure {
+    fn from(error: io::Error) -> Self {
+        match error.raw_os_error() {
+            // A signal interrupted the call. The socket is untouched
+            // and the read is worth making again.
+            Some(libc::EINTR) => ReceiveFailure::Datagram(error),
+            Some(_) => ReceiveFailure::Socket(error),
+            // No errno, so it is one of this crate's own conditions,
+            // every one of which is about the datagram in hand.
+            None => ReceiveFailure::Datagram(error),
+        }
+    }
+}
+
+impl fmt::Display for ReceiveFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ReceiveFailure::Datagram(error) | ReceiveFailure::Socket(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for ReceiveFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ReceiveFailure::Datagram(error) | ReceiveFailure::Socket(error) => Some(error),
+        }
+    }
 }
 
 /// The receiving half of one interface's datapath.
@@ -134,14 +203,18 @@ impl Receiver {
     /// datagram that parses as a short well-formed one, and whatever
     /// was cut off -- which can be the address the client asked for --
     /// would be lost silently.
-    pub async fn receive(&self, buffer: &mut Vec<u8>) -> io::Result<Arrived> {
+    pub async fn receive(
+        &self,
+        buffer: &mut Vec<u8>,
+    ) -> std::result::Result<Arrived, ReceiveFailure> {
         buffer.clear();
         buffer.resize(RECEIVE_BUFFER_BYTES, 0);
 
         let receipt = self
             .socket
             .async_io(Interest::READABLE, |socket| socket.receive(buffer))
-            .await?;
+            .await
+            .map_err(ReceiveFailure::from)?;
 
         buffer.truncate(receipt.length);
 
@@ -187,6 +260,50 @@ mod tests {
             .expect("a receiver");
 
         (receiver, port)
+    }
+
+    /// The three conditions this crate reports about one datagram
+    /// carry no errno, and are told from the socket's own failures by
+    /// exactly that.
+    ///
+    /// The cost of reading this wrong is in both directions and
+    /// neither is visible from a test of the happy path: a per-datagram
+    /// condition treated as a dead socket retires an interface the
+    /// kernel is still delivering on, and a dead socket treated as a
+    /// per-datagram condition is a loop that spins on an error that
+    /// will not clear.
+    #[test]
+    fn a_failure_this_crate_synthesised_costs_the_datagram_and_not_the_socket() {
+        for message in [
+            "the arrival interface did not fit in the control buffer",
+            "the kernel reported no arrival interface for a datagram",
+            "the kernel read more than the buffer holds",
+        ] {
+            let failure = ReceiveFailure::from(io::Error::other(message));
+
+            assert!(
+                failure.is_per_datagram(),
+                "{message} describes one datagram"
+            );
+            assert_eq!(failure.to_string(), message);
+        }
+    }
+
+    #[test]
+    fn an_errno_from_the_socket_stops_it_except_for_an_interrupted_call() {
+        // EINTR says a signal arrived while the call was in progress,
+        // which is the one errno that says nothing about the socket.
+        let interrupted = ReceiveFailure::from(io::Error::from_raw_os_error(libc::EINTR));
+        assert!(interrupted.is_per_datagram());
+
+        for errno in [libc::EBADF, libc::ENOTSOCK, libc::ENOTCONN, libc::EIO] {
+            let failure = ReceiveFailure::from(io::Error::from_raw_os_error(errno));
+
+            assert!(
+                !failure.is_per_datagram(),
+                "errno {errno} is the socket answering"
+            );
+        }
     }
 
     /// Two sockets serving the same interface at the same port are a

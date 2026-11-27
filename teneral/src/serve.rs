@@ -98,10 +98,18 @@ async fn serve(
 
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut terminate = signal(SignalKind::terminate())?;
+    // Pends forever when no interface is served, so that the daemon
+    // without DHCP waits on exactly what it waited on before.
+    let dhcp_failed = dhcp.as_ref().map(dhcp::Service::failed);
     let stop = async move {
         tokio::select! {
             _ = interrupt.recv() => log("stopping on SIGINT"),
             _ = terminate.recv() => log("stopping on SIGTERM"),
+            _ = dhcp::wait_for_failure(dhcp_failed) => log(
+                "stopping: a socket DHCPv4 was served on can no longer be read, and a daemon \
+                 that holds the protocol's port while answering nothing on it is worse than one \
+                 that stopped",
+            ),
         }
     };
 

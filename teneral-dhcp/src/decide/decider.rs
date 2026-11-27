@@ -26,7 +26,7 @@
 //! | REQUEST naming this server | an ACK if the address it names is one this network may give this client, and a NAK if it is not |
 //! | REQUEST naming another server | nothing: it is not this server's to answer |
 //! | REQUEST naming no server, with `ciaddr` set | an ACK from a renewal, and a NAK when the store refuses because the lease has lapsed or another client holds it |
-//! | REQUEST naming no server, with the address in option 50 | the same, except that a client this network has no record of at all gets silence, which RFC 2131 section 4.3.2 makes a MUST |
+//! | REQUEST naming no server, with the address in option 50 | the same, except that a client this network has no record of at all gets silence, which RFC 2131 section 4.3.2 makes a MUST, and a client naming the address its own reservation holds is given it |
 //! | RELEASE | the lease revoked, and no reply, the protocol specifying none |
 //! | DECLINE | the lease revoked, a line in the log, and no reply |
 //! | INFORM | an ACK carrying the derived configuration, with no address, no lease time and no lease written |
@@ -103,6 +103,18 @@ pub struct Arrival<'a> {
     pub ifname: &'a str,
     /// What that interface says about this server.
     pub server: ServerFacts,
+}
+
+/// An address a network is about to give a client, and for how long.
+///
+/// The two travel together because neither is an answer without the
+/// other: a lease written for one duration and announced with another
+/// is the silently wrong answer this project exists to prevent.
+struct Grant {
+    /// The address to write the lease against and to answer with.
+    address: Ipv4Addr,
+    /// The duration to write it for, which is also option 51.
+    lease: LeaseSeconds,
 }
 
 /// The front-end's decisions, over one store.
@@ -382,15 +394,48 @@ impl<E: Egress> Decider<E> {
             return self.refuse(arrival, request);
         }
 
+        self.acquire_and_acknowledge(
+            arrival,
+            request,
+            network,
+            client,
+            Grant {
+                address: wanted,
+                lease,
+            },
+            notes,
+        )
+        .await
+    }
+
+    /// Give this client the address in `grant`, in this network, and
+    /// acknowledge it.
+    ///
+    /// One method for the two paths that reach it -- a client
+    /// accepting an offer, and a client naming the address its own
+    /// reservation holds -- because the write and both answers are the
+    /// same in each, and a second copy of them would be a second
+    /// place for the conflict case to be got wrong.
+    async fn acquire_and_acknowledge(
+        &self,
+        arrival: &Arrival<'_>,
+        request: &Request,
+        network: &str,
+        client: &ClientIdentity,
+        grant: Grant,
+        notes: &mut Vec<Note>,
+    ) -> Result<Outcome> {
+        let Grant { address, lease } = grant;
+
         match self
             .store
-            .acquire_lease(&ACTOR, network, client, wanted, i64::from(lease.seconds()))
+            .acquire_lease(&ACTOR, network, client, address, i64::from(lease.seconds()))
             .await
         {
             Ok(_) => self.send(
                 arrival,
                 request,
-                &Answer::acknowledge(request, arrival.server, wanted, lease),
+                &Answer::acknowledge(request, arrival.server, address, lease),
             ),
             // Another client holds it in this network. The client is
             // told so rather than left to time out, which is what
@@ -398,7 +443,7 @@ impl<E: Egress> Decider<E> {
             Err(refused) if matches!(refused, StoreError::Conflict { .. }) => {
                 notes.push(Note::AddressRefused {
                     network: network.to_owned(),
-                    address: wanted,
+                    address,
                     detail: refused.to_string(),
                 });
 
@@ -470,6 +515,32 @@ impl<E: Egress> Decider<E> {
                     StoreError::NotFound { .. } | StoreError::Conflict { .. }
                 ) =>
             {
+                // The record this network holds may *agree* with the
+                // client rather than contradict it: an operator
+                // reserved this very address for it, and it has
+                // either never held it or held it and let the lease
+                // lapse. Section 4.3.2's division is between having
+                // no record of a client and having one that says it
+                // is wrong, and a reservation naming the address the
+                // client named is neither -- so it is honoured. A
+                // refusal here would send a client that asked for the
+                // right address through a DISCOVER to be handed the
+                // same one.
+                if matches!(refused, StoreError::NotFound { .. })
+                    && self.reserves(arrival, network, client, address).await?
+                {
+                    return self
+                        .acquire_and_acknowledge(
+                            arrival,
+                            request,
+                            network,
+                            client,
+                            Grant { address, lease },
+                            notes,
+                        )
+                        .await;
+                }
+
                 // A rebooting client that this network has never
                 // heard of is the one case the section makes a MUST,
                 // and the record is asked for only here, on the path
@@ -488,6 +559,29 @@ impl<E: Egress> Decider<E> {
             }
             Err(other) => Err(other.into()),
         }
+    }
+
+    /// Whether this network reserves `address` for this client.
+    ///
+    /// The sharper form of the question [`Decider::has_a_record_of`]
+    /// asks: not whether the operator configured something for this
+    /// client, but whether what they configured is the address the
+    /// client is asking about. The lookup is the binding one, so an
+    /// interface and a network that disagree refuse here as they do
+    /// everywhere else rather than answering from the wrong network.
+    async fn reserves(
+        &self,
+        arrival: &Arrival<'_>,
+        network: &str,
+        client: &ClientIdentity,
+        address: Ipv4Addr,
+    ) -> Result<bool> {
+        let view = self.store.read().await?;
+        let reserved = view
+            .lookup_binding_on_interface(network, arrival.namespace, arrival.ifname, client)
+            .await?;
+
+        Ok(reserved.is_some_and(|binding| binding.address == address))
     }
 
     /// Whether this network has anything on record for this client.

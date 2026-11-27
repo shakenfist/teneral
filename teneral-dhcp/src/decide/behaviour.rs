@@ -782,6 +782,98 @@ async fn a_binding_is_a_record_of_a_client_that_has_never_held_an_address() {
 }
 
 #[tokio::test]
+async fn a_rebooting_client_naming_the_address_reserved_for_it_is_given_it() {
+    // The case the division cuts the other way, and the one the two
+    // tests above do not reach: the operator reserved this address
+    // for this client, so the record alpha holds *agrees* with what
+    // the client remembers. Section 4.3.2 divides having no record of
+    // a client from having one that says it is wrong, and this is
+    // neither -- a NAK here would send a client that named the right
+    // address through a DISCOVER to be handed the same one.
+    let lab = Lab::new("reboot-reserved").await;
+    let reserved = Ipv4Addr::new(10, 0, 0, 77);
+    lab.reserve(ALPHA, SelectorKind::Mac, "52:54:00:11:22:33", reserved)
+        .await;
+
+    let decided = lab
+        .decider
+        .answer(&Lab::arrival(ALPHA_IF), &rebooting(reserved))
+        .await
+        .expect("alpha answers");
+    assert_eq!(
+        decided.outcome,
+        Outcome::Sent(AnswerKind::Acknowledgement),
+        "the reservation names the address the client named"
+    );
+    let sent = lab.sent().only();
+    assert_eq!(sent.message_type(), ACK_TYPE);
+    assert_eq!(sent.offered_address(), reserved);
+    assert_eq!(
+        lab.leased(ALPHA).await,
+        vec![reserved],
+        "and the lease the client was told about was written"
+    );
+    lab.sent().clear();
+
+    // The same request on the other network, where this client has no
+    // reservation and no lease: the MUST this path carries is
+    // untouched by the branch above it.
+    let decided = lab
+        .decider
+        .answer(&Lab::arrival(BETA_IF), &rebooting(reserved))
+        .await
+        .expect("beta answers");
+    assert_eq!(
+        decided.outcome,
+        Outcome::Silent(Silence::NoRecordOfThisClient),
+        "the reservation is alpha's"
+    );
+    assert_eq!(lab.sent().count(), 0);
+    assert!(lab.leased(BETA).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_rebooting_client_whose_reserved_lease_lapsed_is_given_it_again() {
+    // The other half of "the record agrees": the client did hold the
+    // address, the lease ran out, and the reservation that named it
+    // is still configured. The address cannot have gone anywhere --
+    // nothing else may be given an address a binding reserves -- so
+    // the client is told it still has it rather than being sent round
+    // a DISCOVER for the same answer.
+    //
+    // This also pins which refusal a lapsed lease produces. The
+    // branch above is reached on the store saying there is no live
+    // lease, and a lapsed one reporting a conflict instead would walk
+    // straight past it.
+    let lab = Lab::new("reboot-reserved-lapsed").await;
+    let reserved = Ipv4Addr::new(10, 0, 0, 77);
+    lab.set_lease_seconds(ALPHA, 60).await;
+    lab.reserve(ALPHA, SelectorKind::Mac, "52:54:00:11:22:33", reserved)
+        .await;
+
+    lab.decider
+        .answer(&Lab::arrival(ALPHA_IF), &discover())
+        .await
+        .expect("an offer of the reserved address");
+    assert_eq!(lab.sent().only().offered_address(), reserved);
+    lab.sent().clear();
+
+    lab.clock.advance(120);
+
+    let decided = lab
+        .decider
+        .answer(&Lab::arrival(ALPHA_IF), &rebooting(reserved))
+        .await
+        .expect("alpha answers");
+    assert_eq!(
+        decided.outcome,
+        Outcome::Sent(AnswerKind::Acknowledgement),
+        "the lease lapsed but the reservation did not"
+    );
+    assert_eq!(lab.sent().only().offered_address(), reserved);
+}
+
+#[tokio::test]
 async fn a_release_in_one_network_leaves_the_other_networks_lease_alone() {
     // The property the brief names in as many words, and the reason a
     // lease is keyed by `(network, address)` rather than by an

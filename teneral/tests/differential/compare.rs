@@ -36,6 +36,7 @@ const OTHER_FIELDS: &[&str] = &[
     "option-<code>",
     "ethernet-destination",
     "ip-destination",
+    "ip-source",
     "payload-length",
 ];
 

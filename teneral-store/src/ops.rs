@@ -179,6 +179,18 @@ pub(crate) fn attachment_id(namespace: &str, ifname: &str) -> String {
 /// take effect.
 const LEASE_SECONDS_LIMIT: i64 = u32::MAX as i64;
 
+/// The shortest lease an answer can be derived from.
+///
+/// A client is told three numbers: how long the lease runs, and when
+/// to start renewing and rebinding, which the front-end derives as
+/// half and seven-eighths of it. Below two seconds both derived
+/// numbers come out as zero, which tells a client to renew
+/// immediately and gives it no interval to do it in -- an answer no
+/// client can act on, which is the same reason zero itself is
+/// refused. The arithmetic belongs to the front-end; the bound is
+/// here because this is where an operator's number arrives.
+const LEASE_SECONDS_FLOOR: i64 = 2;
+
 /// Refuse a lease time that is not a duration a client could be given.
 ///
 /// The column carries the same two bounds, and this is not a
@@ -191,6 +203,15 @@ fn validate_lease_seconds(value: i64) -> Result<()> {
         return Err(Error::Invalid {
             what: "lease time",
             detail: format!("it is {value} seconds, and an address is held for some time"),
+        });
+    }
+
+    if value < LEASE_SECONDS_FLOOR {
+        return Err(Error::Invalid {
+            what: "lease time",
+            detail: format!(
+                "it is {value} seconds, and the renewal and rebinding times derived from a lease                  that short are both zero; the shortest lease a client can be told what to do                  with is {LEASE_SECONDS_FLOOR}"
+            ),
         });
     }
 

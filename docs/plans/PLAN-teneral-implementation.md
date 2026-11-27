@@ -1394,6 +1394,64 @@ chosen to defer to here, so that we do not forget them.
   The daemon is not shown to be at fault: the two tests that assert
   the behaviour this one sets up for passed in every run.
 
+* **An offer's lease term is the network's full one, and a shorter
+  one would need a measurement first.** A DISCOVER writes a lease for
+  the whole lease time before the OFFER is sent, so an unauthenticated
+  host that varies its `chaddr` consumes one pool address per packet
+  and holds each until it lapses. Most servers hold an offered address
+  for a short reservation that the REQUEST then extends, which is the
+  shape to copy -- but what dnsmasq does with an offer no client
+  accepts was not measured, and there is no provenance row for it, so
+  changing the term now would be inventing a behaviour rather than
+  matching one. The exposure is documented in `docs/dhcpv4.md`. Measure
+  it the next time the lab is up: offer, never accept, and watch the
+  lease file and the pool.
+
+* **Every datagram enumerates every interface on the host.** Answering
+  one request calls `getifaddrs`, which dumps every interface and
+  address the machine has, so the cost of answering scales with the
+  host rather than with what is served -- on a hypervisor with
+  thousands of taps, which is the stated consumer, that is a dump per
+  packet on a loop that answers strictly in turn. Reading the address
+  afresh for every request is the right invariant and should stay;
+  asking about one interface instead of all of them is the fix, with
+  `SIOCGIFADDR`/`SIOCGIFNETMASK` on the socket already held, or a
+  netlink request filtered to that ifindex. Note that the ioctl
+  reports one address only, so keeping the "more than one address is a
+  refusal" rule needs the netlink form.
+
+* **The packet socket is opened eagerly, so no end-to-end DHCP test
+  runs in CI.** `datapath::open` opens the `AF_PACKET` socket when the
+  interface is opened, which needs `CAP_NET_RAW`, which the build
+  container does not have -- so a test that served DHCP over loopback
+  and asserted an answer came back cannot start, although two of the
+  three delivery paths need no packet socket at all. Opening it on the
+  first reply that needs it would let a daemon test attach loopback,
+  serve at a kernel-chosen port, send an INFORM and a renewal, and
+  assert the options came back. That is the largest untested surface
+  the front-end has: the lab covers it, and the lab is not CI.
+
+* **A renewal that also names a server identifier is refused.** The
+  dispatch branches on the server identifier alone, so a REQUEST
+  carrying both it and a non-zero `ciaddr` takes the selecting path,
+  finds no option 50, and gets a NAK. RFC 2131's table says a RENEWING
+  request MUST NOT set the server identifier, so the refusal is
+  conformant -- but clients that do it exist, and the cost is a NAK
+  that drops a working client to DISCOVER. It is also a wire-visible
+  refusal with no provenance row behind it. Measure what dnsmasq does
+  with that message and then either fall through to the renewing path
+  or keep the NAK with the row that justifies it.
+
+* **The retained captures have one copy, on a path named for not
+  being backed up.** Every observed row added in phase 5 cites a pcap
+  by name and digest, and all six live in one directory under
+  `/srv/nobackups` on one host. The rule that a measurement is only
+  worth citing if it is kept is therefore resting on files nothing in
+  the repository can check are still there. The lab write-up is in an
+  LFS repository already, which is where they belong; moving them
+  there and recording the location in the write-up would make a digest
+  something a later reader can verify rather than take on trust.
+
 ### Bugs fixed during this work
 
 This section should list any bugs we encounter during development

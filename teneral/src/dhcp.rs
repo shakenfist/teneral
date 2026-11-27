@@ -45,7 +45,9 @@
 
 use std::sync::Arc;
 
-use teneral_dhcp::datapath::{self, Interfaces, RECEIVE_BUFFER_BYTES, Receiver, Sender};
+use teneral_dhcp::datapath::{
+    self, Interfaces, RECEIVE_BUFFER_BYTES, ReceiveFailure, Receiver, Sender,
+};
 use teneral_dhcp::decide::{Arrival, Decider};
 use teneral_dhcp::wire;
 use teneral_store::{BindingStore, SqliteStore};
@@ -57,15 +59,42 @@ use crate::serve::log;
 
 type Failure = Box<dyn std::error::Error>;
 
+/// How many reads in a row may fail before the socket is the problem.
+///
+/// A condition about one datagram cannot repeat without datagrams
+/// arriving, and the three the datapath reports cannot be provoked by
+/// a client -- so a run this long says the read itself is failing for
+/// a reason the classification did not see, and the bound is what
+/// stops the loop spinning on it. High enough that no plausible run
+/// of genuinely bad datagrams reaches it.
+const FAILURES_BEFORE_THE_SOCKET_IS_BLAMED: u32 = 64;
+
 /// The sockets this daemon serves DHCPv4 on, and how to stop them.
 pub struct Service {
     /// Told once, read by every task.
     stop: watch::Sender<bool>,
+    /// Set by a task whose socket can no longer be read.
+    ///
+    /// Shared rather than cloned per task because a `watch` sender is
+    /// not clonable, and every task needs to be able to say this.
+    failed: Arc<watch::Sender<bool>>,
     /// One task per served interface.
     tasks: Vec<JoinHandle<()>>,
 }
 
 impl Service {
+    /// Watch for a socket this service can no longer serve on.
+    ///
+    /// The daemon selects on this beside its signals, because a
+    /// process holding the protocol's port and answering nothing on it
+    /// is the state this module's startup refusals exist to prevent --
+    /// and reaching that state while running is no better than
+    /// starting in it. Stopping hands the operator's supervisor
+    /// something it can act on.
+    pub fn failed(&self) -> watch::Receiver<bool> {
+        self.failed.subscribe()
+    }
+
     /// Stop serving, and wait for every socket to be closed.
     ///
     /// Returns only when each task has returned, which is when its
@@ -96,16 +125,26 @@ pub async fn start(store: &Arc<SqliteStore>, args: &ServeArgs) -> Result<Option<
     named_once(&args.dhcp_interface)?;
 
     let (stop, _) = watch::channel(false);
+    let failed = Arc::new(watch::channel(false).0);
     let mut tasks = Vec::with_capacity(args.dhcp_interface.len());
 
     for ifname in &args.dhcp_interface {
         let (receiver, sender) = open(store, ifname, args.dhcp_port).await?;
         let decider = Decider::new(Arc::clone(store) as Arc<dyn BindingStore>, sender);
 
-        tasks.push(tokio::spawn(answer_on(receiver, decider, stop.subscribe())));
+        tasks.push(tokio::spawn(answer_on(
+            receiver,
+            decider,
+            stop.subscribe(),
+            Arc::clone(&failed),
+        )));
     }
 
-    Ok(Some(Service { stop, tasks }))
+    Ok(Some(Service {
+        stop,
+        failed,
+        tasks,
+    }))
 }
 
 /// Refuse a list that names an interface twice.
@@ -193,8 +232,14 @@ async fn open(
 /// the store, and reading the next datagram before this one is
 /// answered would make how many views this process holds a number a
 /// client chose rather than a number an operator configured.
-async fn answer_on(receiver: Receiver, decider: Decider<Sender>, mut stop: watch::Receiver<bool>) {
+async fn answer_on(
+    receiver: Receiver,
+    decider: Decider<Sender>,
+    mut stop: watch::Receiver<bool>,
+    failed: Arc<watch::Sender<bool>>,
+) {
     let mut buffer = Vec::with_capacity(RECEIVE_BUFFER_BYTES);
+    let mut consecutive = 0_u32;
 
     loop {
         let arrived = tokio::select! {
@@ -203,20 +248,196 @@ async fn answer_on(receiver: Receiver, decider: Decider<Sender>, mut stop: watch
         };
 
         match arrived {
-            Ok(arrived) => answer(&receiver, &decider, arrived.ifindex, &buffer).await,
-            // Nothing a client sends reaches here: the readiness this
-            // read follows has already happened, so what is left is a
-            // socket that cannot be read at all. Serving this
-            // interface stops, loudly, rather than spinning on an
-            // error that will not clear.
-            Err(error) => {
+            Ok(arrived) => {
+                consecutive = 0;
+                answer(&receiver, &decider, arrived.ifindex, &buffer).await;
+            }
+            // One datagram the kernel could not describe. It is lost
+            // and said so, and the next one is still worth waiting
+            // for: a control message that did not fit or arrived
+            // without an interface says nothing about the socket.
+            Err(failure) if after(&failure, consecutive) == Cost::TheDatagram => {
+                consecutive += 1;
                 log(&format!(
-                    "reading a datagram on {}: {error}; DHCPv4 is no longer served on it",
+                    "a datagram on {} was dropped rather than answered: {failure}",
+                    receiver.ifname()
+                ));
+            }
+            // The socket cannot be read, or has failed this way so
+            // many times in a row that the classification above is
+            // not describing what is happening. Either way this
+            // process is holding the protocol's port on a link it can
+            // no longer answer on, so it stops rather than staying up
+            // as a server that listens and says nothing.
+            Err(failure) => {
+                log(&format!(
+                    "reading a datagram on {}: {failure}; DHCPv4 can no longer be served on it,                      and this daemon is stopping rather than holding the port without answering",
                     receiver.ifname()
                 ));
 
+                // A send with no receivers is the daemon already
+                // shutting down for its own reasons, which is the
+                // outcome this was asking for.
+                let _ = failed.send(true);
+
                 return;
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tokio::sync::watch;
+
+    use super::{
+        Cost, FAILURES_BEFORE_THE_SOCKET_IS_BLAMED, ReceiveFailure, after, wait_for_failure,
+    };
+
+    /// Long enough to be sure a future that was going to resolve has,
+    /// and short enough that four of them are not felt.
+    const A_MOMENT: Duration = Duration::from_millis(50);
+
+    #[test]
+    fn a_datagram_the_kernel_could_not_describe_costs_only_that_datagram() {
+        // The condition the datapath synthesises when a control
+        // message does not fit or arrives without an interface. The
+        // loop this feeds used to return on it, which stopped serving
+        // the interface while leaving the daemon holding its port.
+        let lost = ReceiveFailure::from(std::io::Error::other(
+            "the kernel reported no arrival interface for a datagram",
+        ));
+
+        assert_eq!(after(&lost, 0), Cost::TheDatagram);
+        assert_eq!(
+            after(&lost, FAILURES_BEFORE_THE_SOCKET_IS_BLAMED - 1),
+            Cost::TheDatagram
+        );
+    }
+
+    #[test]
+    fn a_socket_that_cannot_be_read_costs_the_daemon() {
+        // EBADF, written as its number because this crate has no
+        // libc dependency and one for a test would be a dependency
+        // the whole binary carries.
+        let dead = ReceiveFailure::from(std::io::Error::from_raw_os_error(9));
+
+        assert_eq!(after(&dead, 0), Cost::TheSocket);
+    }
+
+    #[test]
+    fn a_run_of_lost_datagrams_long_enough_is_the_socket_after_all() {
+        // The bound exists because the classification is a reading of
+        // what an error means, and a reading can be wrong. Without it,
+        // an error this code calls per-datagram but which never clears
+        // is a loop that spins forever.
+        let lost = ReceiveFailure::from(std::io::Error::other("something unforeseen"));
+
+        assert_eq!(
+            after(&lost, FAILURES_BEFORE_THE_SOCKET_IS_BLAMED),
+            Cost::TheSocket,
+            "a condition that repeats this many times is not about one datagram"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_daemon_serving_no_interface_waits_forever() {
+        // The case the daemon is in without --dhcp-interface, where
+        // resolving would stop a daemon nobody asked to serve DHCP.
+        let outcome = tokio::time::timeout(A_MOMENT, wait_for_failure(None)).await;
+
+        assert!(outcome.is_err(), "it resolved, and nothing had failed");
+    }
+
+    #[tokio::test]
+    async fn a_socket_that_failed_stops_the_wait() {
+        let (sender, watcher) = watch::channel(false);
+        let waiting = tokio::spawn(wait_for_failure(Some(watcher)));
+
+        sender.send(true).expect("the waiter is listening");
+
+        tokio::time::timeout(A_MOMENT, waiting)
+            .await
+            .expect("the wait ends when a socket fails")
+            .expect("the waiter did not panic");
+    }
+
+    #[tokio::test]
+    async fn a_failure_before_the_wait_began_is_not_missed() {
+        // A task can fail while the daemon is still assembling the
+        // future that waits for it, and a wait that only watched for
+        // changes would then wait for a second failure that never
+        // comes.
+        let (sender, watcher) = watch::channel(false);
+        sender.send(true).expect("nothing is listening yet");
+
+        tokio::time::timeout(A_MOMENT, wait_for_failure(Some(watcher)))
+            .await
+            .expect("the value was already there to be read");
+    }
+
+    #[tokio::test]
+    async fn a_service_dropped_while_stopping_is_not_a_failure() {
+        // Every sender gone is the daemon shutting down for its own
+        // reasons. Reporting that as a DHCP failure would put a line
+        // in the log blaming the sockets for every ordinary SIGTERM.
+        let (sender, watcher) = watch::channel(false);
+        drop(sender);
+
+        let outcome = tokio::time::timeout(A_MOMENT, wait_for_failure(Some(watcher))).await;
+
+        assert!(outcome.is_err(), "a closed channel is not a failure");
+    }
+}
+
+/// What one failed read cost.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cost {
+    /// The datagram in hand. Serving continues.
+    TheDatagram,
+    /// The socket, and so this daemon.
+    TheSocket,
+}
+
+/// What a failed read cost, given how many have failed in a row.
+///
+/// Separate from the loop because the loop cannot be driven from a
+/// test -- it owns a socket the build container may not open -- and
+/// this decision is the whole of what the fix for a daemon that
+/// retired an interface and stayed up consists of.
+fn after(failure: &ReceiveFailure, consecutive: u32) -> Cost {
+    if failure.is_per_datagram() && consecutive < FAILURES_BEFORE_THE_SOCKET_IS_BLAMED {
+        Cost::TheDatagram
+    } else {
+        Cost::TheSocket
+    }
+}
+
+/// Wait for a served socket to fail, or forever when none is served.
+///
+/// `None` is the daemon that was not asked to serve DHCP at all, and
+/// it waits forever so that the caller can select on this without
+/// knowing which daemon it is.
+pub async fn wait_for_failure(watcher: Option<watch::Receiver<bool>>) {
+    let Some(mut watcher) = watcher else {
+        std::future::pending::<()>().await;
+
+        return;
+    };
+
+    loop {
+        if *watcher.borrow_and_update() {
+            return;
+        }
+
+        // Every sender gone means the service was dropped, which
+        // happens when the daemon is already stopping. That is not a
+        // failure to report, so this waits out whatever else is
+        // stopping the daemon rather than claiming one.
+        if watcher.changed().await.is_err() {
+            std::future::pending::<()>().await;
         }
     }
 }

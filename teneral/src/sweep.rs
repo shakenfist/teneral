@@ -38,6 +38,7 @@
 //! dropped while the task was still writing would be a daemon blocked
 //! on a thread something was still using.
 
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -144,6 +145,17 @@ struct Swept {
     leases: Vec<Lease>,
 }
 
+/// How many addresses one sweep's line names before it stops.
+///
+/// The count and the position are what make a sweep findable, and
+/// neither grows. The addresses are a convenience for the ordinary
+/// sweep that removed a handful, and a network that lapses thousands
+/// at once would otherwise put a line of tens of kilobytes into a log
+/// this daemon documents as one line per message. What is elided is
+/// not lost: every removal is an expiry event in the history, which is
+/// what a consumer reads and what the position points at.
+const ADDRESSES_IN_A_LINE: usize = 10;
+
 impl Swept {
     /// The line this sweep is worth logging, or `None` when it is not.
     ///
@@ -152,37 +164,49 @@ impl Swept {
     /// would be a line an operator learns to skip past -- which is the
     /// state in which the one that matters is skipped too.
     fn line(&self) -> Option<String> {
-        if self.leases.is_empty() {
-            return None;
-        }
+        let addresses: Vec<Ipv4Addr> = self.leases.iter().map(|lease| lease.address).collect();
 
-        let count = self.leases.len();
-        let plural = if count == 1 { "" } else { "s" };
-        let addresses: Vec<String> = self
-            .leases
-            .iter()
-            .map(|lease| lease.address.to_string())
-            .collect();
-        let addresses = addresses.join(", ");
-
-        // The position is reported so that an operator reading this
-        // line can find the same expiries in the history a consumer
-        // was served. It is always there when something was removed;
-        // the other arm is the store's contract written out rather
-        // than assumed, because asserting it here would be a panic in
-        // a daemon for the sake of a log line.
-        Some(match &self.at {
-            Some(at) => format!(
-                "swept {count} lapsed lease{plural} from the network {}, at position {at}: \
-                 {addresses}",
-                self.network
-            ),
-            None => format!(
-                "swept {count} lapsed lease{plural} from the network {}: {addresses}",
-                self.network
-            ),
-        })
+        line_for(&self.network, self.at.as_ref(), &addresses)
     }
+}
+
+/// The line a sweep of `addresses` from `network` is worth logging.
+///
+/// Separate from the sweep so that what it does with a thousand
+/// addresses can be asserted without leasing a thousand addresses.
+fn line_for(network: &str, at: Option<&Cursor>, addresses: &[Ipv4Addr]) -> Option<String> {
+    let count = addresses.len();
+    if count == 0 {
+        return None;
+    }
+
+    let plural = if count == 1 { "" } else { "s" };
+    let named: Vec<String> = addresses
+        .iter()
+        .take(ADDRESSES_IN_A_LINE)
+        .map(Ipv4Addr::to_string)
+        .collect();
+    let mut named = named.join(", ");
+    if let Some(elided) = count
+        .checked_sub(ADDRESSES_IN_A_LINE)
+        .filter(|more| *more > 0)
+    {
+        named.push_str(&format!(", and {elided} more"));
+    }
+
+    // The position is reported so that an operator reading this
+    // line can find the same expiries in the history a consumer
+    // was served. It is always there when something was removed;
+    // the other arm is the store's contract written out rather
+    // than assumed, because asserting it here would be a panic in
+    // a daemon for the sake of a log line.
+    Some(match at {
+        Some(at) => format!(
+            "swept {count} lapsed lease{plural} from the network {network}, at position {at}: \
+             {named}"
+        ),
+        None => format!("swept {count} lapsed lease{plural} from the network {network}: {named}"),
+    })
 }
 
 /// Sweep every network the store holds, once.
@@ -237,7 +261,7 @@ mod tests {
         Actor, BindingStore, ClientIdentity, Clock, Cursor, History, SelectorKind, SqliteStore,
     };
 
-    use super::{SWEEPER, Swept, sweep};
+    use super::{ADDRESSES_IN_A_LINE, SWEEPER, Swept, line_for, sweep};
 
     /// Distinguishes the directories of tests running at the same time
     /// in the same process.
@@ -292,6 +316,58 @@ mod tests {
             // reported.
             let _ = std::fs::remove_dir_all(&self.path);
         }
+    }
+
+    #[test]
+    fn a_sweep_names_a_handful_of_addresses_in_full() {
+        let addresses = [
+            Ipv4Addr::new(10, 0, 0, 10),
+            Ipv4Addr::new(10, 0, 0, 11),
+            Ipv4Addr::new(10, 0, 0, 12),
+        ];
+
+        let line = line_for(ALPHA, None, &addresses).expect("three leases are worth a line");
+
+        assert!(line.contains("swept 3 lapsed leases"), "{line}");
+        for address in addresses {
+            assert!(line.contains(&address.to_string()), "{line}");
+        }
+        assert!(!line.contains("more"), "nothing was left out: {line}");
+    }
+
+    #[test]
+    fn a_sweep_of_a_whole_pool_says_how_many_addresses_it_left_out() {
+        // The line is one line in a log documented as one line per
+        // message, and the number of lapsed leases is a number the
+        // size of the pool rather than a number anybody chose. A
+        // network that lapses a thousand at once gets a line an
+        // operator can read and a count they can act on.
+        let addresses: Vec<Ipv4Addr> = (0..1000)
+            .map(|n: u32| Ipv4Addr::from(u32::from(Ipv4Addr::new(10, 0, 0, 10)) + n))
+            .collect();
+
+        let line = line_for(ALPHA, None, &addresses).expect("a thousand leases are worth a line");
+
+        assert!(line.contains("swept 1000 lapsed leases"), "{line}");
+        assert!(
+            line.contains(&format!("and {} more", 1000 - ADDRESSES_IN_A_LINE)),
+            "{line}"
+        );
+        assert_eq!(
+            line.matches("10.0.0.").count(),
+            ADDRESSES_IN_A_LINE,
+            "exactly the bound is named, and the rest are counted: {line}"
+        );
+        assert!(
+            line.len() < 300,
+            "a line of {} octets is not one line in a log",
+            line.len()
+        );
+    }
+
+    #[test]
+    fn a_sweep_that_removed_nothing_has_no_line_at_all() {
+        assert_eq!(line_for(ALPHA, None, &[]), None);
     }
 
     /// A clock a test moves by hand.

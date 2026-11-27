@@ -718,10 +718,13 @@ async fn a_lease_time_no_client_could_be_given_is_refused() {
     let beta = view.network(BETA).await.unwrap().expect("the network");
     drop(view);
 
-    // Zero and below are not durations; above the thirty-two bits the
-    // duration reaches a client in is a number an operator could set,
-    // read back, and never see take effect.
-    for value in [0, -1, i64::from(u32::MAX) + 1] {
+    // Zero and below are not durations; one second is a duration from
+    // which the renewal and rebinding times a client is also given
+    // both come out as zero, which is an answer it cannot act on; and
+    // above the thirty-two bits the duration reaches a client in is a
+    // number an operator could set, read back, and never see take
+    // effect.
+    for value in [0, -1, 1, i64::from(u32::MAX) + 1] {
         let refusal = fixture
             .store
             .update_network(&OPERATOR, ALPHA, &alpha.cursor, value)

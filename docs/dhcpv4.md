@@ -56,11 +56,11 @@ project's own.
 
 | Message | Answer |
 |---------|--------|
-| DISCOVER | An OFFER. The address is the one a binding reserves for this client if there is one, otherwise the store's choice, honouring an address the client asked for only at its place in RFC 2131 section 4.3.1's order. |
+| DISCOVER | An OFFER, and a lease written for the network's full lease time. The address is the one a binding reserves for this client if there is one, otherwise the store's choice, honouring an address the client asked for only at its place in RFC 2131 section 4.3.1's order. |
 | REQUEST, naming this server | An ACK if the address is one this network may give this client, otherwise a NAK. |
 | REQUEST, naming another server | Nothing. It is not this server's to answer. |
 | REQUEST, naming no server, with `ciaddr` set (renewing or rebinding) | An ACK from a renewal; a NAK when the store refuses because the lease lapsed or another client holds the address. |
-| REQUEST, naming no server, with the address in option 50 (checking after a reboot) | The same, except that a client this network has no record of at all gets silence. |
+| REQUEST, naming no server, with the address in option 50 (checking after a reboot) | The same, except that a client this network has no record of at all gets silence, and a client naming the address its own reservation holds is given it. |
 | RELEASE | The lease is revoked. No reply: the protocol specifies none. |
 | DECLINE | The lease is revoked and the event is logged. No reply. |
 | INFORM | An ACK carrying the derived configuration, with no address, no lease time and no lease written. |
@@ -78,6 +78,16 @@ live or lapsed, or a binding configured for it here. Where there is
 one and it disagrees with the client, the answer is a NAK. A lease
 held in another network is not a record in this one. The row is
 `dhcp-init-reboot-silence-without-a-record`.
+
+**An OFFER commits a lease.** The lease row is written before the
+OFFER is sent, for the network's whole lease time, and it is visible
+to `list-leases` and to a watching consumer immediately -- before the
+client has accepted anything, and whether or not it ever does. That is
+worth knowing in two places. An operator looking at a pool that seems
+fuller than the number of working clients is probably looking at
+offers nobody took up, and each of those holds its address until the
+lease lapses. And a consumer counting leases is counting clients that
+have been offered an address rather than clients using one.
 
 **May this client have that address.** `allocate_lease` chooses an
 address and `acquire_lease` records one somebody else chose, and
@@ -208,6 +218,24 @@ time such an address gets with no answer, and the usual patch for that
 is a network-level default, which is the thing the column is. A
 per-range override waits for a consumer that wants two lease times in
 one network. [binding-store.md](binding-store.md) describes the column.
+
+The shortest lease is two seconds. Below that the renewal and
+rebinding times derived from it come out as zero, which tells a client
+to renew immediately and gives it no interval in which to do it.
+
+**The lease time is also the blast radius of a flood.** Because a
+DISCOVER commits a lease for the full term, any host on the link can
+vary its `chaddr` and consume one pool address per packet, each held
+until it lapses -- so a twelve-hour lease over a pool of fifty
+addresses is fifty packets away from a pool that answers nobody for
+twelve hours. Nothing in DHCP authenticates a client, so the exposure
+is inherent rather than a defect, but the lease time is the dial that
+sets how long it lasts and the pool size sets how little it takes. On
+an untrusted link, prefer a short lease and a pool larger than the
+number of clients. A shorter offer term that the REQUEST extends would
+narrow it further; teneral does not do that, because what the
+reference implementation does with an offer no client accepts has not
+been measured here.
 
 ## How a packet becomes a selector value
 

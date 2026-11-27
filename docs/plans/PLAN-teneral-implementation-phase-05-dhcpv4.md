@@ -1634,3 +1634,70 @@ script names the store file in a variable, so the claim is right in
 substance; but a grep of a script is not a proof of what ran, and
 the only honest statement is that nothing in the recorded output
 shows another tool writing to the store.
+
+**2026-11-27 (AEDT), the first review round, and the first CI this
+repository has ever run.** `github.com/shakenfist/teneral` was created
+during the close-out, so `develop` and the phase branch were pushed
+and pull request #1 opened against `develop`. All four workflows
+passed on the first attempt. The automated reviewer raised 12 items:
+2 `fix`, 1 `document`, 8 `consider` and 1 `none`, plus one CodeQL
+alert.
+
+Both `fix` items were defects this phase introduced, and both
+reproduced in the tree before anything was changed.
+
+The first is the one that matters. In `renewing`, the only path to an
+ACK was a successful `renew_lease`, so a client naming the address its
+*own* reservation holds got `NotFound`, and then `has_a_record_of`
+found the binding and turned that into a NAK. That contradicts the row
+this phase wrote: `dhcp-init-reboot-silence-without-a-record` says
+the division is between having no record of a client and one that
+disagrees with it, and here the record agreed. The fix honours the
+reservation, and the acquisition is now one method shared with the
+selecting path rather than a second copy of it. Two tests: a
+reservation the client has never held, and one whose lease lapsed
+under it. The second test also pins which refusal a lapsed lease
+produces, because the new branch is reached on `NotFound` and a
+lapsed lease reporting a conflict would walk straight past it. A third
+test was written and then deleted: it tried to reserve an address
+another client was holding, which the store refuses outright, so the
+conflict arm is not reachable from this path at all.
+
+The second is that `answer_on` returned on any error from `receive`,
+which dropped one interface's task and left the daemon running --
+holding port 67 on a link it no longer answered on, which is the exact
+state this module's startup refusals exist to prevent. Three of
+`receive`'s four error returns are conditions the datapath synthesises
+about one datagram, so the comment claiming only an unreadable socket
+reached there was wrong. `ReceiveFailure` now divides a per-datagram
+condition from a socket fault, read from whether the kernel gave an
+errno at all, with `EINTR` as the one errno that says nothing about
+the socket; a per-datagram failure costs its datagram and logs, and a
+socket fault stops the whole daemon through a channel the main loop
+selects on beside its signals. A bound of 64 consecutive failures
+catches anything the classification did not foresee rather than
+spinning on it.
+
+Three `consider` items were taken because each was a defect in code
+this phase added and small: a lease of one second produced renewal and
+rebinding times of zero, which the store's validator now refuses with
+the reason; a sweep logged every address it removed on one line, which
+on a lapsed pool is a line of tens of kilobytes in a log documented as
+one line per message, so it now names ten and counts the rest; and
+`ip-source` was missing from the rig's list of assertable field names
+although four cases assert it.
+
+Five were declined and are in the master plan's *Future work*: the
+offer-term change behind item 3, which needs a measurement first and
+whose exposure is now documented instead; the per-datagram
+`getifaddrs` enumeration; the eagerly-opened packet socket that keeps
+an end-to-end DHCP test out of CI; the NAK for a renewal that also
+names a server identifier; and the single unbacked-up copy of the
+retained captures.
+
+The CodeQL alert is on `interface.rs:271`, the dereference in the
+`getifaddrs` walk, and nothing was changed for it. The pointer is
+either the head of a list a successful `getifaddrs` wrote or a
+previous entry's `ifa_next`, both valid while the owning value lives,
+and the null check precedes the dereference. A list walk through FFI
+cannot be written in a way that proves this to the query.
