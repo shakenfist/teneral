@@ -1,0 +1,97 @@
+-- How long a network's answers hold an address for.
+--
+-- Applied to a database that already carries every resource, the
+-- tokens, the actor columns, the epoch's attribution and the writer in
+-- every recorded event's state. As with every
+-- migration here, this file is never edited once it has been released:
+-- a change to the shape of this column is a new file beside it,
+-- because an edit here describes a database that only a fresh install
+-- has ever had.
+--
+-- This is the one thing a DHCPv4 answer needs that nothing else in the
+-- store can supply. Every other value such an answer carries is an
+-- observation of the interface the request arrived on -- the server's
+-- own address, the mask configured on it, the broadcast address those
+-- two give -- and an observation is not state, so a front-end may take
+-- it per packet and remember nothing. How long a client may keep the
+-- address is not observable anywhere: it is a policy, it is per
+-- network, and a front-end that kept it would be a front-end holding
+-- per-network state of its own, which is the thing this store exists
+-- to stop. So it is a column, and the store stays the single source of
+-- truth for it.
+--
+-- It is on the network rather than on the address range, which is
+-- where the reference implementation keeps its own and so is the
+-- argument against. That implementation has no object for a network at
+-- all -- its range *is* its scope, which is why its lease time has
+-- nowhere else to go. Teneral has a real network, every resource here
+-- is keyed by it, and a binding's address need not fall inside any
+-- range: a lease time on the range would leave "how long does a
+-- reserved address outside every range last" as a question with no
+-- answer, and the obvious patch for that is a default on the network,
+-- which is this column. A per-range override waits for a consumer that
+-- asks for two lease times in one network.
+--
+-- The default is twelve hours, and it is the number the behaviour this
+-- project measured was measured against, so a network created without
+-- one answers the same way the captures did. SQLite needs a non-null
+-- default for a NOT NULL column added to a table that already has
+-- rows, and that requirement and this value coincide for a reason
+-- rather than by luck: there is no such thing as a network that has
+-- not chosen, because every network has to answer a client with some
+-- number, so a sentinel meaning "unset" would be a value the layer
+-- above would have to invent an answer for. A network written before
+-- this migration therefore reads as twelve hours, which is a lease it
+-- can serve rather than a hole it has to be configured out of.
+--
+-- The CHECK is the two bounds no caller can be trusted with and that
+-- are cheap to state here. Zero and below are not durations. The upper
+-- bound is the protocol's: a lease time reaches a client in a 32-bit
+-- field, so a larger value would be a configuration an operator could
+-- write and never see take effect, and SQLite's INTEGER is signed and
+-- 64-bit, so without the bound the column accepts a number no lease
+-- can have. SQLite does not apply a constraint added this way to the
+-- rows that are already there, which costs nothing: the default
+-- satisfies it, so every backfilled row is inside it.
+ALTER TABLE network
+    ADD COLUMN lease_seconds INTEGER NOT NULL DEFAULT 43200
+    CHECK (lease_seconds > 0 AND lease_seconds <= 4294967295);
+
+-- And the same value into the network events already recorded, which
+-- with the migration before it makes two places in this set where one
+-- of them rewrites something the store has already said happened.
+--
+-- It is right here for a reason that does not generalise. An event
+-- carries a resource's whole post-state and a consumer applies it as
+-- a complete description, so the layer above refuses a state it
+-- cannot parse rather than filling in what is missing -- deliberately,
+-- because a key one build writes and another drops is how two
+-- descriptions of one resource come to disagree. A network event
+-- written before this column existed therefore stops being readable
+-- the moment the column exists, and a consumer resuming a watch
+-- across the upgrade is stopped by events describing a past the store
+-- can no longer explain, until they age out of the retained window.
+-- That is the worst available way to recover from this.
+--
+-- What makes the rewrite honest rather than merely convenient is that
+-- the column's default is retroactive: the statement above gives
+-- every existing network twelve hours, so twelve hours is what each
+-- of them held at every position already in the log, and writing that
+-- into those states records what was true rather than inventing it.
+-- The same statement for a value somebody had to choose would be a
+-- migration deciding what an operator did in the past, which is a
+-- thing no migration here may do.
+--
+-- The state is rebuilt rather than added to, because the key has to
+-- land where the writer puts it: `json_insert` appends to the end of
+-- an object, and a network's snapshot is compared against the event
+-- of the same write as text, so a key in the wrong position reads as
+-- two spellings of one resource. A row with no state is a deletion --
+-- that being the post-state of something removed -- and is left
+-- alone, as is every other kind, each of which carries a state this
+-- column is no part of.
+UPDATE event_log
+   SET state = json_object('name', json_extract(state, '$.name'),
+                           'lease_seconds', 43200,
+                           'written_by', json_extract(state, '$.written_by'))
+ WHERE kind = 'network' AND state IS NOT NULL;

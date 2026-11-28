@@ -30,7 +30,25 @@ use crate::selector::Selector;
 pub struct Network {
     /// The caller's name for it, unique in the store and opaque here.
     pub name: String,
-    /// Where this network's creation sits in the store's order.
+    /// How long, in seconds, an address this network gives out is held
+    /// for.
+    ///
+    /// The only thing a network configures beyond its name, and it is
+    /// a column rather than a front-end's own setting because it is
+    /// the one value an answer needs that cannot be observed. A
+    /// front-end reads an interface's address and mask from the kernel
+    /// for each request and remembers neither, which is observation
+    /// and not state; how long a client may keep an address is a
+    /// policy, and a front-end holding one would be holding
+    /// per-network state of its own.
+    ///
+    /// Every network has one. The schema's default stands in for the
+    /// networks nobody has set it on, including every network written
+    /// before the column existed, because a network without a lease
+    /// time is one no client can be answered from rather than one
+    /// configured a little less.
+    pub lease_seconds: i64,
+    /// Where this network's last write sits in the store's order.
     pub cursor: Cursor,
     /// Who made the write that produced this state, as the store
     /// recorded it.

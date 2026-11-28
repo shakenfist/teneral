@@ -5,13 +5,17 @@
 //! outcome, and everything that waits does so with a bound. A daemon
 //! left running after a failed assertion would hold its socket and its
 //! store for the rest of the machine's uptime.
+//!
+//! Nothing here binds a listening socket of its own, and
+//! [`stale_socket`] says why not: these tests are threads of one
+//! process, and a descriptor one of them holds is a descriptor another
+//! one's child can be holding a moment later.
 
 use std::fs;
 use std::io::Read;
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
@@ -24,19 +28,6 @@ const BINARY: &str = env!("CARGO_BIN_EXE_teneral");
 const BOUND: Duration = Duration::from_secs(20);
 
 static NEXT: AtomicU32 = AtomicU32::new(0);
-
-/// Held while a descriptor is being created or while a child is being
-/// started. A child inherits every descriptor open in the process for
-/// the moment between `fork` and `exec`, so a socket one test has
-/// just closed can be kept alive by another test's child, and "nothing
-/// is listening" is then briefly untrue.
-static SPAWNING: Mutex<()> = Mutex::new(());
-
-fn spawning() -> std::sync::MutexGuard<'static, ()> {
-    SPAWNING
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
 
 /// A directory one test owns, removed when it ends.
 struct Directory(PathBuf);
@@ -78,14 +69,25 @@ struct Daemon {
 impl Daemon {
     /// Start one, without waiting for it to be ready.
     fn spawn(directory: &Directory, label: &str, store: &Path, socket: &Path) -> Self {
+        Self::spawn_with(directory, label, store, socket, &[])
+    }
+
+    /// Start one with extra flags, without waiting for it to be ready.
+    fn spawn_with(
+        directory: &Directory,
+        label: &str,
+        store: &Path,
+        socket: &Path,
+        extra: &[&str],
+    ) -> Self {
         let errors = directory.0.join(format!("{label}.stderr"));
-        let _spawning = spawning();
         let child = Command::new(BINARY)
             .arg("serve")
             .arg("--store")
             .arg(store)
             .arg("--socket")
             .arg(socket)
+            .args(extra)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(fs::File::create(&errors).expect("a file for the daemon's standard error"))
@@ -139,6 +141,13 @@ impl Daemon {
         }
     }
 
+    /// Kill it outright and reap it, which is how a daemon dies when
+    /// it is given no chance to clean up after itself.
+    fn kill(&mut self) {
+        self.child.kill().expect("the daemon to be killable");
+        self.child.wait().expect("the daemon to be reapable");
+    }
+
     /// Ask it to stop the way systemd does, and wait for it.
     fn terminate(&mut self) -> ExitStatus {
         let status = Command::new("sh")
@@ -172,10 +181,42 @@ fn wait_until_answering(socket: &Path) {
     }
 }
 
+/// Leave behind what a killed daemon leaves: a socket file at
+/// `directory`'s socket path with nothing listening on it.
+///
+/// Made by killing a daemon rather than by binding a `UnixListener`
+/// here and dropping it, which is the shorter way and is a race. These
+/// tests are threads of one process, and `Command::spawn` forks and
+/// execs inside a single call while the other threads run on: between
+/// that fork and that exec the child holds a copy of every descriptor
+/// this process had open, so a listener bound and dropped in the
+/// microseconds either side of somebody else's spawn is still
+/// listening, in their child, until it execs. `SOCK_CLOEXEC` does not
+/// help, because it closes the descriptor *at* the exec, which is the
+/// end of the window rather than the start of it. Observed as this
+/// test's own precondition failing about twice in forty runs, with
+/// `/proc/net/unix` naming the holder as a child that had not yet
+/// replaced its image.
+///
+/// A socket this process never held cannot be copied out of it, so the
+/// file is left by a daemon that is sent SIGKILL once it is serving. It
+/// is given a store of its own, so that what the next daemon opens is
+/// the socket question and not a half-written database as well.
+fn stale_socket(directory: &Directory) {
+    let mut daemon = Daemon::spawn(
+        directory,
+        "killed",
+        &directory.0.join("killed.sqlite"),
+        &directory.socket(),
+    );
+    daemon.wait_until_serving();
+    wait_until_answering(&directory.socket());
+    daemon.kill();
+}
+
 /// Run the binary to completion with `arguments`, returning its exit
 /// status and everything it printed.
 fn run(arguments: &[&str]) -> (ExitStatus, String, String) {
-    let spawned = spawning();
     let mut child = Command::new(BINARY)
         .args(arguments)
         .stdin(Stdio::null())
@@ -183,7 +224,6 @@ fn run(arguments: &[&str]) -> (ExitStatus, String, String) {
         .stderr(Stdio::piped())
         .spawn()
         .expect("the binary to start");
-    drop(spawned);
 
     let mut stdout = child.stdout.take().expect("a piped stdout");
     let mut stderr = child.stderr.take().expect("a piped stderr");
@@ -283,8 +323,7 @@ fn a_live_daemon_stops_a_second_starting_on_its_socket() {
 fn a_stale_socket_file_does_not_stop_a_daemon_starting() {
     let directory = Directory::new("stale");
 
-    // What a killed daemon leaves: a socket file nothing is behind.
-    drop(UnixListener::bind(directory.socket()).expect("a socket to leave behind"));
+    stale_socket(&directory);
     assert!(directory.socket().exists());
     let probe = UnixStream::connect(directory.socket());
     assert!(
@@ -442,6 +481,8 @@ fn help_names_every_flag_with_its_default() {
         ("--max-live-views", "64"),
         ("--max-connections", "256"),
         ("--heartbeat-seconds", "15"),
+        ("--sweep-interval", "86400"),
+        ("--dhcp-port", "67"),
     ];
     for (flag, default) in flags {
         assert!(help.contains(flag), "{flag} missing from:\n{help}");
@@ -450,6 +491,14 @@ fn help_names_every_flag_with_its_default() {
             "{flag}'s default {default} missing from:\n{help}"
         );
     }
+
+    // The one flag with no default, which is what makes serving DHCP
+    // something an operator asks for rather than something a row in
+    // the store turns on.
+    assert!(
+        help.contains("--dhcp-interface"),
+        "--dhcp-interface missing from:\n{help}"
+    );
 
     // Every subcommand is named, and a client's help says where its
     // secret comes from.
@@ -470,4 +519,102 @@ fn help_names_every_flag_with_its_default() {
         client.contains("--token-stdin") && client.contains("TENERAL_TOKEN"),
         "{client}"
     );
+}
+
+/// A daemon asked to serve DHCP on an interface no network has claimed
+/// does not come up. The alternative is worse than not starting: it
+/// would hold the protocol's port on that link and answer nothing,
+/// while every client on it waited out its timeouts against a server
+/// that was listening.
+///
+/// This is the one half of the DHCP wiring a test here can reach. The
+/// refusal lands before any socket is opened, so it needs none of the
+/// privilege the sockets do -- and the sockets themselves cannot be
+/// opened by this suite at all, which is why the datapath is measured
+/// in a lab with a real client instead.
+#[test]
+fn refuses_to_serve_dhcp_on_an_interface_no_network_has_claimed() {
+    let directory = Directory::new("dhcpunclaimed");
+    let mut daemon = Daemon::spawn_with(
+        &directory,
+        "daemon",
+        &directory.store(),
+        &directory.socket(),
+        &["--dhcp-interface", "teneral0"],
+    );
+
+    let status = daemon.exit();
+
+    assert!(!status.success(), "{}", daemon.stderr());
+    let said = daemon.stderr();
+    for wanted in ["teneral0", "no network has claimed", "root"] {
+        assert!(said.contains(wanted), "{wanted:?} missing from:\n{said}");
+    }
+    // It refused rather than half-started: the control socket it had
+    // already bound is gone again.
+    assert!(!directory.socket().exists());
+}
+
+/// An interval the monotonic clock cannot name an instant that far
+/// ahead of is refused by name, before the daemon creates anything.
+///
+/// Both flags that arm a timer are checked, because the failure they
+/// share is not a refusal: arming one is `now` plus the interval, and
+/// an instant the clock cannot name panics inside whichever task holds
+/// the timer. That leaves the daemon running with its sweeper or a
+/// consumer's stream dead and a backtrace where the flag's name should
+/// have been.
+#[test]
+fn refuses_an_interval_further_ahead_than_the_clock_can_name() {
+    for flag in ["--sweep-interval", "--heartbeat-seconds"] {
+        let directory = Directory::new(&format!("interval{}", &flag[2..6]));
+        let mut daemon = Daemon::spawn_with(
+            &directory,
+            "daemon",
+            &directory.store(),
+            &directory.socket(),
+            &[flag, "18446744073709551615"],
+        );
+
+        let status = daemon.exit();
+
+        assert!(!status.success(), "{}", daemon.stderr());
+        let said = daemon.stderr();
+        for wanted in [flag, "clock can name"] {
+            assert!(said.contains(wanted), "{wanted:?} missing from:\n{said}");
+        }
+        // Refused before anything was created, so there is no socket
+        // and no store left behind.
+        assert!(!directory.socket().exists());
+        assert!(!directory.store().exists());
+    }
+}
+
+/// Two sockets on one port and one interface is a conflict the kernel
+/// reports as a port already in use, naming neither the flag nor the
+/// interface, so the flag is checked before a socket is opened.
+#[test]
+fn refuses_an_interface_named_twice_before_it_opens_anything() {
+    let directory = Directory::new("dhcptwice");
+    let mut daemon = Daemon::spawn_with(
+        &directory,
+        "daemon",
+        &directory.store(),
+        &directory.socket(),
+        &[
+            "--dhcp-interface",
+            "teneral0",
+            "--dhcp-interface",
+            "teneral0",
+        ],
+    );
+
+    let status = daemon.exit();
+
+    assert!(!status.success(), "{}", daemon.stderr());
+    let said = daemon.stderr();
+    for wanted in ["--dhcp-interface teneral0", "more than once"] {
+        assert!(said.contains(wanted), "{wanted:?} missing from:\n{said}");
+    }
+    assert!(!directory.socket().exists());
 }

@@ -1,0 +1,74 @@
+# The reply as it crossed the bridge, 342 octets, exactly as captured at Unix
+# time 1795723883.346606. case.toml beside this file carries the
+# capture's provenance and the docs/provenance.md rows these bytes
+# are evidence for.
+#
+# Bytes observed on a wire. Nothing here is derived from anybody's
+# source code, and nothing may be: dnsmasq is GPL-2/3 and teneral is
+# Apache-2.0, so an observation is the only lawful source for a
+# behaviour no RFC specifies. The annotations are a reading aid; the
+# bytes are what the rig asserts on.
+
+# Ethernet: dst fa:16:3e:00:02:0a, src fa:16:3e:00:02:01, type 0x0800
+fa 16 3e 00 02 0a                                # destination hardware address
+fa 16 3e 00 02 01                                # source hardware address
+08 00                                            # EtherType 0x0800, IPv4
+
+# IPv4: 10.0.0.1 -> 10.0.0.241, 328 octets in all
+45 c0                                            # version 4, header length, differentiated services
+01 48                                            # total length
+57 73 00 00                                      # identification, flags, fragment offset
+40 11                                            # time to live, protocol 17 (UDP)
+0c 81                                            # header checksum
+0a 00 00 01                                      # source address
+0a 00 00 f1                                      # destination address
+
+# UDP: 67 -> 68, 308 octets
+00 43                                            # source port
+00 44                                            # destination port
+01 34                                            # length
+16 37                                            # checksum
+
+# BOOTP: op 2, OFFER
+02 01 06 00                                      # op, htype, hlen, hops
+46 3c d4 39                                      # xid
+00 00 00 00                                      # secs, flags
+00 00 00 00                                      # ciaddr 0.0.0.0
+0a 00 00 f1                                      # yiaddr 10.0.0.241
+0a 00 00 01                                      # siaddr 10.0.0.1
+00 00 00 00                                      # giaddr 0.0.0.0
+
+# chaddr, 16 octets: fa:16:3e:00:02:0a:00:00:00:00:00:00:00:00:00:00
+fa 16 3e 00 02 0a 00 00                          # chaddr
+00 00 00 00 00 00 00 00                          # chaddr, continued
+
+# sname, 64 octets, and file, 128 octets.
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # sname
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # sname
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # sname
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # sname
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+
+# The magic cookie, and then the options.
+63 82 53 63                                      # magic cookie 99.130.83.99
+
+35 01 02                                         # option 53 message type: OFFER
+36 04 0a 00 00 01                                # option 54 server identifier: 10.0.0.1
+33 04 00 00 a8 c0                                # option 51 lease time: 43200s
+3a 04 00 00 54 60                                # option 58 T1: 21600s
+3b 04 00 00 93 a8                                # option 59 T2: 37800s
+01 04 ff ff ff 00                                # option 1 subnet mask: 255.255.255.0
+1c 04 0a 00 00 ff                                # option 28 broadcast address: 10.0.0.255
+03 04 0a 00 00 01                                # option 3 router: 10.0.0.1
+06 04 0a 00 00 01                                # option 6 dns-server: 10.0.0.1
+ff                                               # option 255 end
+
+# 8 octets of padding after the end option.
+00 00 00 00 00 00 00 00                          # padding

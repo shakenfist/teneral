@@ -1,0 +1,70 @@
+# The reply as it crossed the bridge, 342 octets, exactly as captured at Unix
+# time 1795723911.894485. case.toml beside this file carries the
+# capture's provenance and the docs/provenance.md rows these bytes
+# are evidence for.
+#
+# Bytes observed on a wire. Nothing here is derived from anybody's
+# source code, and nothing may be: dnsmasq is GPL-2/3 and teneral is
+# Apache-2.0, so an observation is the only lawful source for a
+# behaviour no RFC specifies. The annotations are a reading aid; the
+# bytes are what the rig asserts on.
+
+# Ethernet: dst ff:ff:ff:ff:ff:ff, src fa:16:3e:00:01:01, type 0x0800
+ff ff ff ff ff ff                                # destination hardware address
+fa 16 3e 00 01 01                                # source hardware address
+08 00                                            # EtherType 0x0800, IPv4
+
+# IPv4: 10.0.0.1 -> 255.255.255.255, 328 octets in all
+45 c0                                            # version 4, header length, differentiated services
+01 48                                            # total length
+3b ee 00 00                                      # identification, flags, fragment offset
+40 11                                            # time to live, protocol 17 (UDP)
+32 f7                                            # header checksum
+0a 00 00 01                                      # source address
+ff ff ff ff                                      # destination address
+
+# UDP: 67 -> 68, 308 octets
+00 43                                            # source port
+00 44                                            # destination port
+01 34                                            # length
+0b 46                                            # checksum
+
+# BOOTP: op 2, NAK
+02 01 06 00                                      # op, htype, hlen, hops
+f5 c5 36 40                                      # xid
+00 00 80 00                                      # secs, flags
+00 00 00 00                                      # ciaddr 0.0.0.0
+00 00 00 00                                      # yiaddr 0.0.0.0
+00 00 00 00                                      # siaddr 0.0.0.0
+00 00 00 00                                      # giaddr 0.0.0.0
+
+# chaddr, 16 octets: fa:16:3e:00:01:0a:00:00:00:00:00:00:00:00:00:00
+fa 16 3e 00 01 0a 00 00                          # chaddr
+00 00 00 00 00 00 00 00                          # chaddr, continued
+
+# sname, 64 octets, and file, 128 octets.
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # sname
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # sname
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # sname
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # sname
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # file
+
+# The magic cookie, and then the options.
+63 82 53 63                                      # magic cookie 99.130.83.99
+
+35 01 06                                         # option 53 message type: NAK
+36 04 0a 00 00 01                                # option 54 server identifier: 10.0.0.1
+38 0d 77 72 6f 6e 67 20 61 64 64 72 65 73 73     # option 56 message: 'wrong address'
+ff                                               # option 255 end
+
+# 35 octets of padding after the end option.
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # padding
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  # padding
+00 00 00                                         # padding

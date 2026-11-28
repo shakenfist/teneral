@@ -1,0 +1,104 @@
+[package]
+name = "teneral-dhcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Teneral's DHCPv4 front-end: the wire, the question it asks the binding store, and the sockets it answers on"
+
+# Not a crates.io artifact, and the line is load-bearing rather than
+# tidiness. The path dependency on the store below carries no version
+# requirement -- the workspace manifest says why, and says that the
+# supply-chain gate denies a wildcard but allows one on a path
+# belonging to a crate that is not published. Publishing this is a
+# decision somebody can make deliberately by deleting this line and
+# answering the version question with it.
+publish = false
+
+# Inherit the workspace lint table rather than restating it. Without
+# this the workspace `[workspace.lints]` block applies to nothing at
+# all, which fails quietly: the lints look configured and are not.
+# `unwrap_used = "deny"` is the whole safety argument of this crate,
+# so the line matters here in a way it does not elsewhere.
+[lints]
+workspace = true
+
+[dependencies]
+# The binding store: the source of truth for every answer this crate
+# gives, and the only thing the decision layer reads or writes. Its
+# path and the reason it carries no version requirement are in the
+# workspace manifest.
+#
+# What is deliberately *not* here is `teneral-api`. A front-end is a
+# consumer of the store and not of the control plane, so a dependency
+# the other way round would put the layers in a cycle and make the
+# layer diagram a lie. `cargo tree -p teneral-dhcp` showing no
+# `teneral-api` is what checks it.
+teneral-store = { workspace = true }
+
+# The DHCPv4 message decoder.
+#
+# `default-features = false` with nothing enabled, written out rather
+# than left implicit. The crate's own default set is already empty and
+# its one optional feature is `serde`, so the line changes nothing
+# today and is here so that a later release acquiring a default
+# feature is a decision somebody takes rather than one that arrives
+# with a lockfile bump. The cost of this dependency is not in its
+# features: `hickory-proto` is non-optional in it, for the
+# domain-name options, and brings the bulk of the subtree with it.
+#
+# Decoding only. The encoder in `wire` is this project's own, because
+# this crate holds a message's options in a map keyed by option code
+# and so emits them in code order, while the order an answer's options
+# are written in is a measured property of the bytes. Decoding is also
+# the direction the risk is in -- the bytes are a stranger's -- so the
+# dependency is spent where it earns its place.
+#
+# 0.15.0 is the newest release, and every release this project can
+# resolve carries one defect that matters here: both `chaddr()`
+# accessors size a slice by the packet's `hlen` byte, which nothing
+# validates, so above 16 the owned path panics and the borrowed path
+# returns neighbouring bytes as the client's hardware address. The fix
+# is merged upstream and in no release; `upstream/dhcproto/` holds the
+# staged patch and the two reproducers. `wire` refuses `hlen > 16`
+# before any accessor is called, which is correct whatever this
+# dependency later does, so a release is a reason to revisit the floor
+# here rather than to remove the guard.
+dhcproto = { version = "0.15.0", default-features = false }
+
+# The system calls the datapath is made of: the socket options that
+# say which interface a socket serves and ask the kernel to report
+# where each datagram arrived, the control message that names the
+# egress of each reply, the `ioctl` that turns an interface index into
+# a name, and the socket a hand-built frame goes out of. None of it
+# has a safe wrapper in the standard library, and the two crates that
+# wrap some of it wrap neither the control messages nor the packet
+# socket -- so the dependency would be paid for and the `unsafe` would
+# still be here.
+#
+# Already in this tree beneath the runtime and the control plane, so
+# it adds nothing to the dependency graph the licence gate reads.
+libc = "0.2.191"
+
+# The runtime, for one thing: registering a socket with the reactor so
+# that waiting for a datagram parks no thread and a stopping daemon
+# does not have to interrupt a system call to be heard.
+#
+# `net` is the feature that carries it, and it is the only one taken.
+# Deliberately absent is every runtime flavour: which runtime this
+# crate's futures are driven on is the binary's choice, as it is for
+# every other library here, and a library that picked one would be
+# picking for its consumer.
+tokio = { version = "1.54.1", default-features = false, features = ["net"] }
+
+[dev-dependencies]
+# The runtime, to drive the tests and only the tests. The store's
+# interface is asynchronous, and a test of the decision layer asks a
+# real store real questions, so it needs somewhere to await them: `rt`
+# is the single-threaded runtime and `macros` is `#[tokio::test]`. The
+# multi-threaded flavour is not needed to await a channel, and the
+# crate itself picks no runtime at all -- that choice belongs to the
+# binary.
+tokio = { version = "1.54.1", default-features = false, features = ["rt", "macros"] }

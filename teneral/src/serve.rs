@@ -10,6 +10,8 @@ use tokio::runtime::Runtime;
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::cli::ServeArgs;
+use crate::dhcp;
+use crate::sweep;
 
 type Failure = Box<dyn std::error::Error>;
 
@@ -21,7 +23,7 @@ const STOP_GRACE: Duration = Duration::from_secs(5);
 
 /// Standard error, one line a message. See `main` for why there is no
 /// logging framework behind it.
-fn log(message: &str) {
+pub(crate) fn log(message: &str) {
     eprintln!("teneral: {message}");
 }
 
@@ -34,9 +36,10 @@ pub fn run(runtime: Runtime, args: &ServeArgs) -> Result<(), Failure> {
     let mut config = ServerConfig::new(&args.socket);
     config.max_live_views = to_usize("--max-live-views", args.max_live_views)?;
     config.max_connections = to_usize("--max-connections", args.max_connections)?;
-    config.heartbeat = Duration::from_secs(args.heartbeat_seconds);
+    config.heartbeat = to_interval("--heartbeat-seconds", args.heartbeat_seconds)?;
+    let sweep_every = to_interval("--sweep-interval", args.sweep_interval)?;
 
-    let store = runtime.block_on(serve(config, &args.store, retention))?;
+    let store = runtime.block_on(serve(config, args, retention, sweep_every))?;
 
     // The order is the point, and it is why this is not left to the
     // end of scope. The listener has stopped accepting and every open
@@ -59,9 +62,12 @@ pub fn run(runtime: Runtime, args: &ServeArgs) -> Result<(), Failure> {
 /// writer thread is joined.
 async fn serve(
     config: ServerConfig,
-    store_path: &Path,
+    args: &ServeArgs,
     retention: Retention,
+    sweep_every: Duration,
 ) -> Result<Arc<SqliteStore>, Failure> {
+    let store_path = args.store.as_path();
+
     // The socket before the store. Binding is what finds out that a
     // live daemon already answers on this path, and that has to come
     // first: opening the same database file under a running daemon
@@ -78,18 +84,50 @@ async fn serve(
 
     announce(&store, store_path, listener.path()).await?;
 
+    // After the store, because what may be served is what the store
+    // says, and before anything is answered, because an interface that
+    // cannot be served is a refusal to start rather than a daemon that
+    // listens on a privileged port and answers nothing.
+    let dhcp = dhcp::start(&store, args).await?;
+
+    // After every refusal above, so that a daemon which is not going
+    // to come up has not started a timer holding a handle on the
+    // store. Nothing is swept until one interval has passed, and the
+    // store's answers do not wait for a sweep in any case.
+    let sweeper = sweep::start(Arc::clone(&store) as Arc<dyn BindingStore>, sweep_every);
+
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut terminate = signal(SignalKind::terminate())?;
+    // Pends forever when no interface is served, so that the daemon
+    // without DHCP waits on exactly what it waited on before.
+    let dhcp_failed = dhcp.as_ref().map(dhcp::Service::failed);
     let stop = async move {
         tokio::select! {
             _ = interrupt.recv() => log("stopping on SIGINT"),
             _ = terminate.recv() => log("stopping on SIGTERM"),
+            _ = dhcp::wait_for_failure(dhcp_failed) => log(
+                "stopping: a socket DHCPv4 was served on can no longer be read, and a daemon \
+                 that holds the protocol's port while answering nothing on it is worse than one \
+                 that stopped",
+            ),
         }
     };
 
     let bindings: Arc<dyn BindingStore> = Arc::clone(&store) as Arc<dyn BindingStore>;
     let tokens: Arc<dyn TokenStore> = Arc::clone(&store) as Arc<dyn TokenStore>;
     listener.serve(bindings, tokens, stop).await?;
+
+    // The sweeper and the sockets before the store, and before the
+    // wait below. Each of those tasks holds a handle on the store, so
+    // leaving them running would make that wait time out rather than
+    // find the store unused -- and a store dropped under a task still
+    // writing a sweep or reading a socket would be a daemon blocked
+    // on a thread something was still using. The sweeper first,
+    // because it is the one that writes.
+    sweeper.stop().await;
+    if let Some(dhcp) = dhcp {
+        dhcp.stop().await;
+    }
 
     // `serve` has stopped accepting and told every stream, but the
     // connection tasks send their final event on their own time, and
@@ -175,4 +213,26 @@ fn check_store_path(path: &Path) -> Result<(), Failure> {
 fn to_usize(flag: &str, value: u64) -> Result<usize, Failure> {
     usize::try_from(value)
         .map_err(|_| format!("{flag} {value} does not fit in this platform's usize").into())
+}
+
+/// A flag's seconds as an interval a timer can be armed with.
+///
+/// Refused here rather than where the timer is armed, because arming
+/// one is `now` plus this and an instant the monotonic clock cannot
+/// name is a panic -- inside whichever task holds that timer, a
+/// stream's or the sweeper's, which leaves the daemon running with
+/// that part of it dead and a backtrace where the name of the flag
+/// should have been. This is the only check: an interval the clock can
+/// name is one the timer can use, and no ceiling is invented for it.
+fn to_interval(flag: &str, seconds: u64) -> Result<Duration, Failure> {
+    let interval = Duration::from_secs(seconds);
+
+    if tokio::time::Instant::now().checked_add(interval).is_none() {
+        return Err(format!(
+            "{flag} {seconds} is further ahead than this machine's clock can name"
+        )
+        .into());
+    }
+
+    Ok(interval)
 }

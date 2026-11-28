@@ -1,0 +1,104 @@
+# One captured DHCPv4 exchange. See ../../README.md for what a case
+# is, and ../../../../../docs/differential-rig.md for how a capture
+# gets into this corpus lawfully.
+
+summary = "A DISCOVER on the second of two overlapping networks, and its OFFER."
+
+# The docs/provenance.md rows these bytes are the evidence for, by
+# row id. The harness fails this case if the list is empty or if a
+# row id is not in that file.
+provenance = [
+    "dhcp-unasked-option-set",
+    "dhcp-reply-unicast-to-offered",
+    "dhcp-reply-padded-to-bootp-minimum",
+    "dhcp-reply-names-itself-as-next-server",
+]
+
+request = "request.hex"
+response = "response.hex"
+
+[capture]
+observed = "2026-11-27"
+server = "dnsmasq 2.91-1+deb13u2, Debian 13.8, kernel 6.12.118+deb13-amd64, serving --dhcp-range=tag:gw-n1,10.0.0.100,10.0.0.150,12h and --dhcp-range=tag:gw-n2,10.0.0.200,10.0.0.250,12h on gw-n1 and gw-n2 with --bind-dynamic"
+client = "ISC dhclient 4.4.3-P1 in a client endpoint of the bridge, address flushed first"
+link_type = "EN10MB"
+# The capture file is kept outside this repository: a pcap is not an
+# artifact a reviewer can read, and the frames that matter are here as
+# hex text instead. The digest ties the two back together.
+pcap = "lbrlab-1795723089-dnsmasq-br-n2.pcap"
+pcap_sha256 = "67efa7a44923624744de29a03bcaf1b530281606693ab95f50053bfe02ff40a1"
+frames = "1 and 2 of 4"
+write_up = "linux-bridge-lab.md, experiment 6"
+request_bytes = 342
+response_bytes = 342
+
+[network]
+# The configuration the capture was taken against, as data: a DHCP
+# reply is not a function of the request alone.
+name = "n2"
+interface = "gw-n2"
+server_address = "10.0.0.1"
+prefix_length = 24
+lease_seconds = 43200
+
+[[network.ranges]]
+name = "pool"
+first = "10.0.0.200"
+last = "10.0.0.250"
+
+[comparison]
+subject = "dhcpv4"
+status = "compared"
+fields = [
+    "op",
+    "htype",
+    "hlen",
+    "hops",
+    "xid",
+    "secs",
+    "flags",
+    "giaddr",
+    "chaddr",
+    "sname",
+    "file",
+    "ciaddr",
+    "option-codes",
+    "option-53",
+    "option-54",
+    "option-51",
+    "option-58",
+    "option-59",
+    "option-1",
+    "option-28",
+    "option-3",
+    "option-6",
+    "ethernet-destination",
+    "ip-source",
+    "payload-length",
+]
+agree = [
+    "yiaddr-matches-ip-destination",
+    "chaddr-matches-ethernet-destination",
+]
+diverges = [
+    "siaddr",
+]
+asserts = """
+The same exchange as dhcpv4-discover-offer-dhclient, on the other
+network, and that is the point of the case rather than a repetition.
+Both networks are 10.0.0.0/24, both gateways hold 10.0.0.1, and the
+only thing that says which network a request belongs to is the bridge
+it arrived on -- so this case is the one that fails if an answer is
+derived from an address rather than from an interface. The range here
+is 10.0.0.200 to 10.0.0.250 and the answer comes out of it.
+
+The nine options arrive in the measured order with the measured values,
+and the mask, broadcast address, router and nameserver are identical to
+the other network's because the two interfaces hold the same address --
+which is exactly why a case that passed on one network alone would
+prove nothing.
+
+Both replies are 300 octets, the BOOTP minimum RFC 1542 section 2.1
+has a receiver enforce, so the length is compared rather than declared
+divergent. `siaddr` diverges for the reason the sibling case gives.
+"""

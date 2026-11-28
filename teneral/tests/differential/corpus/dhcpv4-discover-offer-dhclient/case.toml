@@ -16,6 +16,9 @@ summary = "A DISCOVER from ISC dhclient, and the OFFER dnsmasq 2.91 sent back."
 provenance = [
     "dhcp-unasked-option-set",
     "dhcp-reply-unicast-to-offered",
+    "dhcp-reply-padded-to-bootp-minimum",
+    "dhcp-reply-meets-the-bootp-length-check",
+    "dhcp-reply-names-itself-as-next-server",
 ]
 
 request = "request.hex"
@@ -37,9 +40,59 @@ write_up = "linux-bridge-lab.md, experiment 2"
 request_bytes = 342
 response_bytes = 342
 
+[network]
+# The configuration the capture was taken against, as data: a DHCP
+# reply is not a function of the request alone. Experiment 6 redeployed
+# the same playbook and gave gw-n1 the same range and the same lease, so
+# this configuration was reproduced as well as recorded.
+name = "n1"
+interface = "gw-n1"
+server_address = "10.0.0.1"
+prefix_length = 24
+lease_seconds = 43200
+
+[[network.ranges]]
+name = "pool"
+first = "10.0.0.100"
+last = "10.0.0.150"
+
 [comparison]
 subject = "dhcpv4"
-status = "pending"
+status = "compared"
+fields = [
+    "op",
+    "htype",
+    "hlen",
+    "hops",
+    "xid",
+    "secs",
+    "flags",
+    "ciaddr",
+    "giaddr",
+    "chaddr",
+    "sname",
+    "file",
+    "option-codes",
+    "option-53",
+    "option-54",
+    "option-51",
+    "option-58",
+    "option-59",
+    "option-1",
+    "option-28",
+    "option-3",
+    "option-6",
+    "ethernet-destination",
+    "ip-source",
+    "payload-length",
+]
+agree = [
+    "yiaddr-matches-ip-destination",
+    "chaddr-matches-ethernet-destination",
+]
+diverges = [
+    "siaddr",
+]
 asserts = """
 Given request.hex, on a network configured as the lab's gw-n1 was --
 one range 10.0.0.100 to 10.0.0.150, a 12h lease, the server itself at
@@ -57,7 +110,23 @@ dnsmasq's pick is by client identity rather than by a counter, which
 is a measured behaviour and not a contract, so yiaddr and the IP
 destination are asserted to agree with each other rather than to be
 10.0.0.128. The IP and UDP checksums are likewise recomputed rather
-than compared.
+than compared, and so are the IPv4 identification and
+differentiated-services fields: for two of teneral's three delivery
+paths the kernel writes all four.
+
+Both replies are 300 octets of BOOTP message, with zero octets after
+the end option bringing nine options up to that length. That is the
+minimum RFC 1542 section 2.1 has a receiver check an arriving message
+against, and a message failing the check is to be discarded silently,
+so the length is asserted equal rather than left as a difference
+nobody would ever revisit. The padding dnsmasq does was also measured
+in the lab rather than inferred from this fixture alone: experiment 6
+saw it in five replies of four kinds.
+
+One difference is deliberate and is asserted rather than removed.
+`siaddr` carries dnsmasq's own address, naming itself as the next
+server in a boot sequence it does not serve, where teneral has no boot
+server and sends zero.
 
 Where teneral comes to differ from dnsmasq deliberately, this case
 asserts the difference instead of being deleted: an omitted case and a

@@ -1,0 +1,110 @@
+# One captured DHCPv4 exchange. See ../../README.md for what a case
+# is, and ../../../../../docs/differential-rig.md for how a capture
+# gets into this corpus lawfully.
+
+summary = "A client reclaiming an address it may not have, and the NAK that refused it."
+
+# The docs/provenance.md rows these bytes are the evidence for, by
+# row id. The harness fails this case if the list is empty or if a
+# row id is not in that file.
+provenance = [
+    "dhcp-nak-sets-broadcast-and-names-a-reason",
+    "dhcp-reply-padded-to-bootp-minimum",
+    "dhcp-reply-names-itself-as-next-server",
+    "dhcp-init-reboot-silence-without-a-record",
+]
+
+request = "request.hex"
+response = "response.hex"
+
+[capture]
+observed = "2026-11-27"
+server = "dnsmasq 2.91-1+deb13u2, Debian 13.8, kernel 6.12.118+deb13-amd64, serving --dhcp-range=tag:gw-n1,10.0.0.100,10.0.0.150,12h and --dhcp-range=tag:gw-n2,10.0.0.200,10.0.0.250,12h on gw-n1 and gw-n2 with --bind-dynamic"
+client = "ISC dhclient 4.4.3-P1 in a client endpoint of the bridge, address flushed first, started with a lease file naming 10.0.0.55"
+link_type = "EN10MB"
+# The capture file is kept outside this repository: a pcap is not an
+# artifact a reviewer can read, and the frames that matter are here as
+# hex text instead. The digest ties the two back together.
+pcap = "lbrlab-1795723089-dnsmasq-br-n1.pcap"
+pcap_sha256 = "fabde438aef41f22d4892fcf5e3a8cfa99a0d017506641708a2acef9b1c29e38"
+frames = "13 and 14 of 28"
+write_up = "linux-bridge-lab.md, experiment 6"
+request_bytes = 342
+response_bytes = 342
+
+[network]
+# The configuration the capture was taken against, as data: a DHCP
+# reply is not a function of the request alone.
+name = "n1"
+interface = "gw-n1"
+server_address = "10.0.0.1"
+prefix_length = 24
+lease_seconds = 43200
+
+[[network.ranges]]
+name = "pool"
+first = "10.0.0.100"
+last = "10.0.0.150"
+
+[[network.leases]]
+address = "10.0.0.128"
+mac = "fa:16:3e:00:01:0a"
+
+[comparison]
+subject = "dhcpv4"
+status = "compared"
+fields = [
+    "op",
+    "htype",
+    "hlen",
+    "hops",
+    "xid",
+    "secs",
+    "giaddr",
+    "chaddr",
+    "sname",
+    "file",
+    "ciaddr",
+    "yiaddr",
+    "siaddr",
+    "option-53",
+    "option-54",
+    "ethernet-destination",
+    "ip-source",
+    "ip-destination",
+    "payload-length",
+]
+agree = []
+diverges = [
+    "flags",
+    "option-codes",
+]
+asserts = """
+A client that believes it holds 10.0.0.55 -- an address inside the
+subnet and outside every range -- checks it the way RFC 2131 section
+4.3.2 describes: a REQUEST with no server identifier, a zero `ciaddr`
+and the remembered address in option 50. The division that section
+draws is between a server with no record of the client, which must stay
+silent, and one whose record disagrees, which should refuse. The
+network here holds a record -- the lease the same capture granted this
+client a moment earlier -- so a refusal is the right answer and silence
+would be the wrong one.
+
+Both implementations broadcast the refusal to 255.255.255.255, which
+the section makes a MUST because a client being refused may have
+neither a correct address nor a correct mask. `siaddr` is zero in both,
+which is the one reply where dnsmasq does not name itself as the next
+server, so it is compared here rather than declared divergent. Both
+carry option 53 and option 54 with the same values.
+
+Two differences are deliberate. dnsmasq *sets* the broadcast flag in
+its refusal although the request had it clear, and teneral echoes the
+request's flags -- both frames go to the broadcast address either way,
+so the flag changes nothing about where this reply was delivered.
+dnsmasq also carries option 56 with the text `wrong address`, a
+human-readable reason teneral does not send, so the option codes
+differ. The *lengths* do not: a refusal carries three options in one
+case and two in the other and both are padded out to 300, which is the
+floor RFC 1542 section 2.1 has a receiver enforce and the reason a
+250-octet refusal would be discarded without a word.
+"""

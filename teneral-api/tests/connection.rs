@@ -376,6 +376,13 @@ async fn a_socket_file_with_nothing_behind_it_is_removed_rather_than_inherited()
     // What a daemon that was killed leaves behind. Dropping a bound
     // socket closes it and leaves its file, which is exactly the
     // state: the path is there and nothing is listening on it.
+    //
+    // Safe here only because nothing in this crate's tests starts a
+    // child process. A `Command::spawn` anywhere in this binary would
+    // make this socket reachable again for as long as that child took
+    // to reach its exec, and the daemon below would refuse the path as
+    // one somebody was already serving. The daemon suite's
+    // `stale_socket` has the mechanism and the measurement.
     let socket = directory.socket();
     drop(std::os::unix::net::UnixListener::bind(&socket).expect("a socket to leave behind"));
     assert!(socket.exists(), "the file outlives the socket");

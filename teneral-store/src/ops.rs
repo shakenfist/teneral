@@ -171,6 +171,77 @@ pub(crate) fn attachment_id(namespace: &str, ifname: &str) -> String {
     format!("{namespace}{ATTACHMENT_SEPARATOR}{ifname}")
 }
 
+/// The longest a network may hold an address for.
+///
+/// Not a number this store has an opinion about: it is the largest
+/// value the field a duration reaches a client in can carry. A longer
+/// lease would be one an operator could set, read back, and never see
+/// take effect.
+const LEASE_SECONDS_LIMIT: i64 = u32::MAX as i64;
+
+/// The shortest lease an answer can be derived from.
+///
+/// A client is told three numbers: how long the lease runs, and when
+/// to start renewing and rebinding, which the front-end derives as
+/// half and seven-eighths of it. Below two seconds both derived
+/// numbers come out as zero, which tells a client to renew
+/// immediately and gives it no interval to do it in -- an answer no
+/// client can act on, which is the same reason zero itself is
+/// refused. The arithmetic belongs to the front-end; the bound is
+/// here because this is where an operator's number arrives.
+const LEASE_SECONDS_FLOOR: i64 = 2;
+
+/// Refuse a lease time that is not a duration a client could be given.
+///
+/// Three bounds, and the column carries two of them: this is not a
+/// duplicate of those, because the constraint is what holds if
+/// something writes the table without coming through here, and it
+/// reports a violated CHECK rather than which value was wrong and why.
+/// An operator who typed a number gets the sentence; the database
+/// keeps the guarantee.
+///
+/// The floor is the bound the column does not carry, and saying so is
+/// the point of this paragraph. SQLite cannot tighten a CHECK on an
+/// existing column -- the constraint can only be replaced by rebuilding
+/// the table, which for this one means copying the table every other
+/// resource references -- and the value it would guard against is one
+/// no caller can reach, the control API being the only writer. What
+/// backs the floor instead is the front-end: the layer that derives
+/// the renewal and rebinding times refuses a lease it cannot derive
+/// them from, so a row of one second written around this function is
+/// not served to a client either.
+fn validate_lease_seconds(value: i64) -> Result<()> {
+    if value <= 0 {
+        return Err(Error::Invalid {
+            what: "lease time",
+            detail: format!("it is {value} seconds, and an address is held for some time"),
+        });
+    }
+
+    if value < LEASE_SECONDS_FLOOR {
+        return Err(Error::Invalid {
+            what: "lease time",
+            detail: format!(
+                "it is {value} seconds, and the renewal and rebinding times derived from a \
+                 lease that short are both zero; the shortest lease a client can be told \
+                 what to do with is {LEASE_SECONDS_FLOOR}"
+            ),
+        });
+    }
+
+    if value > LEASE_SECONDS_LIMIT {
+        return Err(Error::Invalid {
+            what: "lease time",
+            detail: format!(
+                "it is {value} seconds, and the longest a client can be told is \
+                 {LEASE_SECONDS_LIMIT}"
+            ),
+        });
+    }
+
+    Ok(())
+}
+
 /// Turn an address out of an INTEGER column back into an address.
 ///
 /// The column's CHECK constraints make an out-of-range value
@@ -254,7 +325,9 @@ impl<'a> Reading<'a> {
 /// Every network, by name.
 pub(crate) fn networks(conn: &Connection, epoch: &Epoch) -> Result<Vec<Network>> {
     let mut statement = conn
-        .prepare_cached("SELECT name, cursor_seq, written_by FROM network ORDER BY name")
+        .prepare_cached(
+            "SELECT name, lease_seconds, cursor_seq, written_by FROM network ORDER BY name",
+        )
         .map_err(storage("preparing a read of the networks"))?;
 
     let rows = statement
@@ -262,16 +335,19 @@ pub(crate) fn networks(conn: &Connection, epoch: &Epoch) -> Result<Vec<Network>>
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
             ))
         })
         .map_err(storage("reading the networks"))?;
 
     let mut networks = Vec::new();
     for row in rows {
-        let (name, cursor_seq, written_by) = row.map_err(storage("reading a network"))?;
+        let (name, lease_seconds, cursor_seq, written_by) =
+            row.map_err(storage("reading a network"))?;
         networks.push(Network {
             name,
+            lease_seconds,
             cursor: Cursor::from_row(epoch, cursor_seq)?,
             written_by,
         });
@@ -288,18 +364,19 @@ pub(crate) fn networks(conn: &Connection, epoch: &Epoch) -> Result<Vec<Network>>
 /// asked for or is not returned; there is no second value that could
 /// disagree with the first.
 pub(crate) fn network(conn: &Connection, epoch: &Epoch, name: &str) -> Result<Option<Network>> {
-    let found: Option<(i64, String)> = conn
+    let found: Option<(i64, i64, String)> = conn
         .query_row(
-            "SELECT cursor_seq, written_by FROM network WHERE name = ?1",
+            "SELECT lease_seconds, cursor_seq, written_by FROM network WHERE name = ?1",
             params![name],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(storage("reading a network"))?;
 
     match found {
-        Some((cursor_seq, written_by)) => Ok(Some(Network {
+        Some((lease_seconds, cursor_seq, written_by)) => Ok(Some(Network {
             name: name.to_owned(),
+            lease_seconds,
             cursor: Cursor::from_row(epoch, cursor_seq)?,
             written_by,
         })),
@@ -763,26 +840,35 @@ pub(crate) fn explain(
 // resource.
 // ---------------------------------------------------------------------
 
-/// Append the event for a network that now exists, and return the
-/// sequence it was given.
-fn event_network_created(
+/// Append the event for a network that now stands like this, and
+/// return the sequence it was given.
+///
+/// One function for the create and the change, because an event
+/// carries the whole post-state of a resource rather than a delta: the
+/// two writes leave the same state and so emit the same event, and a
+/// second function for the second write would be the place the two
+/// spellings diverged.
+fn event_network_written(
     transaction: &Transaction<'_>,
     writing: &Writing<'_>,
     name: &str,
+    lease_seconds: i64,
     now: i64,
 ) -> Result<i64> {
     transaction
         .execute(
             "INSERT INTO event_log (network, kind, resource_id, state, recorded_at, actor)
-             VALUES (?1, ?2, ?1, json_object('name', ?1, 'written_by', ?4), ?3, ?4)",
+             VALUES (?1, ?2, ?1,
+                     json_object('name', ?1, 'lease_seconds', ?4, 'written_by', ?5), ?3, ?5)",
             params![
                 name,
                 EventKind::Network.as_str(),
                 now,
+                lease_seconds,
                 writing.actor.as_recorded()
             ],
         )
-        .map_err(storage("recording that a network was created"))?;
+        .map_err(storage("recording the state a network was left in"))?;
 
     history::appended(transaction, writing.retention, now)
 }
@@ -1006,12 +1092,28 @@ pub(crate) fn create_network(
         .transaction()
         .map_err(storage("starting a transaction to create a network"))?;
 
-    let sequence = event_network_created(&transaction, writing, name, now)?;
-
-    transaction
-        .execute(
-            "INSERT INTO network (name, cursor_seq, written_by) VALUES (?1, ?2, ?3)",
-            params![name, sequence, writing.actor.as_recorded()],
+    // The row goes in before its event, which is the other way round
+    // from every other write here, and the lease time is why. An event
+    // carries the resource's whole post-state, and the lease time in
+    // that state is the schema's default rather than anything this
+    // call was given -- so the only honest way to name it is to let
+    // the database apply it and say what it applied. The alternative
+    // is a copy of the number in this file, which is a second place it
+    // could be changed and a second thing to keep in step with the
+    // migration that gives it to every network written before the
+    // column existed.
+    //
+    // The position is stamped on afterwards for the ordinary reason:
+    // it is the event's own sequence, and the event cannot be appended
+    // until there is a state for it to describe. Both statements are
+    // in one transaction, so the row with no position in it is a state
+    // nothing outside this function can read.
+    let lease_seconds: i64 = transaction
+        .query_row(
+            "INSERT INTO network (name, cursor_seq, written_by) VALUES (?1, 0, ?2)
+             RETURNING lease_seconds",
+            params![name, writing.actor.as_recorded()],
+            |row| row.get(0),
         )
         .map_err(|error| {
             if is_constraint(&error) {
@@ -1025,9 +1127,64 @@ pub(crate) fn create_network(
             }
         })?;
 
+    let sequence = event_network_written(&transaction, writing, name, lease_seconds, now)?;
+
+    transaction
+        .execute(
+            "UPDATE network SET cursor_seq = ?2 WHERE name = ?1",
+            params![name, sequence],
+        )
+        .map_err(storage(
+            "recording where a new network sits in the store's order",
+        ))?;
+
     transaction
         .commit()
         .map_err(storage("committing a new network"))?;
+
+    Ok(Cursor::new(
+        writing.epoch.clone(),
+        sequence_as_position(sequence)?,
+    ))
+}
+
+/// Change how long a network holds an address for, if it is still
+/// where the caller read it.
+pub(crate) fn update_network(
+    conn: &mut Connection,
+    writing: &Writing<'_>,
+    name: &str,
+    expected: &Cursor,
+    lease_seconds: i64,
+) -> Result<Cursor> {
+    validate_lease_seconds(lease_seconds)?;
+
+    let now = writing.clock.unix_seconds();
+    let transaction = conn
+        .transaction()
+        .map_err(storage("starting a transaction to configure a network"))?;
+
+    let current =
+        network(&transaction, writing.epoch, name)?.ok_or_else(|| Error::UnknownNetwork {
+            network: name.to_owned(),
+        })?;
+    if &current.cursor != expected {
+        return Err(Error::changed(NETWORK, name, expected, &current.cursor));
+    }
+
+    let sequence = event_network_written(&transaction, writing, name, lease_seconds, now)?;
+
+    transaction
+        .execute(
+            "UPDATE network SET lease_seconds = ?2, cursor_seq = ?3, written_by = ?4
+              WHERE name = ?1",
+            params![name, lease_seconds, sequence, writing.actor.as_recorded()],
+        )
+        .map_err(storage("configuring a network"))?;
+
+    transaction
+        .commit()
+        .map_err(storage("committing a network's configuration"))?;
 
     Ok(Cursor::new(
         writing.epoch.clone(),

@@ -5,12 +5,13 @@ client on a known interface with the content configured for that
 client. See `ARCHITECTURE.md` for the shape of the system and
 `docs/plans/` for what is being built and in what order.
 
-The Cargo workspace holds three crates: `teneral-store`, the
+The Cargo workspace holds four crates: `teneral-store`, the
 binding store; `teneral-api`, the control plane over it, whose
-schema, server and client are what another repository links; and
-`teneral`, the daemon and its debugging client. No front-end
-speaks DHCP or DNS yet, and the repository has no remote, so no CI
-lane has ever run. See `docs/development.md`,
+schema, server and client are what another repository links;
+`teneral-dhcp`, the DHCPv4 front-end, which depends on the store
+and not on the API; and `teneral`, the daemon and its debugging
+client. No front-end speaks DNS yet, and the repository has no
+remote, so no CI lane has ever run. See `docs/development.md`,
 `docs/binding-store.md` for the store and `docs/control-api.md` for
 the API.
 
@@ -34,7 +35,11 @@ and each of them has already been decided:
   that is to measure it. Each row carries a `Row id`, and a case in
   the differential rig cites the ids of the rows it supports; the
   rig fails a case that cites none, or one that is not in the
-  table.
+  table. A wire behaviour with no row is not shipped, and that
+  includes a length, an ordering or an addressing rule that merely
+  seems incidental.
+- **An interface in no network namespace is attached under the
+  namespace `root`.** Not `/`, which the store refuses in a name.
 - **There is no configuration file.** Teneral is configured
   through its API. This is load-bearing: it is what keeps the
   binding store the single source of truth, and it is what removed
@@ -51,6 +56,14 @@ and each of them has already been decided:
   networks holding the same address.** This is the project's
   central correctness property, and one network proves nothing
   about it.
+- **No test binds a listening socket in a test process that also
+  starts child processes.** Tests are threads of one process and
+  `Command::spawn` forks and execs inside one call, so for the
+  moment between the two a child holds a copy of every descriptor
+  that was open: a listener bound and dropped is still answering, in
+  that child, until it execs. `stale_socket` in
+  `teneral/tests/daemon.rs` makes a stale socket by killing a real
+  daemon instead, and says why.
 - **The store's interface is asynchronous, and the store owns the
   threads its blocking happens on.** A caller that reaches for
   `tokio::task::spawn_blocking` around a store call has misread the

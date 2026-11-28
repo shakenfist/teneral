@@ -489,9 +489,20 @@ message Network {
   Cursor cursor = 2;
   string written_by = 3;
 
-  // 4-11: held for what a network configures beyond its children --
-  // upstream forwarders, the zone suffix its names live under, and the
-  // lease duration it offers.
+  // How long, in seconds, an address this network gives out is held
+  // for. Seconds as an int64, the same spelling every other duration
+  // and instant on this wire uses, and never absent: a network nobody
+  // has configured carries the default the daemon's schema gave it, so
+  // a consumer has no unset case to decide what to do about.
+  //
+  // It is the one value a protocol answer needs that cannot be
+  // observed from the interface a request arrived on, which is why it
+  // is the one thing a network configures beyond its name.
+  int64 lease_seconds = 4;
+
+  // 5-11: held for the rest of what a network configures beyond its
+  // children -- upstream forwarders, and the zone suffix its names
+  // live under.
 }
 
 // An interface, in a namespace, belonging to exactly one network.
@@ -785,7 +796,24 @@ message CreateNetworkRequest {
 
   // 2-5: held for the configuration a network carries beyond its
   // name, so that creating one and then configuring it does not have
-  // to be two writes a consumer can get half-way through.
+  // to be two writes a consumer can get half-way through. The lease
+  // time is not among them today and a create that omitted it would
+  // not be half-configured: the schema's default is a lease the
+  // network can serve, so the two writes are "make it" and "change
+  // it" rather than "make it" and "finish it".
+}
+
+// Change how long a network holds the addresses it gives out.
+//
+// A whole value rather than a delta, and the position the caller read
+// the network at, because the two callers that would use this both
+// compute the new number from the one they read: without the position
+// the second would write over the first with nothing saying so, and
+// what it costs is every client that renewed in between.
+message UpdateNetworkRequest {
+  string name = 1;
+  Cursor expected = 2;
+  int64 lease_seconds = 3;
 }
 
 message DeleteNetworkRequest {
@@ -1079,12 +1107,13 @@ message WatchRequest {
 // decision about who may call it does not compile.
 message Request {
   oneof kind {
-    // Networks. 5-7 held for the operations a configured network
+    // Networks. 6-7 held for the operations a configured network
     // grows -- setting its forwarders, and reading them back.
     ListNetworksRequest list_networks = 1;
     GetNetworkRequest get_network = 2;
     CreateNetworkRequest create_network = 3;
     DeleteNetworkRequest delete_network = 4;
+    UpdateNetworkRequest update_network = 5;
 
     // Attachments. 13-15 held for the questions a datapath asks about
     // an interface it is about to answer on.

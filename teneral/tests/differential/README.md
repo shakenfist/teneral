@@ -8,22 +8,20 @@ recording is only worth citing if it is kept. The corpus is where
 they are kept, and every case names the row of
 `docs/provenance.md` it is evidence for.
 
-**The rig compares nothing yet, and it runs no dnsmasq, ever.** There
-is no DHCP or DNS code in this repository to put beside a captured
-reply, so every case is `pending` and the harness says so by name on
-every run. Nor is a dnsmasq started by `cargo test` the answer: a
-measurement is worth citing only if it was taken in a known
-configuration on a known kernel and written up, which is what a lab
-deploy gives and a test container does not. The phase that builds the
-DHCPv4 front end redeploys the lab playbook --
+**The rig runs no dnsmasq, ever.** Not in CI, not in a container, not
+on a developer's machine. A measurement is worth citing only if it was
+taken in a known configuration on a known kernel and written up, which
+is what a lab deploy gives and a test container does not. The lab is
 `playbooks/linux-bridge-lab-debian-13.yml` in the private
-`homelab-deployments-lfs` repository -- captures what it needs, and
-adds the measurements as provenance rows. **There is no second rig to
-write.**
+`homelab-deployments-lfs` repository, and what it measures arrives here
+as captured bytes and as rows of the provenance record. **There is no
+second rig to write.**
 
-What the harness does check is the citation: a case that names no
-provenance row, or names one that is not in the record, fails. That
-check is the point of the rig.
+What the harness always checks is the citation: a case that names no
+provenance row, or names one that is not in the record, fails. Where a
+subject is registered it also compares, field by field, against the
+configuration the case records -- and reports every difference rather
+than the first.
 
 `../../../docs/differential-rig.md` is the documentation: how a
 captured pair gets into the corpus lawfully, the two file formats,
@@ -37,8 +35,11 @@ case into a comparison. Read it before adding a case.
 | `main.rs` | The harness. `make test` runs it. |
 | `corpus.rs` | A case's metadata, and loading the corpus. |
 | `fixture.rs` | Decoding a captured frame from hex text. |
+| `frame.rs` | Reading a decoded frame apart into fields, for the comparison. |
+| `compare.rs` | The field-wise comparison, and the message each difference gets. |
 | `provenance.rs` | The row ids `docs/provenance.md` declares. |
-| `subject.rs` | What a captured request can be compared against. Empty. |
+| `subject.rs` | What a captured request can be compared against. |
+| `dhcpv4.rs` | The DHCPv4 front end as a subject: the real parser, the real decision layer and a real store. |
 | `corpus/` | One directory per captured exchange. |
 
 ## Two consequences of `harness = false`

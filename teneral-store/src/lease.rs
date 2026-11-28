@@ -763,7 +763,7 @@ pub(crate) fn renew_lease(
     let current =
         live_lease(&transaction, &reading, now, address)?.ok_or_else(|| Error::NotFound {
             kind: LEASE,
-            id: format!("a live lease on {address} in the network {network}"),
+            id: format!("{address} in the network {network} that is still live"),
         })?;
 
     if !holds(identity, &current) {

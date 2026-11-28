@@ -1,0 +1,49 @@
+-- Who wrote it, in the events recorded before an event said.
+--
+-- Applied to a database that already carries every resource, the
+-- tokens, the actor columns and the epoch's attribution. As with every
+-- migration here, this file is never edited once it has been released:
+-- a change to what it does is a new file beside it, because an edit
+-- here describes a database that only a fresh install has ever had.
+--
+-- The migration that taught this store to record who made each write
+-- backfilled the sentinel into the `written_by` column of all five
+-- resource tables and into `event_log.actor`, and left `event_log`'s
+-- own `state` alone. That is the gap this closes. Every event writer
+-- puts `written_by` into the state it composes, and the layer that
+-- turns a state back into a resource refuses one whose keys are not
+-- the keys this build writes -- deliberately, because a key one build
+-- writes and another drops is how two descriptions of one resource
+-- come to disagree. So an event recorded before that change is a state
+-- no current build can read, and a consumer resuming a watch across
+-- the upgrade is stopped by it until it ages out of the retained
+-- window.
+--
+-- The sentinel is the word the actor backfill chose, for the same
+-- absence. An event whose `actor` column reads `unrecorded` and whose
+-- state said nothing about a writer are one fact recorded twice, and
+-- this is what makes the second agree with the first. The word rather
+-- than an empty string, because an empty actor would read as a
+-- recorded fact -- a write made by nobody -- and every actor this code
+-- renders carries its kind and a colon, so a bare word cannot be
+-- confused with one.
+--
+-- What makes a migration rewriting recorded events honest here is that
+-- the value is not one anybody chose. It says that this store does not
+-- know who made the write, which is what was already true of these
+-- rows and what the columns beside them already say. A statement that
+-- wrote a real actor into the past would be this migration deciding
+-- who did something, which is a thing no migration here may do.
+--
+-- `json_insert` rather than a rebuilt object, which is the one detail
+-- worth checking rather than assuming: `written_by` is the last key in
+-- each of the five states an event writer composes and in each of the
+-- five a snapshot composes, and a snapshot is compared against the
+-- event of the same write as text. Appending therefore puts the key
+-- exactly where both of them put it. The `IS NULL` test is what keeps
+-- this to the events that are missing it, and a row with no state is a
+-- deletion -- that being the post-state of something removed -- which
+-- has no writer to name.
+UPDATE event_log
+   SET state = json_insert(state, '$.written_by', 'unrecorded')
+ WHERE state IS NOT NULL AND json_extract(state, '$.written_by') IS NULL;

@@ -10,14 +10,31 @@ sections say what is waiting on that. The
 [implementation plan](plans/PLAN-teneral-implementation.md) tracks
 the rest.
 
-The workspace has three members. `teneral-store` is the binding
+The workspace has four members. `teneral-store` is the binding
 store; [binding-store.md](binding-store.md) describes what it holds
 and why. `teneral-api` is the control plane over it -- the schema,
 the server and the client -- and [control-api.md](control-api.md)
-describes it. `teneral` is the daemon, with a few client
-subcommands for debugging, and it carries the differential rig.
-Every `make` target below acts on the whole workspace, so none of
-this is per-crate.
+describes it. `teneral-dhcp` is the DHCPv4 front-end, depending on
+the store and not on the API, and [dhcpv4.md](dhcpv4.md) describes
+it. `teneral` is the daemon, with client subcommands that reach every
+operation in the schema, and it carries the differential rig. Every
+`make` target below acts on the whole workspace, so none of this is
+per-crate.
+
+`make test` runs in a container with `--network none`, as the invoking
+uid and with no added capabilities. It cannot open a socket below the
+IP layer -- `socket(AF_PACKET, ...)` returns `EPERM` -- and it has one
+interface, loopback. So the half of the datapath that reaches a client
+with no address is not exercised by the repository's own test target:
+everything that decides what a client is told sits above that line and
+is tested, and the reply path is proved in the lab with a real client.
+What the test target *can* do is bind a privileged port. The container
+has a network namespace of its own, where
+`net.ipv4.ip_unprivileged_port_start` is zero, so an unprivileged uid
+binds port 67 there. The daemon's `--dhcp-port` exists because a test
+must not take a well-known port -- it would collide with the next test
+and with whatever else is on the machine -- and not because it may not.
+Do not read the host's setting of that sysctl as the container's.
 
 ## Rust is built in Docker, not on the host
 
@@ -101,6 +118,7 @@ The hooks today:
 |------|---------------|
 | `rust-check` | The workspace, when a `.rs` file changed: `cargo fmt --all --check`, then `cargo clippy --workspace --all-targets -- -D warnings`. |
 | `cargo-deny` | `Cargo.toml`, `Cargo.lock` and `deny.toml`, for licences, bans and sources -- so a change to the policy is checked by the policy. |
+| `wrapped-strings` | The `.rs` files that changed, for a string literal wrapped across source lines without the `\` that joins them -- which leaves a run of spaces in the middle of a user-visible message that nothing else in this suite can see. |
 | `actionlint` | The workflow files, including their embedded shell. Its runner-label list is `.github/actionlint.yaml`. |
 | `trailing-whitespace`, `end-of-file-fixer`, `check-yaml`, `check-merge-conflict` | Everything, except that the two rewriting hooks skip weAudit's review marks under `.vscode/`, which are generated without a trailing newline. |
 | `shellcheck` | Shell under `scripts/` and `tools/`, with `-x` so a sourced sibling is followed. |
@@ -113,6 +131,19 @@ on the host and there is one description of how a container is
 started. Each is gated on the files it has an opinion about: starting
 a container costs seconds, and a hook that does it on every unrelated
 commit is a hook people learn to skip.
+
+`wrapped-strings` is the one hook here that reads neither Rust as a
+language nor a file as a whole: it looks for a run of spaces between
+two word characters inside a `.rs` file, which is what a literal
+wrapped without its `\` leaves behind, and which no formatter
+produces. Two such literals reached one pull request -- the detail of
+an API refusal and a line of the daemon's log, both user-visible text
+in a stream documented as one line per message -- and neither rustfmt,
+clippy nor the tests over those messages noticed, because a test that
+asserts a message `contains` a value is satisfied by a message with a
+gap in it. A line that aligns something inside a literal on purpose
+and trips the check anyway says `aligned-on-purpose` in a comment on
+the same line.
 
 One check is run by hand rather than hooked.
 `scripts/check-store-trait.sh` reads the binding store's traits and

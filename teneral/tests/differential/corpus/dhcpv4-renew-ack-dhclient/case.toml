@@ -1,0 +1,117 @@
+# One captured DHCPv4 exchange. See ../../README.md for what a case
+# is, and ../../../../../docs/differential-rig.md for how a capture
+# gets into this corpus lawfully.
+
+summary = "A renewal a client sent on its own at T1, and the ACK that answered it."
+
+# The docs/provenance.md rows these bytes are the evidence for, by
+# row id. The harness fails this case if the list is empty or if a
+# row id is not in that file.
+provenance = [
+    "dhcp-reply-padded-to-bootp-minimum",
+    "dhcp-reply-names-itself-as-next-server",
+    "dhcp-ack-echoes-the-clients-host-name",
+    "dhcp-ack-echoes-ciaddr",
+    "dhcp-renewal-lowers-t1-and-t2",
+]
+
+request = "request.hex"
+response = "response.hex"
+
+[capture]
+observed = "2026-11-27"
+server = "dnsmasq 2.91-1+deb13u2, Debian 13.8, kernel 6.12.118+deb13-amd64, serving --dhcp-range=tag:gw-n1,10.0.0.100,10.0.0.150,2m and --dhcp-range=tag:gw-n2,10.0.0.200,10.0.0.250,2m on gw-n1 and gw-n2 with --bind-dynamic"
+client = "ISC dhclient 4.4.3-P1 in a client endpoint of the bridge, address flushed first, left running until it renewed on its own"
+link_type = "EN10MB"
+# The capture file is kept outside this repository: a pcap is not an
+# artifact a reviewer can read, and the frames that matter are here as
+# hex text instead. The digest ties the two back together.
+pcap = "lbrlab-1795723089-dnsmasq-renew-br-n1.pcap"
+pcap_sha256 = "97c772bb37b1d61cc6f7425981dd86c4305e4b18f0472eb371d4825e65815dee"
+frames = "5 and 6 of 8"
+write_up = "linux-bridge-lab.md, experiment 6"
+request_bytes = 342
+response_bytes = 358
+
+[network]
+# The configuration the capture was taken against, as data: a DHCP
+# reply is not a function of the request alone.
+name = "n1"
+interface = "gw-n1"
+server_address = "10.0.0.1"
+prefix_length = 24
+lease_seconds = 120
+
+[[network.ranges]]
+name = "pool"
+first = "10.0.0.100"
+last = "10.0.0.150"
+
+[[network.leases]]
+address = "10.0.0.128"
+mac = "fa:16:3e:00:01:0a"
+
+[comparison]
+subject = "dhcpv4"
+status = "compared"
+fields = [
+    "op",
+    "htype",
+    "hlen",
+    "hops",
+    "xid",
+    "secs",
+    "flags",
+    "giaddr",
+    "chaddr",
+    "sname",
+    "file",
+    "yiaddr",
+    "option-53",
+    "option-54",
+    "option-51",
+    "option-1",
+    "option-28",
+    "option-3",
+    "option-6",
+    "ip-source",
+    "ip-destination",
+]
+agree = []
+diverges = [
+    "siaddr",
+    "ciaddr",
+    "option-codes",
+    "option-58",
+    "option-59",
+    "payload-length",
+]
+asserts = """
+A renewal is a REQUEST a client sends by itself when half its lease has
+gone: unicast to the server, `ciaddr` set to the address it holds, no
+server identifier and no requested-address option. The lease time here
+is two minutes rather than twelve hours for one reason only -- a
+twelve-hour lease renews after six, and nothing in a lab waits that
+long -- which is why a case carries its configuration instead of
+assuming one.
+
+The network therefore holds the lease the client is renewing, recorded
+as the preceding exchange of the same capture granted it. teneral reads
+it, renews it, and acknowledges the same address: `yiaddr` is compared
+directly here rather than being asserted to agree with the destination,
+because a renewal is the one case where the address is the client's
+choice and not the server's.
+
+Four divergences, and two of them are the interesting ones. dnsmasq
+echoes `ciaddr` into its acknowledgement where teneral sends zero; RFC
+2131's table of fields permits either. And dnsmasq's T1 and T2 on a
+renewal are *below* half and seven-eighths of the lease, by a few
+seconds that grew between successive renewals -- 60 and 105 on the
+first grant, 56 and 101 on this renewal, 53 and 98 on the next -- while
+teneral sends exactly the fractions every time. The mechanism behind
+that drift was not established, and establishing it would mean reading
+dnsmasq, which this corpus may not do. The other two are `siaddr` and
+the host name, as in every other case -- and the host name is also the
+whole of why the lengths differ, both replies being at or above the
+300-octet floor RFC 1542 section 2.1 makes a receiver enforce.
+"""

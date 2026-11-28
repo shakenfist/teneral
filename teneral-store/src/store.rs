@@ -264,6 +264,36 @@ pub trait BindingStore: Send + Sync {
     /// name.
     async fn create_network(&self, actor: &Actor, network: &str) -> Result<Cursor>;
 
+    /// Set how long `network` holds the addresses it gives out, in
+    /// seconds, when it is still at `expected`.
+    ///
+    /// Serves demands 1, 3 and 4. It is the whole of what a network
+    /// configures beyond its name and its children, and the reason
+    /// there is anything at all is that a duration cannot be observed.
+    /// A front-end derives the rest of what its answer carries from
+    /// the interface a request arrived on, reading it afresh each
+    /// time; how long a client keeps an address is a decision somebody
+    /// made, so it lives here, where everything else this store
+    /// answers from lives.
+    ///
+    /// The compare-and-set is on the network's own position rather
+    /// than on nothing, and the difference shows when two callers
+    /// compute a new value from one they read: the second would write
+    /// over the first with nothing saying so, and what it would cost
+    /// is every client that renewed in between being told the wrong
+    /// number for as long as it holds its address.
+    ///
+    /// A network nobody has configured answers with the schema's
+    /// default, so there is no unset state for a caller to handle and
+    /// no create-then-configure pair for one to get half-way through.
+    async fn update_network(
+        &self,
+        actor: &Actor,
+        network: &str,
+        expected: &Cursor,
+        lease_seconds: i64,
+    ) -> Result<Cursor>;
+
     /// Remove the network `network`, which must still be at `expected`.
     ///
     /// Serves demands 1, 3 and 4. A network that still has interfaces

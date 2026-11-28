@@ -20,15 +20,20 @@
 #      documents an operation which was renamed or never built tells a
 #      consumer to send a request the daemon will refuse as unknown.
 #
-# An operation is "named on the page" for the first rule when its name
-# appears anywhere in backticks. For the second rule the page's
-# operations are the first cell of each row of a table in the section
-# headed "The operations", up to the next section: that section is the
-# one place the page enumerates them, and reading every backticked word
-# on the page instead would take capabilities, refusal codes and flags
-# for operations. The section's own title is therefore load-bearing; if
-# it is renamed this script reports that it found no operations there,
-# rather than passing.
+# Both rules read the page the same way: its operations are the first
+# cell of each row of a table in the section headed "The operations",
+# up to the next section. That section is the one place the page
+# enumerates them, and it is where the capability and the scope rule
+# live -- so an operation named only in a passing sentence elsewhere
+# satisfies neither rule, which is the point. An earlier version of
+# this script took "named anywhere in backticks" for the first rule and
+# so passed a schema operation whose table row had been deleted while
+# a paragraph still mentioned it: the reader it was written to protect
+# reads the table. Reading every backticked word on the page for the
+# second rule would, in the other direction, take capabilities,
+# refusal codes and flags for operations. The section's own title is
+# therefore load-bearing; if it is renamed this script reports that it
+# found no operations there, rather than passing.
 #
 # Re-runnable, and run by hand rather than from pre-commit, like
 # `check-store-trait.sh`: it parses a schema and a page with awk, which
@@ -90,8 +95,8 @@ echo "$schema: $(echo "$in_schema" | wc -l) operation(s)"
 echo "$page: $(echo "$on_page" | wc -l) operation(s) enumerated"
 
 while read -r name; do
-    if ! grep -q -F "\`$name\`" "$page"; then
-        printf '  %-30s FAIL  in the schema, and the page never names it\n' "$name"
+    if ! grep -q -x -F "$name" <<< "$on_page"; then
+        printf '  %-30s FAIL  in the schema, and the page does not enumerate it\n' "$name"
         failed=$((failed + 1))
     fi
 done <<< "$in_schema"

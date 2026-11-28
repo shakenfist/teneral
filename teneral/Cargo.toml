@@ -28,6 +28,12 @@ workspace = true
 # version requirement are in the workspace manifest.
 teneral-api = { workspace = true }
 
+# The DHCPv4 front-end: its wire, the question it asks the store and
+# the sockets it answers on. The daemon opens one socket per interface
+# an operator named and hands each datagram to this crate; every
+# judgement about what a client is told is made inside it.
+teneral-dhcp = { workspace = true }
+
 # The store the daemon opens. The daemon names it directly, rather
 # than reaching it through the control plane, because opening it with
 # the operator's retention is the one thing that happens before any
@@ -67,8 +73,14 @@ clap = { version = "4.6.10", default-features = false, features = ["std", "deriv
 #                      respectively.
 #   `macros`           `select!`, to wait for whichever arrives first.
 #   `time`             the bound on how long shutdown lets open
-#                      streams finish before giving up on them.
-tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-thread", "signal", "macros", "time"] }
+#                      streams finish before giving up on them, and
+#                      the interval the lease sweeper runs on.
+#   `sync`             the channel that tells each DHCP socket's task
+#                      and the sweeper to stop, so that the sockets
+#                      are closed and the last sweep finished before
+#                      the store is dropped rather than being
+#                      cancelled with the runtime.
+tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-thread", "signal", "macros", "time", "sync"] }
 
 # Only the differential rig reads these. `toml` is the format cargo
 # itself reads, which is the reason a case's metadata is written in

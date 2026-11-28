@@ -326,12 +326,37 @@ operation added without a decision about its network does not compile.
 
 ### Networks
 
+A network is a name, the children configured under it, and one value
+of its own: `lease_seconds`, how long an address it gives out is held
+for. There is one value and not a set of them because this is the only
+thing a protocol answer needs that cannot be observed -- a front-end
+reads the address and the mask of the interface a request arrived on
+for each request and remembers neither, and a duration is a decision
+somebody made rather than something to read. Every network has one: a
+network created without it carries the daemon's own default, so there
+is no unset state to handle and no create-then-configure pair to get
+half-way through.
+
 | Operation | Capability | Scope rule |
 |-----------|------------|------------|
 | `list_networks` | read | Filtered: the collection holds only the networks the caller may reach. |
 | `get_network` | read | Named network. |
 | `create_network` | write | Named network: a scoped token may create only a network its scope names. |
+| `update_network` | write | Named network. Needs the expected cursor. |
 | `delete_network` | write | Named network. Needs the expected cursor. |
+
+`update_network` sets the lease time to a whole value rather than
+adjusting it, and takes the position the caller read the network at. A
+caller that computed a new lease time from the one it read and wrote it
+without the position would write over somebody else's change with
+nothing saying so, and what that would cost is every client renewing in
+between being told the wrong number for as long as it holds its
+address. Three lease times are refused as `INVALID_REQUEST`: zero or
+less, which is not a duration; anything below two seconds, because the
+renewal and rebinding times a client is told are half and
+seven-eighths of the lease and both come out as zero below that; and
+anything too large to be sent to a client at all, the field it travels
+in being 32 bits wide.
 
 ### Attachments
 
@@ -767,18 +792,30 @@ is the reference.
 | `--max-live-views` | 64 | How many concurrent reads. Each costs the store a thread. Lower protects the machine; higher serves more simultaneous consumers. |
 | `--max-connections` | 256 | A connection is a task, so this is what stops an accept loop becoming unbounded memory. A daemon at the bound stops taking connections off the queue rather than accepting and idling them. |
 | `--heartbeat-seconds` | 15 | How soon a consumer notices a dead connection, against how much a quiet stream chatters. |
+| `--sweep-interval` | 86400 (a day) | How often lapsed leases are swept, in seconds. One interval sets two things that cannot be set apart: how soon a consumer is told an address was given up, and how long a client that has been away keeps getting its old address back. A day optimises for the second, because nothing in the store waits for the expiry event -- every read evaluates expiry against the clock -- while the lapsed row is the only source of address stability the daemon has. Lower it where a consumer needs expiries promptly and the stickiness does not matter. |
+| `--dhcp-interface` | none | An interface to serve DHCPv4 on, repeatable. It must already be attached to a network, under the namespace `root`, and an interface no network has claimed is a refusal to start rather than a warning. With none given the daemon serves no DHCP, binds no privileged port and opens no socket below the IP layer. Naming the interfaces is deliberate: a daemon that served every attachment the store held would have turned a configuration write into a privileged action. |
+| `--dhcp-port` | 67 | The port DHCPv4 is served on. The protocol's, and a client cannot be told to use another, so this exists for a test that needs a port an unprivileged process may bind rather than as a second place to configure a deployment. |
 
-All numeric flags must be at least 1. The daemon stops cleanly on `SIGINT` and
+All numeric flags must be at least 1, and an interval further ahead than this
+machine's monotonic clock can name is refused by name before the daemon creates
+anything. The daemon stops cleanly on `SIGINT` and
 `SIGTERM`: it stops accepting, tells every open stream it is stopping, waits up
 to five seconds for connections to finish with the store, and then closes the
 store. It logs one line per message to standard error and uses no logging
 framework; capturing and filtering that is left to whatever runs the daemon.
-There is also **no sweeper**: nothing in the daemon removes an expired lease, and
-`list_leases` includes expired ones and says so.
+A timer sweeps lapsed leases every `--sweep-interval` seconds, writing one
+expiry event per lease it removes and one log line per network it removed
+anything from; a sweep that removed nothing logs nothing. Nothing is swept at
+startup, so that a restart does not become the bound on the stickiness above.
+Until a sweep runs, `list_leases` includes expired leases and says so.
 
-The client subcommands -- `get`, `explain`, `diagnostics`, `mint-token`,
-`mint-epoch` and `watch` -- are each one call over the client and a printing of
-the answer, and hold no logic the server should hold. A token's secret is read
+The debugging client reaches every operation in this document, and a test
+asserts that it does by enumerating the schema rather than by counting
+subcommands, so an operation that arrives with no way to call it fails a test
+instead of being found a phase later. `teneral --help` is the reference for the
+spelling of each; reads are nouns under `get`, `list` and `lookup`, writes are
+verbs. Each is one call over the client and a printing of the answer, and holds
+no logic the server should hold. A token's secret is read
 from the first line of standard input with `--token-stdin`, or from the
 `TENERAL_TOKEN` environment variable; with neither, the connection is made as the
 owning peer. There is deliberately no flag that takes the secret itself, because

@@ -456,6 +456,11 @@ pub fn every_scoped_request(network: &str) -> Vec<request::Kind> {
         request::Kind::CreateNetwork(proto::CreateNetworkRequest {
             name: network.to_owned(),
         }),
+        request::Kind::UpdateNetwork(proto::UpdateNetworkRequest {
+            name: network.to_owned(),
+            expected: Some(position.clone()),
+            lease_seconds: 3_600,
+        }),
         request::Kind::DeleteNetwork(proto::DeleteNetworkRequest {
             name: network.to_owned(),
             expected: Some(position.clone()),
